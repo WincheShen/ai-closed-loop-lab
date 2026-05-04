@@ -19,11 +19,11 @@ jobs:
       - name: Checkout ai-closed-loop-lab
         uses: actions/checkout@v4
 
-      - name: Checkout tradingAgents_neo
+      - name: Checkout TradingAgents
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/tradingAgents_neo
-          token: ${{ secrets.PAT_TOKEN }} # 需要你在 GitHub 设置一个访问该私有库的 Token
+          repository: ${{ github.repository_owner }}/TradingAgents
+          token: ${{ secrets.PAT_TOKEN }}
           path: libs/tradingAgents_neo
 
       - name: Log in to GitHub Container Registry
