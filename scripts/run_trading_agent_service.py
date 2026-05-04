@@ -31,11 +31,15 @@ logging.basicConfig(
 
 
 def main() -> None:
-    port = int(os.environ.get("TAS_PORT", "8001"))
-    host = os.environ.get("TAS_HOST", "127.0.0.1")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default=os.environ.get("TAS_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("TAS_PORT", "8001")))
+    args = parser.parse_args()
+
     uvicorn.run(
         "trading_agent_service.api.server:app",
-        host=host, port=port, reload=False,
+        host=args.host, port=args.port, reload=False,
     )
 
 
