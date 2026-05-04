@@ -1,0 +1,58 @@
+# 选股规则配置 v1
+# 修改后请通过 git 提交以保留版本历史（FR-1.2 规则版本化）
+version: 1
+
+rules:
+  - id: not_st
+    name: 排除 ST
+    enabled: true
+    weight: 0.5
+    description: 过滤 ST/*ST 股票
+
+  - id: market_cap_range
+    name: 市值过滤
+    enabled: true
+    weight: 0.5
+    params:
+      min_yi: 50
+      max_yi: 3000
+    description: 市值 50 - 3000 亿，避免微盘和超大盘
+
+  - id: in_hot_sector
+    name: 所属热门板块
+    enabled: true
+    weight: 2.0
+    params:
+      hot_sectors: []   # 运行时由 daily_scan 动态注入
+    description: 行业归属当日 Top5 热门板块
+
+  - id: volume_breakout
+    name: 放量上涨
+    enabled: true
+    weight: 1.5
+    params:
+      min_change_pct: 3.0
+      min_turnover_rate: 5.0
+
+  - id: strong_turnover
+    name: 成交活跃
+    enabled: true
+    weight: 1.0
+    params:
+      min_turnover_yi: 5.0
+
+  - id: main_fund_inflow
+    name: 主力净流入
+    enabled: true
+    weight: 1.5
+    params:
+      min_inflow_wan: 5000
+
+  - id: reasonable_valuation
+    name: 估值合理
+    enabled: false   # 默认关闭，A股短线选股估值非主因
+    weight: 0.5
+    params:
+      pe_min: 0
+      pe_max: 80
+      pb_max: 10

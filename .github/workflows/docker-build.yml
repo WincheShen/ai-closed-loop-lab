@@ -1,0 +1,44 @@
+name: Build and Push TradingAgent Image
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout ai-closed-loop-lab
+        uses: actions/checkout@v4
+
+      - name: Checkout tradingAgents_neo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/tradingAgents_neo
+          token: ${{ secrets.PAT_TOKEN }} # 需要你在 GitHub 设置一个访问该私有库的 Token
+          path: libs/tradingAgents_neo
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # 镜像名将类似于：ghcr.io/yourname/ai-closed-loop-lab/trading-agent:latest
+          tags: |
+            ghcr.io/${{ github.repository }}/trading-agent:latest
+            ghcr.io/${{ github.repository }}/trading-agent:${{ github.sha }}

@@ -1,0 +1,42 @@
+# =============================================================================
+# AI 闭环实验室 — 社交媒体账号配置
+# =============================================================================
+
+# 小红书账号配置
+xiaohongshu:
+  XHS_02:  # 股票分析师人格（对应 Social-media-automation 的 XHS_02）
+    enabled: true
+    persona: "股票分析师沈经理"
+    track: "finance"
+    review_mode: "auto"       # auto=自动发布, review=人工审核, scheduled=定时
+    xhs_cli:
+      account: "xhs_02"
+      port: 9222             # Chrome CDP 端口
+    schedule:
+      - time: "10:00"        # 早盘收盘后
+        content_type: "trade_summary"
+      - time: "15:30"        # 收盘后
+        content_type: "daily_recap"
+
+  XHS_03:  # 老年生活家（辅助人格，可发布投资心得）
+    enabled: false
+    persona: "老年生活家"
+    track: "lifestyle"
+    review_mode: "review"
+    xhs_cli:
+      account: "xhs_03"
+      port: 9223
+
+# 抖音账号配置（预留）
+douyin:
+  DY_01:
+    enabled: false
+    persona: "沈经理"
+    review_mode: "review"
+
+# 微信公众号配置（预留）
+wechat:
+  WX_01:
+    enabled: false
+    persona: "沈经理的投资日记"
+    review_mode: "review"

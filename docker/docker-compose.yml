@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  ai-lab:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ai-closed-loop-lab
+    volumes:
+      - ../data:/app/data
+      - ../reports:/app/reports
+      - ../.env:/app/.env:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    # 使用 host 网络以便访问本地 Chrome CDP (小红书发布)
+    network_mode: host
+    # 或映射端口
+    # ports:
+    #   - "8000:8000"
+
+  # 可选：独立运行的 Web Dashboard
+  dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dashboard
+    container_name: ai-lab-dashboard
+    volumes:
+      - ../data:/app/data:ro
+      - ../reports:/app/reports:ro
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_PATH=/app/data/central_brain.db
+    profiles:
+      - dashboard

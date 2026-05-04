@@ -1,0 +1,89 @@
+# =============================================================================
+# AI 闭环实验室 — 交易规则配置
+# =============================================================================
+
+# --- 资金管理 ---
+capital:
+  initial: 300000           # 初始资金 (元)
+  max_position_pct: 0.10    # 单票最大仓位 10%
+  max_total_position: 0.50  # 总仓位上限 50%
+  min_cash_reserve: 0.10    # 最低现金储备 10%
+
+# --- 买入规则 ---
+entry_rules:
+  strategies:
+    - name: "20日线回踩不破"
+      enabled: true
+      weight: 0.20
+      conditions:
+        - "收盘价 > MA20"
+        - "前一日最低价触及或跌破 MA20"
+        - "当日收阳线"
+      min_score: 0.70
+
+    - name: "15分钟放量突破"
+      enabled: true
+      weight: 0.25
+      conditions:
+        - "15分钟成交量 > 前5根K线均量 * 1.5"
+        - "价格突破前高"
+      min_score: 0.75
+
+    - name: "MACD金叉"
+      enabled: true
+      weight: 0.15
+      conditions:
+        - "DIF 上穿 DEA"
+        - "MACD柱状线由负转正"
+      min_score: 0.65
+
+    - name: "布林带中轨反弹"
+      enabled: true
+      weight: 0.15
+      conditions:
+        - "价格触及或跌破布林带中轨"
+        - "快速反弹站稳中轨"
+      min_score: 0.65
+
+    - name: "突破前高"
+      enabled: true
+      weight: 0.25
+      conditions:
+        - "收盘价突破近期前高"
+        - "成交量同步放大"
+      min_score: 0.80
+
+# --- 风控规则 ---
+risk_management:
+  stop_loss:
+    default_pct: 0.05       # 默认止损 5%
+    atr_multiplier: 2.0     # ATR倍数止损 (可选)
+    trailing_stop: false    # 是否启用移动止损
+
+  take_profit:
+    target_pct: 0.08        # 目标收益 8%
+    partial_exit:           # 分批止盈
+      - at_pct: 0.05      # 5%时止盈 30%
+        ratio: 0.30
+      - at_pct: 0.08      # 8%时止盈 40%
+        ratio: 0.40
+      - at_pct: 0.12      # 12%时止盈剩余
+        ratio: 1.00
+
+  max_holding_days: 5      # 最大持仓天数（超期强制平仓）
+
+# --- 选股过滤 ---
+filter:
+  min_qlib_score: 0.65     # Qlib Alpha 最低分数
+  min_market_cap: 50e8    # 最小市值 50亿
+  exclude_st: true        # 排除 ST 股
+  exclude_new: true       # 排除上市不满 60 天的新股
+
+# --- 执行设置 ---
+execution:
+  trading_hours:
+    pre_market: "09:15-09:25"   # 集合竞价
+    morning: "09:30-11:30"      # 上午
+    afternoon: "13:00-14:57"     # 下午 (14:57-15:00为收盘集合竞价)
+  order_type: "limit"           # 默认限价单
+  price_tolerance: 0.005        # 价格容忍度 0.5%

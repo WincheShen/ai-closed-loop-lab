@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+# Unified developer helper for AI Closed Loop Lab
+# Usage:
+#   ./scripts/dev up
+#   ./scripts/dev down
+#   ./scripts/dev restart
+#   ./scripts/dev scan
+#   ./scripts/dev events
+#   ./scripts/dev metrics
+#   ./scripts/dev test
+
+set -e
+
+CMD=$1
+
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+start() {
+    echo "Starting services..."
+    ./scripts/start_all.sh
+}
+
+stop() {
+    echo "Stopping services..."
+    pkill -f run_trading_agent_service.py || true
+    pkill -f run_webhook_listener.py || true
+    pkill -f run_event_monitor.py || true
+    pkill -f run_strategy_metrics.py || true
+    echo "Done."
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+scan() {
+    echo "Running daily workflow..."
+    python scripts/run_daily_workflow.py
+}
+
+events() {
+    echo "Opening recent events..."
+    curl -s http://localhost:8010/events/recent | python -m json.tool
+}
+
+metrics() {
+    echo "Fetching strategy metrics..."
+    curl -s http://localhost:8011/strategy/summary | python -m json.tool
+}
+
+tests() {
+    echo "Running test suite..."
+    pytest -v
+}
+
+case "$CMD" in
+    up)
+        start
+        ;;
+    down)
+        stop
+        ;;
+    restart)
+        restart
+        ;;
+    scan)
+        scan
+        ;;
+    events)
+        events
+        ;;
+    metrics)
+        metrics
+        ;;
+    test)
+        tests
+        ;;
+    *)
+        echo "Usage: ./scripts/dev {up|down|restart|scan|events|metrics|test}"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+python-dotenv
+httpx
+pandas
+pyyaml
+akshare
+Pillow
+sqlite-vec
+# langchain-openai (optional, for tradingagents)
+# langchain-google-genai
+# langgraph
