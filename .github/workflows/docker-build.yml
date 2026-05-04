@@ -38,7 +38,7 @@ jobs:
         with:
           context: .
           push: true
-          # 镜像名将类似于：ghcr.io/yourname/ai-closed-loop-lab/trading-agent:latest
+          # GHCR 镜像名必须全小写
           tags: |
-            ghcr.io/${{ github.repository }}/trading-agent:latest
-            ghcr.io/${{ github.repository }}/trading-agent:${{ github.sha }}
+            ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+            ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:${{ github.sha }}
