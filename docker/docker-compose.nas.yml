@@ -11,9 +11,9 @@ services:
     ports:
       - "8002:8002"
     volumes:
-      - ../data:/app/data
-      - ../logs:/app/logs
-      - ../.env:/app/.env:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
@@ -29,9 +29,9 @@ services:
     image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
     container_name: ai-lab-scheduler
     volumes:
-      - ../data:/app/data
-      - ../logs:/app/logs
-      - ../.env:/app/.env:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
@@ -51,9 +51,9 @@ services:
     ports:
       - "8003:8002"
     volumes:
-      - ../data:/app/data
-      - ../logs:/app/logs
-      - ../.env:/app/.env:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
