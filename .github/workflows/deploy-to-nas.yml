@@ -24,7 +24,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment || 'production' }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -44,70 +44,58 @@ jobs:
         env:
           NAS_HOST: ${{ secrets.NAS_HOST }}
           NAS_USER: ${{ secrets.NAS_USER }}
-          NAS_PATH: ${{ secrets.NAS_PATH || '/volume1/docker/ai-lab' }}
+          NAS_PATH: ${{ secrets.NAS_PATH || '/volume1/docker/ai-lab-web' }}
         run: |
           echo "🚀 部署到 NAS ($NAS_HOST)..."
-          
+
           # 1. 确保远程目录存在
           ssh $NAS_USER@$NAS_HOST "mkdir -p $NAS_PATH/{data,logs}"
-          
+
           # 2. 上传 docker-compose 配置
           scp docker/docker-compose.nas.yml $NAS_USER@$NAS_HOST:$NAS_PATH/
-          
-          # 3. 检查 .env 是否存在，不存在则创建模板
+
+          # 3. 检查 .env 是否存在，不存在则提醒
           ssh $NAS_USER@$NAS_HOST "
             if [ ! -f $NAS_PATH/.env ]; then
-              echo '⚠️ .env 文件不存在，创建模板...'
-              cat > $NAS_PATH/.env << 'ENVFILE'
-          # AI Lab NAS 环境配置
-          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
-          OPENAI_API_VERSION=2025-03-01-preview
-          DB_PATH=/app/data/central_brain.db
-          WEBHOOK_AUTO_SMA_DISPATCH=false
-          ENVFILE
-              echo '✅ 已创建 .env 模板，请手动编辑添加其他配置'
+              echo '⚠️ .env 文件不存在，请手动创建'
+              echo '参考: https://github.com/WincheShen/ai-closed-loop-lab/blob/main/docs/nas-deployment.md'
             fi
           "
-          
-          # 4. 拉取镜像并启动
+
+          # 4. 拉取镜像并启动（使用 sudo 因为 NAS 非 root 用户需要权限）
           ssh $NAS_USER@$NAS_HOST "
             cd $NAS_PATH
             echo '🐳 拉取最新镜像...'
-            docker pull ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
-            
+            sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+
             echo '🚀 启动服务...'
-            docker-compose -f docker-compose.nas.yml down webhook 2>/dev/null || true
-            docker-compose -f docker-compose.nas.yml up -d webhook
-            
+            sudo docker-compose -f docker-compose.nas.yml down 2>/dev/null || true
+            sudo docker-compose -f docker-compose.nas.yml up -d webhook
+
             echo '🧹 清理旧镜像...'
-            docker image prune -f
-          "
-          
-          # 5. 健康检查
-          echo ""
-          echo "⏳ 等待服务启动..."
-          sleep 5
-          
-          MAX_RETRY=5
-          RETRY=0
-          while [ $RETRY -lt $MAX_RETRY ]; do
-            if curl -s --max-time 5 http://$NAS_HOST:8002/health > /dev/null 2>&1; then
-              echo "✅ 服务启动成功！"
-              echo ""
-              echo "📋 访问地址："
-              echo "   - 交易记录管理: http://$NAS_HOST:8002/ui/"
-              echo "   - 策略选股:     http://$NAS_HOST:8002/ui/strategy.html"
-              exit 0
-            fi
-            RETRY=$((RETRY+1))
-            echo "⏳ 等待服务就绪... ($RETRY/$MAX_RETRY)"
+            sudo docker image prune -f
+
+            # 健康检查（在 NAS 本地执行，因为 GitHub 无法访问内网）
+            echo '⏳ 等待服务启动...'
             sleep 5
-          done
-          
-          echo "⚠️ 服务可能尚未完全启动，请手动检查日志："
-          echo "   ssh $NAS_USER@$NAS_HOST 'docker logs ai-lab-webhook'"
-          exit 1
+            for i in 1 2 3 4 5; do
+              if curl -s --max-time 3 http://localhost:8002/health > /dev/null 2>&1; then
+                echo '✅ 服务启动成功！'
+                sudo docker ps | grep ai-lab
+                exit 0
+              fi
+              echo \"⏳ 等待服务就绪... (\$i/5)\"
+              sleep 3
+            done
+            echo '⚠️ 服务可能尚未启动，查看日志：'
+            sudo docker logs ai-lab-webhook --tail 20
+          "
+
+          echo ""
+          echo "📋 NAS 内网访问地址："
+          echo "   - 交易记录管理: http://$NAS_HOST:8002/ui/"
+          echo "   - 策略选股:     http://$NAS_HOST:8002/ui/strategy.html"
+          echo "   - Trading Agent: http://$NAS_HOST:8010/stats (已部署)"
 
       - name: Notify on failure
         if: failure()
@@ -115,5 +103,6 @@ jobs:
           echo "❌ 部署失败！"
           echo "请检查："
           echo "   1. NAS SSH 密钥是否正确配置 (secrets.NAS_SSH_KEY)"
-          echo "   2. NAS 主机地址是否正确 (secrets.NAS_HOST)"
+          echo "   2. NAS 用户名是否正确 (secrets.NAS_USER，如 kingsy_9)"
           echo "   3. NAS 上 Docker 是否正常运行"
+          echo "   4. GHCR 镜像是否已授权（sudo docker login ghcr.io）"

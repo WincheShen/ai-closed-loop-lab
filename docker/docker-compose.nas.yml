@@ -1,7 +1,7 @@
 version: "3.8"
 
-# NAS 部署配置
-# 用法: docker-compose -f docker/docker-compose.nas.yml up -d
+# NAS 部署配置（部署到 /volume1/docker/ai-lab-web/）
+# 用法: cd /volume1/docker/ai-lab-web && sudo docker-compose -f docker-compose.nas.yml up -d
 
 services:
   # Webhook Listener + 策略选股 UI
@@ -19,10 +19,8 @@ services:
       - PYTHONUNBUFFERED=1
       - WEBHOOK_AUTO_SMA_DISPATCH=false  # NAS 上可能不需要自动发社媒
     restart: unless-stopped
-    command: >
-      sh -c "cd /app &&
-             export PYTHONPATH=/app:/app/libs/tradingAgents_neo/src &&
-             python -c 'from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8002)'"
+    command:
+      ["python", "-c", "from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host='0.0.0.0', port=8002)"]
 
   # 日常选股扫描调度器（可选，如果不跑每日扫描可注释掉）
   scheduler:
@@ -37,10 +35,7 @@ services:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
     # 调度器持续运行，执行定时任务
-    command: >
-      sh -c "cd /app &&
-             export PYTHONPATH=/app:/app/libs/tradingAgents_neo/src &&
-             python scripts/scheduler.py"
+    command: ["python", "scripts/scheduler.py"]
     profiles:
       - scheduler  # 默认不启动，需要时加 --profile scheduler
 
@@ -60,7 +55,5 @@ services:
     restart: unless-stopped
     profiles:
       - strategy
-    command: >
-      sh -c "cd /app &&
-             export PYTHONPATH=/app:/app/libs/tradingAgents_neo/src &&
-             python -c 'from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8002)'"
+    command:
+      ["python", "-c", "from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host='0.0.0.0', port=8002)"]
