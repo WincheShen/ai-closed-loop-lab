@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Lab - 交易记录管理</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #333; margin-bottom: 20px; }
+        h2 { color: #555; margin: 20px 0 10px; font-size: 18px; }
+        
+        /* 服务状态卡片 */
+        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 30px; }
+        .status-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .status-card h3 { font-size: 14px; color: #666; margin-bottom: 8px; }
+        .status-value { font-size: 24px; font-weight: bold; }
+        .status-ok { color: #10b981; }
+        .status-error { color: #ef4444; }
+        .status-pending { color: #f59e0b; }
+        
+        /* 上传表单 */
+        .upload-section { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 30px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; color: #444; }
+        input[type="text"], textarea, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+        textarea { min-height: 100px; resize: vertical; }
+        input[type="file"] { padding: 10px 0; }
+        button { background: #3b82f6; color: white; padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        button:hover { background: #2563eb; }
+        button:disabled { background: #9ca3af; cursor: not-allowed; }
+        
+        /* 结果展示 */
+        .result-section { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 30px; }
+        .result { padding: 15px; border-radius: 4px; margin-top: 10px; }
+        .result.success { background: #d1fae5; border: 1px solid #10b981; }
+        .result.error { background: #fee2e2; border: 1px solid #ef4444; }
+        .result pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+        
+        /* 数据表格 */
+        .data-section { background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 30px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f9fafb; font-weight: 600; color: #374151; }
+        tr:hover { background: #f9fafb; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+        .badge-running { background: #dbeafe; color: #1e40af; }
+        .badge-completed { background: #d1fae5; color: #065f46; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-pending { background: #fef3c7; color: #92400e; }
+        
+        .refresh-btn { float: right; background: #6b7280; }
+        .refresh-btn:hover { background: #4b5563; }
+        .timestamp { color: #9ca3af; font-size: 12px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 AI Lab 交易记录管理</h1>
+        <p style="margin-bottom:20px;"><a href="/ui/strategy.html" style="color:#3b82f6;text-decoration:none;font-weight:500;">📈 策略选股 →</a></p>
+        
+        <!-- 服务状态 -->
+        <h2>服务状态</h2>
+        <div class="status-grid">
+            <div class="status-card">
+                <h3>Webhook Listener</h3>
+                <div id="webhook-status" class="status-value status-pending">检查中...</div>
+            </div>
+            <div class="status-card">
+                <h3>SMA 创作服务</h3>
+                <div id="sma-status" class="status-value status-pending">检查中...</div>
+            </div>
+            <div class="status-card">
+                <h3>今日交易记录</h3>
+                <div id="record-count" class="status-value">-</div>
+            </div>
+            <div class="status-card">
+                <h3>社媒任务</h3>
+                <div id="task-count" class="status-value">-</div>
+            </div>
+        </div>
+
+        <!-- 上传表单 -->
+        <div class="upload-section">
+            <h2>📝 上传交易记录</h2>
+            <form id="upload-form">
+                <div class="form-group">
+                    <label>交易描述 *</label>
+                    <textarea id="trade-text" placeholder="例如：今天关注半导体板块，东芯股份688110值得留意，国产替代逻辑还在..." required></textarea>
+                </div>
+                <div class="form-group">
+                    <label>截图（可选，自动脱敏）</label>
+                    <input type="file" id="trade-image" accept="image/*">
+                </div>
+                <div class="form-group">
+                    <label>来源</label>
+                    <select id="trade-source">
+                        <option value="wechat">微信</option>
+                        <option value="feishu">飞书</option>
+                        <option value="manual">手动录入</option>
+                    </select>
+                </div>
+                <button type="submit" id="submit-btn">提交记录</button>
+            </form>
+            <div id="upload-result"></div>
+        </div>
+
+        <!-- 交易记录列表 -->
+        <div class="data-section">
+            <h2>
+                📊 近期交易记录
+                <button class="refresh-btn" onclick="loadRecords()">刷新</button>
+            </h2>
+            <table id="records-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>来源</th>
+                        <th>内容</th>
+                        <th>可发布</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <!-- 社媒任务列表 -->
+        <div class="data-section">
+            <h2>
+                📱 社媒发布任务
+                <button class="refresh-btn" onclick="loadSocialPosts()">刷新</button>
+            </h2>
+            <table id="posts-table">
+                <thead>
+                    <tr>
+                        <th>任务ID</th>
+                        <th>状态</th>
+                        <th>主题</th>
+                        <th>发布时间</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <p class="timestamp">上次更新: <span id="last-update">-</span></p>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+        
+        // 检查服务状态
+        async function checkStatus() {
+            try {
+                const resp = await fetch(`${API_BASE}/health`);
+                const data = await resp.json();
+                document.getElementById('webhook-status').innerHTML = '<span class="status-ok">● 正常</span>';
+            } catch (e) {
+                document.getElementById('webhook-status').innerHTML = '<span class="status-error">✗ 离线</span>';
+            }
+            
+            try {
+                const resp = await fetch('http://127.0.0.1:8003/health');
+                const data = await resp.json();
+                document.getElementById('sma-status').innerHTML = `<span class="status-ok">● 正常 (${data.accounts?.length || 0} 账号)</span>`;
+            } catch (e) {
+                document.getElementById('sma-status').innerHTML = '<span class="status-error">✗ 离线</span>';
+            }
+        }
+        
+        // 加载交易记录
+        async function loadRecords() {
+            try {
+                const resp = await fetch(`${API_BASE}/webhook/records/recent?limit=10`);
+                const records = await resp.json();
+                document.getElementById('record-count').textContent = records.length;
+                
+                const tbody = document.querySelector('#records-table tbody');
+                tbody.innerHTML = records.map(r => `
+                    <tr>
+                        <td>${new Date(r.received_at).toLocaleString('zh-CN')}</td>
+                        <td>${r.source}</td>
+                        <td>${r.safe_text.substring(0, 50)}${r.safe_text.length > 50 ? '...' : ''}</td>
+                        <td>${r.is_publishable ? '✓' : '✗'}</td>
+                    </tr>
+                `).join('') || '<tr><td colspan="4" style="text-align:center;color:#999;">暂无记录</td></tr>';
+            } catch (e) {
+                console.error('加载记录失败:', e);
+            }
+        }
+        
+        // 加载社媒任务
+        async function loadSocialPosts() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/social-posts`);
+                const posts = await resp.json();
+                document.getElementById('task-count').textContent = posts.length;
+                
+                const tbody = document.querySelector('#posts-table tbody');
+                tbody.innerHTML = posts.map(p => {
+                    const statusClass = p.sma_status === 'completed' ? 'badge-completed' : 
+                                       p.sma_status === 'running' ? 'badge-running' :
+                                       p.sma_status === 'failed' ? 'badge-failed' : 'badge-pending';
+                    return `
+                        <tr>
+                            <td>${p.sma_task_id.substring(0, 12)}...</td>
+                            <td><span class="badge ${statusClass}">${p.sma_status}</span></td>
+                            <td>${p.topic ? p.topic.substring(0, 30) + '...' : '-'}</td>
+                            <td>${p.dispatched_at ? new Date(p.dispatched_at).toLocaleString('zh-CN') : '-'}</td>
+                        </tr>
+                    `;
+                }).join('') || '<tr><td colspan="4" style="text-align:center;color:#999;">暂无任务</td></tr>';
+                
+                document.getElementById('last-update').textContent = new Date().toLocaleString('zh-CN');
+            } catch (e) {
+                console.error('加载社媒任务失败:', e);
+                document.querySelector('#posts-table tbody').innerHTML = 
+                    '<tr><td colspan="4" style="text-align:center;color:#999;">加载失败，请检查 SMA 服务</td></tr>';
+            }
+        }
+        
+        // 上传表单提交
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submit-btn');
+            btn.disabled = true;
+            btn.textContent = '提交中...';
+            
+            const formData = new FormData();
+            formData.append('text', document.getElementById('trade-text').value);
+            formData.append('source', document.getElementById('trade-source').value);
+            
+            const imageFile = document.getElementById('trade-image').files[0];
+            if (imageFile) formData.append('image', imageFile);
+            
+            try {
+                const resp = await fetch(`${API_BASE}/webhook/trade`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await resp.json();
+                
+                const resultDiv = document.getElementById('upload-result');
+                if (result.is_publishable) {
+                    resultDiv.innerHTML = `
+                        <div class="result success">
+                            <strong>✓ 提交成功</strong><br>
+                            记录ID: ${result.record_id}<br>
+                            自动推送 SMA: ${result.sma_task_id || '处理中...'}
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="result error">
+                            <strong>⚠ 需要人工审核</strong><br>
+                            记录ID: ${result.record_id}<br>
+                            原因: 包含敏感词 [${result.forbidden_hits?.join(', ')}]
+                        </div>
+                    `;
+                }
+                
+                // 清空表单并刷新数据
+                document.getElementById('upload-form').reset();
+                setTimeout(() => { loadRecords(); loadSocialPosts(); }, 1000);
+                
+            } catch (e) {
+                document.getElementById('upload-result').innerHTML = 
+                    `<div class="result error"><strong>✗ 提交失败:</strong> ${e.message}</div>`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '提交记录';
+            }
+        });
+        
+        // 初始化
+        checkStatus();
+        loadRecords();
+        loadSocialPosts();
+        
+        // 自动刷新
+        setInterval(() => {
+            checkStatus();
+            loadSocialPosts();
+        }, 30000);
+    </script>
+</body>
+</html>

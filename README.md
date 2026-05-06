@@ -74,6 +74,23 @@ python -m scripts.run_explorer --mode scan
 python -m scripts.run_full_loop --mode paper
 ```
 
+## 🖥 NAS 部署（与 Trading Agent 同机）
+
+如果你已将 Trading Agent 部署到 NAS，可以把 AI Lab 一并部署：
+
+```bash
+# 一键部署到 NAS（默认 192.168.3.73）
+chmod +x scripts/deploy-to-nas.sh
+./scripts/deploy-to-nas.sh
+```
+
+部署后访问：
+- **交易记录管理**: http://192.168.3.73:8002/ui/
+- **策略选股**: http://192.168.3.73:8002/ui/strategy.html
+- **Trading Agent**: http://192.168.3.73:8010/stats
+
+完整文档：[docs/nas-deployment.md](docs/nas-deployment.md)
+
 ## 项目结构
 
 ```

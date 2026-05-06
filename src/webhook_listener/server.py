@@ -22,10 +22,31 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .image_redactor import ImageRedactor
 from .text_compliance import ComplianceResult, sanitize_text
+
+# Phase 3: Webhook → SMA 自动触发
+_auto_dispatch_enabled = os.environ.get("WEBHOOK_AUTO_SMA_DISPATCH", "false").lower() in ("1", "true", "yes")
+_sma_default_account = os.environ.get("WEBHOOK_SMA_DEFAULT_ACCOUNT", "XHS_01")
+
+# 延迟导入避免循环依赖
+def _get_topic_router():
+    from social_media_dispatcher.topic_router import TopicRouter
+    return TopicRouter()
+
+def _get_sma_client():
+    from social_media_dispatcher.client import SmaClient
+    return SmaClient()
+
+def _get_central_brain():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from central_brain.metadata_store import get_central_brain
+    return get_central_brain()
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +89,13 @@ app = FastAPI(
     version="0.1.0",
 )
 redactor = ImageRedactor()
+
+# 注册策略管理 API Router
+try:
+    from stock_analyzer.strategy.api import router as strategy_router
+    app.include_router(strategy_router)
+except Exception as _e:
+    logger.warning("Strategy API router not available: %s", _e)
 
 
 class TradeRecordResponse(BaseModel):
@@ -170,6 +198,48 @@ async def receive_trade(
     except Exception as e:
         logger.warning("failed to publish trade.record.created event: %s", e)
 
+    # 5. Phase 3: 自动触发 SMA dispatch（如果启用且可发布）
+    if _auto_dispatch_enabled and compliance.is_publishable:
+        try:
+            router = _get_topic_router()
+            client = _get_sma_client()
+            brain = _get_central_brain()
+
+            # 组装 TopicPayload
+            payload = router.from_trade_record(
+                record_id=record_id,
+                safe_text=compliance.safe_text,
+                received_at=received_at,
+                account_id=_sma_default_account,
+                redacted_image_url=str(redacted_image_path) if redacted_image_path else None,
+            )
+
+            # dispatch 到 SMA
+            result = client.dispatch(payload)
+
+            if result.success:
+                # 记录到 social_posts 表（用于后续互动同步）
+                brain.store.record_social_post(
+                    sma_task_id=result.sma_task_id or record_id,
+                    account_id=_sma_default_account,
+                    platform="xhs",  # 默认小红书
+                    source_pick_date=None,  # trade_record 没有对应选股日期
+                    source_symbols=[],
+                    topic=compliance.safe_text[:100],
+                    dispatched_at=received_at.isoformat(),
+                )
+                logger.info(
+                    "Auto-dispatched to SMA: record_id=%s sma_task_id=%s",
+                    record_id, result.sma_task_id
+                )
+            else:
+                logger.warning(
+                    "Auto-dispatch to SMA failed: record_id=%s error=%s",
+                    record_id, result.error
+                )
+        except Exception as e:
+            logger.exception("Auto-dispatch to SMA failed for record %s: %s", record_id, e)
+
     logger.info(
         "trade record received id=%s source=%s publishable=%s replacements=%d",
         record_id, source, compliance.is_publishable, compliance.replacements_applied,
@@ -201,3 +271,28 @@ def recent_records(limit: int = 20) -> list[dict]:
         }
         for r in rows
     ]
+
+
+@app.get("/api/social-posts")
+def list_social_posts(limit: int = 20) -> list[dict]:
+    """返回社媒发布任务列表（用于管理页面展示）。"""
+    try:
+        brain = _get_central_brain()
+        posts = brain.store.list_social_posts(limit=limit)
+        return posts
+    except Exception as e:
+        logger.error("Failed to list social posts: %s", e)
+        return []
+
+
+# 挂载静态文件（管理页面）- 挂载到 /ui 路径
+_static_dir = Path(__file__).resolve().parent / "static"
+if _static_dir.exists():
+    app.mount("/ui", StaticFiles(directory=str(_static_dir), html=True), name="static")
+
+
+@app.get("/")
+def root_redirect():
+    """根路径重定向到管理页面。"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/ui/")

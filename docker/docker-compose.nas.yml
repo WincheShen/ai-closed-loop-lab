@@ -1,0 +1,66 @@
+version: "3.8"
+
+# NAS 部署配置
+# 用法: docker-compose -f docker/docker-compose.nas.yml up -d
+
+services:
+  # Webhook Listener + 策略选股 UI
+  webhook:
+    image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+    container_name: ai-lab-webhook
+    ports:
+      - "8002:8002"
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../.env:/app/.env:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - WEBHOOK_AUTO_SMA_DISPATCH=false  # NAS 上可能不需要自动发社媒
+    restart: unless-stopped
+    command: >
+      sh -c "cd /app &&
+             export PYTHONPATH=/app:/app/libs/tradingAgents_neo/src &&
+             python -c 'from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8002)'"
+
+  # 日常选股扫描调度器（可选，如果不跑每日扫描可注释掉）
+  scheduler:
+    image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+    container_name: ai-lab-scheduler
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../.env:/app/.env:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    # 调度器持续运行，执行定时任务
+    command: >
+      sh -c "cd /app &&
+             export PYTHONPATH=/app:/app/libs/tradingAgents_neo/src &&
+             python scripts/scheduler.py"
+    profiles:
+      - scheduler  # 默认不启动，需要时加 --profile scheduler
+
+  # 独立的策略选股服务（如果只想跑策略选股，可以单独用这个）
+  strategy:
+    image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+    container_name: ai-lab-strategy
+    ports:
+      - "8003:8002"
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../.env:/app/.env:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    profiles:
+      - strategy
+    command: >
+      sh -c "cd /app &&
+             export PYTHONPATH=/app:/app/libs/tradingAgents_neo/src &&
+             python -c 'from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host=\"0.0.0.0\", port=8002)'"

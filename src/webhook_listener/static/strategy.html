@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Lab - 策略选股</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f4f8; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #1e293b; margin-bottom: 8px; }
+        .subtitle { color: #64748b; margin-bottom: 24px; font-size: 14px; }
+        a { color: #3b82f6; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        /* Layout */
+        .main-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 1024px) { .main-grid { grid-template-columns: 1fr; } }
+
+        .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .card h2 { font-size: 16px; color: #374151; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .card h2 .icon { font-size: 20px; }
+
+        /* Form */
+        .form-group { margin-bottom: 16px; }
+        label { display: block; margin-bottom: 6px; font-weight: 500; color: #374151; font-size: 14px; }
+        textarea { width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; min-height: 120px; resize: vertical; line-height: 1.5; }
+        textarea:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+        button { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-secondary { background: #e5e7eb; color: #374151; }
+        .btn-secondary:hover { background: #d1d5db; }
+        .btn-success { background: #10b981; color: white; }
+        .btn-success:hover { background: #059669; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-danger:hover { background: #dc2626; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Spec Review */
+        .spec-section { margin-top: 16px; }
+        .spec-section h3 { font-size: 14px; color: #6b7280; margin-bottom: 8px; }
+        .filter-list { list-style: none; }
+        .filter-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #f9fafb; border-radius: 6px; margin-bottom: 6px; font-size: 13px; }
+        .filter-item .check { color: #10b981; font-weight: bold; }
+        .filter-item .field { font-weight: 600; color: #1e40af; }
+        .filter-item .op { color: #6b7280; }
+        .filter-item .value { color: #dc2626; font-weight: 500; }
+        .filter-item .desc { color: #6b7280; margin-left: auto; font-style: italic; }
+
+        .ranking-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fffbeb; border-radius: 6px; margin-bottom: 6px; font-size: 13px; }
+        .ranking-item .arrow { color: #f59e0b; }
+
+        .technical-item { padding: 8px 12px; background: #f0fdf4; border-radius: 6px; margin-bottom: 6px; font-size: 13px; color: #166534; }
+
+        .explanation { background: #eff6ff; padding: 12px; border-radius: 8px; font-size: 13px; color: #1e40af; line-height: 1.6; margin-top: 12px; }
+
+        /* Results Table */
+        .results-section { margin-top: 20px; }
+        .results-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .results-meta { font-size: 13px; color: #6b7280; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+        th { background: #f8fafc; font-weight: 600; color: #374151; position: sticky; top: 0; }
+        tr:hover { background: #f0f9ff; }
+        .positive { color: #dc2626; }
+        .negative { color: #16a34a; }
+        .industry-tag { background: #dbeafe; color: #1e40af; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+        .score-bar { display: inline-block; height: 6px; background: #3b82f6; border-radius: 3px; min-width: 4px; }
+
+        /* Saved strategies */
+        .strategy-list { list-style: none; }
+        .strategy-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px; }
+        .strategy-item:hover { border-color: #3b82f6; }
+        .strategy-info h4 { font-size: 14px; margin-bottom: 4px; }
+        .strategy-info p { font-size: 12px; color: #6b7280; }
+        .strategy-actions { display: flex; gap: 6px; }
+        .strategy-actions button { padding: 6px 12px; font-size: 12px; }
+
+        /* Loading */
+        .loading { text-align: center; padding: 20px; color: #6b7280; }
+        .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #e5e7eb; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .hidden { display: none; }
+        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; font-size: 14px; z-index: 1000; animation: slideIn 0.3s; }
+        .toast-success { background: #10b981; }
+        .toast-error { background: #ef4444; }
+        @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📈 策略选股</h1>
+        <p class="subtitle"><a href="/ui/">← 返回首页</a> | 输入选股策略 → AI 解析指标 → 确认后执行选股</p>
+
+        <div class="main-grid">
+            <!-- 左侧：输入 + Review -->
+            <div>
+                <!-- 策略输入 -->
+                <div class="card">
+                    <h2><span class="icon">💡</span>输入选股策略</h2>
+                    <div class="form-group">
+                        <label>策略描述（自然语言）</label>
+                        <textarea id="strategy-input" placeholder="例如：&#10;找低估值的半导体股票，PE不超过30，市值100亿以上，最好有主力资金流入&#10;&#10;或者：&#10;找今天放量上涨超过5%的股票，换手率要高，成交额5亿以上"></textarea>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn-primary" id="btn-compile" onclick="compileStrategy(false)">🤖 AI 解析</button>
+                        <button class="btn-secondary" id="btn-compile-mock" onclick="compileStrategy(true)">⚡ 快速解析（Mock）</button>
+                    </div>
+                </div>
+
+                <!-- Review 区 -->
+                <div class="card hidden" id="review-section">
+                    <h2><span class="icon">📋</span>策略 Review</h2>
+                    <div id="spec-display"></div>
+                    <div class="btn-group" style="margin-top: 16px;">
+                        <button class="btn-success" id="btn-execute" onclick="executeStrategy()">✅ 确认执行选股</button>
+                        <button class="btn-secondary" onclick="saveStrategy()">💾 保存策略</button>
+                        <button class="btn-secondary" onclick="editSpec()">✏️ 修改条件</button>
+                    </div>
+                </div>
+
+                <!-- 已保存策略 -->
+                <div class="card">
+                    <h2><span class="icon">📂</span>已保存策略</h2>
+                    <ul class="strategy-list" id="saved-list">
+                        <li class="loading">加载中...</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- 右侧：结果 -->
+            <div>
+                <div class="card" id="results-section">
+                    <h2><span class="icon">🎯</span>选股结果</h2>
+                    <div id="results-content">
+                        <p style="color:#9ca3af; text-align:center; padding:40px;">
+                            输入策略并执行后，结果将显示在这里
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentSpec = null;
+
+        // 编译策略
+        async function compileStrategy(useMock) {
+            const text = document.getElementById('strategy-input').value.trim();
+            if (!text) { showToast('请输入策略描述', 'error'); return; }
+
+            const btn = useMock ? document.getElementById('btn-compile-mock') : document.getElementById('btn-compile');
+            btn.disabled = true;
+            btn.textContent = useMock ? '⚡ 解析中...' : '🤖 解析中...';
+
+            try {
+                const resp = await fetch('/api/strategy/compile', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ strategy_text: text, use_mock_llm: useMock })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    currentSpec = data.spec;
+                    displaySpec(data.spec);
+                    document.getElementById('review-section').classList.remove('hidden');
+                    showToast('策略解析成功', 'success');
+                } else {
+                    showToast('解析失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = useMock ? '⚡ 快速解析（Mock）' : '🤖 AI 解析';
+            }
+        }
+
+        // 显示解析结果
+        function displaySpec(spec) {
+            let html = '';
+
+            // Filters
+            if (spec.filters && spec.filters.length > 0) {
+                html += '<div class="spec-section"><h3>📌 过滤条件 (' + spec.filters.length + ')</h3><ul class="filter-list">';
+                spec.filters.forEach(f => {
+                    html += `<li class="filter-item">
+                        <span class="check">✓</span>
+                        <span class="field">${f.field}</span>
+                        <span class="op">${f.op}</span>
+                        <span class="value">${JSON.stringify(f.value)}</span>
+                        <span class="desc">${f.description || ''}</span>
+                    </li>`;
+                });
+                html += '</ul></div>';
+            }
+
+            // Rankings
+            if (spec.rankings && spec.rankings.length > 0) {
+                html += '<div class="spec-section"><h3>📊 排序偏好 (' + spec.rankings.length + ')</h3><ul class="filter-list">';
+                spec.rankings.forEach(r => {
+                    const arrow = r.direction === 'desc' ? '↓' : '↑';
+                    html += `<li class="ranking-item">
+                        <span class="arrow">${arrow}</span>
+                        <span class="field">${r.field}</span>
+                        <span class="op">权重 ${r.weight}</span>
+                        <span class="desc">${r.description || ''}</span>
+                    </li>`;
+                });
+                html += '</ul></div>';
+            }
+
+            // Technicals
+            if (spec.technicals && spec.technicals.length > 0) {
+                html += '<div class="spec-section"><h3>📈 技术面要求</h3>';
+                spec.technicals.forEach(t => {
+                    html += `<div class="technical-item">⚡ ${t}</div>`;
+                });
+                html += '</div>';
+            }
+
+            // Explanation
+            if (spec.explanation) {
+                html += `<div class="explanation"><strong>💬 策略解读：</strong>${spec.explanation}</div>`;
+            }
+
+            document.getElementById('spec-display').innerHTML = html;
+        }
+
+        // 执行选股
+        async function executeStrategy() {
+            if (!currentSpec) { showToast('请先解析策略', 'error'); return; }
+
+            const btn = document.getElementById('btn-execute');
+            btn.disabled = true;
+            btn.textContent = '⏳ 选股中...';
+
+            try {
+                const resp = await fetch('/api/strategy/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ spec: currentSpec })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    displayResults(data);
+                    showToast(`选出 ${data.filtered_count} 只股票`, 'success');
+                } else {
+                    showToast('执行失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('请求失败: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '✅ 确认执行选股';
+            }
+        }
+
+        // 显示选股结果
+        function displayResults(data) {
+            let html = `
+                <div class="results-header">
+                    <div>
+                        <strong>${data.strategy_name}</strong>
+                        ${data.is_mock_data ? '<span style="color:#f59e0b;font-size:12px;"> (Mock数据)</span>' : ''}
+                    </div>
+                    <div class="results-meta">
+                        总扫描 ${data.total_stocks} 只 → 筛出 ${data.filtered_count} 只
+                    </div>
+                </div>
+            `;
+
+            if (data.picks.length === 0) {
+                html += '<p style="text-align:center;color:#6b7280;padding:20px;">没有符合条件的股票</p>';
+            } else {
+                html += `<div style="max-height:600px;overflow-y:auto;">
+                <table>
+                    <thead><tr>
+                        <th>#</th>
+                        <th>代码</th>
+                        <th>名称</th>
+                        <th>价格</th>
+                        <th>涨跌%</th>
+                        <th>行业</th>
+                        <th>PE</th>
+                        <th>PB</th>
+                        <th>市值(亿)</th>
+                        <th>换手%</th>
+                        <th>主力(万)</th>
+                        <th>评分</th>
+                    </tr></thead><tbody>`;
+
+                data.picks.forEach((p, i) => {
+                    const changeCls = p.change_pct >= 0 ? 'positive' : 'negative';
+                    html += `<tr>
+                        <td>${i + 1}</td>
+                        <td>${p.symbol}</td>
+                        <td><strong>${p.name}</strong></td>
+                        <td>${p.price.toFixed(2)}</td>
+                        <td class="${changeCls}">${p.change_pct >= 0 ? '+' : ''}${p.change_pct.toFixed(2)}%</td>
+                        <td><span class="industry-tag">${p.industry}</span></td>
+                        <td>${p.pe_ttm ? p.pe_ttm.toFixed(1) : '-'}</td>
+                        <td>${p.pb ? p.pb.toFixed(1) : '-'}</td>
+                        <td>${p.market_cap_yi ? p.market_cap_yi.toFixed(0) : '-'}</td>
+                        <td>${p.turnover_rate.toFixed(1)}</td>
+                        <td>${p.main_fund_net_inflow.toFixed(0)}</td>
+                        <td>${p.score.toFixed(1)}</td>
+                    </tr>`;
+                });
+                html += '</tbody></table></div>';
+            }
+
+            document.getElementById('results-content').innerHTML = html;
+        }
+
+        // 保存策略
+        async function saveStrategy() {
+            if (!currentSpec) return;
+            const text = document.getElementById('strategy-input').value.trim();
+
+            try {
+                const resp = await fetch('/api/strategy/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ strategy_text: text, spec: currentSpec })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    showToast('策略已保存: ' + data.name, 'success');
+                    loadSavedStrategies();
+                }
+            } catch (e) {
+                showToast('保存失败: ' + e.message, 'error');
+            }
+        }
+
+        // 编辑 spec（简单实现：展示 JSON 可编辑）
+        function editSpec() {
+            const json = JSON.stringify(currentSpec, null, 2);
+            const newJson = prompt('编辑策略 JSON（修改后点确定）：', json);
+            if (newJson) {
+                try {
+                    currentSpec = JSON.parse(newJson);
+                    displaySpec(currentSpec);
+                    showToast('规则已更新', 'success');
+                } catch (e) {
+                    showToast('JSON 格式错误', 'error');
+                }
+            }
+        }
+
+        // 加载已保存策略
+        async function loadSavedStrategies() {
+            try {
+                const resp = await fetch('/api/strategy/list');
+                const items = await resp.json();
+
+                const list = document.getElementById('saved-list');
+                if (items.length === 0) {
+                    list.innerHTML = '<li style="color:#9ca3af;text-align:center;padding:16px;">暂无保存的策略</li>';
+                    return;
+                }
+
+                list.innerHTML = items.map(item => `
+                    <li class="strategy-item">
+                        <div class="strategy-info">
+                            <h4>${item.name}</h4>
+                            <p>${item.description} | ${item.filters_count} 条件 + ${item.rankings_count} 排序 | ${new Date(item.created_at).toLocaleDateString('zh-CN')}</p>
+                        </div>
+                        <div class="strategy-actions">
+                            <button class="btn-primary" onclick="loadStrategy('${item.id}')">加载</button>
+                            <button class="btn-danger" onclick="deleteStrategy('${item.id}')">删除</button>
+                        </div>
+                    </li>
+                `).join('');
+            } catch (e) {
+                document.getElementById('saved-list').innerHTML = '<li style="color:#ef4444;">加载失败</li>';
+            }
+        }
+
+        // 加载策略
+        async function loadStrategy(id) {
+            try {
+                const resp = await fetch(`/api/strategy/${id}`);
+                const data = await resp.json();
+                document.getElementById('strategy-input').value = data.strategy_text;
+                currentSpec = data.spec;
+                displaySpec(data.spec);
+                document.getElementById('review-section').classList.remove('hidden');
+                showToast('已加载策略: ' + data.name, 'success');
+            } catch (e) {
+                showToast('加载失败', 'error');
+            }
+        }
+
+        // 删除策略
+        async function deleteStrategy(id) {
+            if (!confirm('确定删除？')) return;
+            try {
+                await fetch(`/api/strategy/${id}`, { method: 'DELETE' });
+                loadSavedStrategies();
+                showToast('已删除', 'success');
+            } catch (e) {
+                showToast('删除失败', 'error');
+            }
+        }
+
+        // Toast 提示
+        function showToast(msg, type) {
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // 初始化
+        loadSavedStrategies();
+    </script>
+</body>
+</html>
