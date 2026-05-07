@@ -19,8 +19,7 @@ services:
       - PYTHONUNBUFFERED=1
       - WEBHOOK_AUTO_SMA_DISPATCH=false  # NAS 上可能不需要自动发社媒
     restart: unless-stopped
-    command:
-      ["python", "-c", "from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host='0.0.0.0', port=8002)"]
+    command: ["python", "-m", "uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"]
 
   # 日常选股扫描调度器（可选，如果不跑每日扫描可注释掉）
   scheduler:
@@ -55,5 +54,4 @@ services:
     restart: unless-stopped
     profiles:
       - strategy
-    command:
-      ["python", "-c", "from webhook_listener.server import app; import uvicorn; uvicorn.run(app, host='0.0.0.0', port=8002)"]
+    command: ["python", "-m", "uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"]
