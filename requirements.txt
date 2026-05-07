@@ -3,12 +3,13 @@ uvicorn
 pydantic
 pydantic-settings
 python-dotenv
+python-multipart
 httpx
 pandas
 pyyaml
 akshare
 Pillow
 sqlite-vec
-# langchain-openai (optional, for tradingagents)
+langchain-openai
 # langchain-google-genai
 # langgraph
