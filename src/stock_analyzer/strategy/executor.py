@@ -16,6 +16,7 @@ from typing import Any
 from ..data_source import AkshareClient
 from ..data_source.akshare_client import MarketSnapshot, StockQuote
 from .compiler import FilterCondition, RankingPreference, StrategySpec
+from .technicals import check_technicals
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,24 @@ class StrategyExecutor:
 
         logger.info("Filter pass: %d / %d", len(passed), len(snapshot.stocks))
 
-        # 2. 排序（加权评分）
+        # 2. 技术面过滤（如果策略有 technicals 条件）
+        if spec.technicals and passed:
+            logger.info("Applying technical filters (%d conditions) on %d stocks",
+                        len(spec.technicals), len(passed))
+            tech_passed = []
+            for stock, matched, failed in passed:
+                try:
+                    bars = self.akshare_client.fetch_kline(stock.symbol, days=30)
+                    result = check_technicals(stock.symbol, bars, spec.technicals)
+                    if result.passed:
+                        tech_passed.append((stock, matched, failed))
+                except Exception as e:
+                    logger.warning("Technical check failed for %s: %s", stock.symbol, e)
+                    tech_passed.append((stock, matched, failed))  # 失败则不过滤
+            logger.info("Technical filter pass: %d / %d", len(tech_passed), len(passed))
+            passed = tech_passed
+
+        # 3. 排序（加权评分）
         results: list[PickResult] = []
         for stock, matched, failed in passed:
             score = 0.0

@@ -105,9 +105,9 @@ SYSTEM_PROMPT = """\
 - change_pct: 当日涨跌幅（%）
 - turnover_rate: 换手率（%）
 - volume: 成交量（手）
-- turnover: 成交额（元）
-- main_fund_net_inflow: 主力净流入（元）
-- industry: 所属行业/板块名称
+- turnover: 成交额（元），1亿=100000000
+- main_fund_net_inflow: 主力净流入（元），1亿=100000000
+- industry: 所属行业/板块名称（东方财富分类，如"半导体"、"新能源汽车"、"医疗器械"等）
 - name: 股票名称
 - symbol: 股票代码
 
@@ -117,7 +117,17 @@ SYSTEM_PROMPT = """\
 
 操作符 (op):
 - 数值: <=, >=, <, >, ==, !=, between
-- 字符串/列表: in, contains, not_in
+- 字符串模糊匹配: contains（推荐用于 industry/name）
+- 字符串精确列表: in, not_in（仅当值与数据完全一致时使用）
+
+【重要】industry 字段规则：
+- 数据是东方财富板块名称，必须用 contains 做模糊匹配，禁止用 in
+- AI/人工智能 → contains "人工智能" 或 "算力"
+- 半导体/芯片 → contains "半导体"
+- 新能源/锂电/储能 → contains "新能源" 或 "储能"
+- 医药/创新药 → contains "医药" 或 "创新药"
+- 军工/航天 → contains "军工"
+- 多个行业用多条 filter 条件（每条 contains 一个关键词）
 
 输出 JSON 格式：
 {
@@ -136,7 +146,7 @@ SYSTEM_PROMPT = """\
 
 注意：
 1. 只输出纯 JSON，不要加 markdown 代码块
-2. 如果用户提到的条件无法精确量化（如"趋势向好"），放到 technicals 中
+2. 需要历史K线才能判断的条件（如"创新高"、"回调N日"、"站上均线"），放到 technicals 中
 3. 对每个 filter 和 ranking 都给出中文 description 解释
 4. 如果用户没有明确指定数值，给出合理的默认值
 5. explanation 中简要说明策略解读和潜在风险

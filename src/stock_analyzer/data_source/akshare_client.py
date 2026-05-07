@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,20 @@ class MarketSnapshot:
     stocks: list[StockQuote]
     sectors: list[SectorQuote]
     is_mock: bool = False
+
+
+@dataclass
+class KlineBar:
+    """单根日K线。"""
+    date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float       # 手
+    turnover: float     # 元
+    turnover_rate: float = 0.0  # 换手率 %
+    change_pct: float = 0.0
 
 
 class AkshareClient:
@@ -171,6 +185,84 @@ class AkshareClient:
             sectors=sectors,
             is_mock=True,
         )
+
+
+    def fetch_kline(self, symbol: str, days: int = 60) -> list[KlineBar]:
+        """拉取单只股票的日K线（最近 N 个交易日）。
+
+        Args:
+            symbol: 6位股票代码，如 "600519"
+            days: 向前取多少个交易日（约=自然日数 * 5/7）
+
+        Returns:
+            按日期升序排列的 KlineBar 列表；失败或 mock 时返回合成数据
+        """
+        if self._ak_available:
+            try:
+                return self._fetch_kline_real(symbol, days)
+            except Exception as e:
+                logger.warning("akshare kline failed for %s: %s，降级 mock", symbol, e)
+                if not self.allow_mock_fallback:
+                    raise
+        return self._fetch_kline_mock(symbol, days)
+
+    def _fetch_kline_real(self, symbol: str, days: int) -> list[KlineBar]:
+        import akshare as ak  # type: ignore
+
+        end = date.today()
+        start = end - timedelta(days=int(days * 1.8))  # 多取一些以覆盖节假日
+        start_str = start.strftime("%Y%m%d")
+        end_str = end.strftime("%Y%m%d")
+
+        df = ak.stock_zh_a_hist(
+            symbol=symbol,
+            period="daily",
+            start_date=start_str,
+            end_date=end_str,
+            adjust="hfq",   # 后复权
+        )
+        bars: list[KlineBar] = []
+        for _, row in df.tail(days).iterrows():
+            try:
+                bars.append(KlineBar(
+                    date=date.fromisoformat(str(row.get("日期", "")).replace("/", "-")),
+                    open=float(row.get("开盘", 0) or 0),
+                    high=float(row.get("最高", 0) or 0),
+                    low=float(row.get("最低", 0) or 0),
+                    close=float(row.get("收盘", 0) or 0),
+                    volume=float(row.get("成交量", 0) or 0),
+                    turnover=float(row.get("成交额", 0) or 0),
+                    turnover_rate=float(row.get("换手率", 0) or 0),
+                    change_pct=float(row.get("涨跌幅", 0) or 0),
+                ))
+            except Exception:
+                continue
+        return bars
+
+    def _fetch_kline_mock(self, symbol: str, days: int) -> list[KlineBar]:
+        rng = random.Random(hash(symbol))
+        price = rng.uniform(10, 100)
+        bars = []
+        today = date.today()
+        for i in range(days, 0, -1):
+            change = rng.uniform(-0.05, 0.06)
+            open_ = price
+            close = round(price * (1 + change), 2)
+            high = round(max(open_, close) * rng.uniform(1.0, 1.02), 2)
+            low = round(min(open_, close) * rng.uniform(0.98, 1.0), 2)
+            bars.append(KlineBar(
+                date=today - timedelta(days=i),
+                open=open_,
+                high=high,
+                low=low,
+                close=close,
+                volume=rng.uniform(1e5, 5e6),
+                turnover=rng.uniform(1e7, 5e8),
+                turnover_rate=round(rng.uniform(1, 15), 2),
+                change_pct=round(change * 100, 2),
+            ))
+            price = close
+        return bars
 
 
 def _safe_float(value: object, divisor: float = 1.0) -> Optional[float]:
