@@ -1,14 +1,15 @@
 name: Deploy to NAS
 
 on:
-  push:
-    branches: ["main", "master"]
-    paths:
-      - 'src/**'
-      - 'scripts/**'
-      - 'config/**'
-      - 'docker/**'
-      - '.github/workflows/deploy-to-nas.yml'
+  # 仅手动触发（NAS SSH 密钥配置好后可取消注释 push 触发）
+  # push:
+  #   branches: ["main", "master"]
+  #   paths:
+  #     - 'src/**'
+  #     - 'scripts/**'
+  #     - 'config/**'
+  #     - 'docker/**'
+  #     - '.github/workflows/deploy-to-nas.yml'
   workflow_dispatch:
     inputs:
       environment:
