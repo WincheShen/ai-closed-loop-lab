@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -19,7 +20,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
@@ -286,31 +287,74 @@ def list_social_posts(limit: int = 20) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Stock Analysis Proxy（转发到 Trading Agent Service）
+# Stock Analysis Proxy（异步任务队列，转发到 Trading Agent Service）
 # ---------------------------------------------------------------------------
 _TRADING_AGENT_URL = os.environ.get("TRADING_AGENT_URL", "http://localhost:8010")
+
+# task_id -> {status, result, error, symbol, started_at, elapsed}
+_analysis_tasks: dict[str, dict[str, Any]] = {}
+
+
+async def _run_analysis_task(task_id: str, payload: dict) -> None:
+    """后台异步执行分析，结果写回 _analysis_tasks。"""
+    import httpx
+    _analysis_tasks[task_id]["status"] = "running"
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(f"{_TRADING_AGENT_URL}/analyze", json=payload)
+            resp.raise_for_status()
+            result = resp.json()
+        _analysis_tasks[task_id].update({
+            "status": "done",
+            "result": result,
+            "elapsed": round(time.time() - _analysis_tasks[task_id]["started_at"], 1),
+        })
+    except Exception as e:
+        _analysis_tasks[task_id].update({
+            "status": "error",
+            "error": str(e),
+            "elapsed": round(time.time() - _analysis_tasks[task_id]["started_at"], 1),
+        })
 
 
 @app.post("/api/stock/analyze")
 async def proxy_analyze(request: dict):
-    """代理转发个股分析请求到 Trading Agent Service。"""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(f"{_TRADING_AGENT_URL}/analyze", json=request)
-            resp.raise_for_status()
-            return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Trading Agent 分析超时（>120s），请稍后重试")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"无法连接 Trading Agent: {e}")
+    """提交个股分析任务，立即返回 task_id，前端轮询 /api/stock/task/{task_id}。"""
+    task_id = str(uuid.uuid4())
+    symbol = request.get("symbol", "unknown")
+    _analysis_tasks[task_id] = {
+        "task_id": task_id,
+        "symbol": symbol,
+        "status": "pending",
+        "result": None,
+        "error": None,
+        "started_at": time.time(),
+        "elapsed": 0,
+    }
+    asyncio.create_task(_run_analysis_task(task_id, request))
+    return {"task_id": task_id, "symbol": symbol, "status": "pending"}
+
+
+@app.get("/api/stock/task/{task_id}")
+async def get_task_status(task_id: str):
+    """查询分析任务状态。
+
+    status 取值：
+      - pending  — 任务已提交，排队中
+      - running  — 正在分析
+      - done     — 完成，result 字段包含报告
+      - error    — 出错，error 字段包含原因
+    """
+    task = _analysis_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+    elapsed = round(time.time() - task["started_at"], 1)
+    return {**task, "elapsed": elapsed}
 
 
 @app.get("/api/stock/report/{symbol}")
 async def proxy_report(symbol: str):
-    """代理获取缓存报告。"""
+    """代理获取缓存报告（不触发新分析）。"""
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:

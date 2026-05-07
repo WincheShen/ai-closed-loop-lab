@@ -160,11 +160,19 @@
     </div>
 
     <script>
-        // Trading Agent 代理地址（通过 webhook 服务代理转发）
         const ANALYZE_API = '/api/stock/analyze';
+        const TASK_API = '/api/stock/task';
         const REPORT_API = '/api/stock/report';
 
         let analysisHistory = JSON.parse(localStorage.getItem('analysis_history') || '[]');
+        let _pollTimer = null;
+
+        const STATUS_LABEL = {
+            pending: '⏳ 排队中...',
+            running: '🔄 AI 多智能体分析中',
+            done:    '✅ 分析完成',
+            error:   '❌ 分析失败',
+        };
 
         async function doAnalyze(forceRefresh = false) {
             const symbol = document.getElementById('symbol-input').value.trim();
@@ -176,35 +184,70 @@
 
             document.getElementById('empty-state').classList.add('hidden');
             document.getElementById('report-content').classList.add('hidden');
-            document.getElementById('loading-state').classList.remove('hidden');
+            showLoading('⏳ 提交分析任务...', 0);
 
             try {
                 const resp = await fetch(ANALYZE_API, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        symbol: symbol,
-                        depth: depth,
-                        force_refresh: forceRefresh
-                    })
+                    body: JSON.stringify({ symbol, depth, force_refresh: forceRefresh })
                 });
-
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({}));
                     throw new Error(err.detail || `HTTP ${resp.status}`);
                 }
-
-                const data = await resp.json();
-                displayReport(data);
-                addToHistory(data);
-                showToast(`${data.name}(${data.symbol}) 分析完成`, 'success');
+                const { task_id } = await resp.json();
+                startPolling(task_id);
             } catch (e) {
-                showToast('分析失败: ' + e.message, 'error');
+                showToast('提交失败: ' + e.message, 'error');
                 document.getElementById('loading-state').classList.add('hidden');
                 document.getElementById('empty-state').classList.remove('hidden');
-            } finally {
                 btn.disabled = false;
             }
+        }
+
+        function startPolling(task_id) {
+            if (_pollTimer) clearInterval(_pollTimer);
+            _pollTimer = setInterval(() => pollTask(task_id), 3000);
+            pollTask(task_id); // 立即查一次
+        }
+
+        async function pollTask(task_id) {
+            try {
+                const resp = await fetch(`${TASK_API}/${task_id}`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const task = await resp.json();
+
+                const statusText = STATUS_LABEL[task.status] || task.status;
+                showLoading(`${statusText}`, task.elapsed);
+
+                if (task.status === 'done') {
+                    clearInterval(_pollTimer);
+                    document.getElementById('btn-analyze').disabled = false;
+                    displayReport(task.result);
+                    addToHistory(task.result);
+                    showToast(`${task.result.name}(${task.result.symbol}) 分析完成，耗时 ${task.elapsed}s`, 'success');
+                } else if (task.status === 'error') {
+                    clearInterval(_pollTimer);
+                    document.getElementById('btn-analyze').disabled = false;
+                    document.getElementById('loading-state').classList.add('hidden');
+                    document.getElementById('empty-state').classList.remove('hidden');
+                    showToast('分析失败: ' + task.error, 'error');
+                }
+            } catch (e) {
+                // 网络抖动不中断轮询
+                console.warn('Poll error:', e.message);
+            }
+        }
+
+        function showLoading(msg, elapsed) {
+            const el = document.getElementById('loading-state');
+            el.classList.remove('hidden');
+            el.innerHTML = `
+                <span class="spinner"></span>
+                <span>${msg}</span>
+                ${elapsed > 0 ? `<span style="margin-left:12px;color:#9ca3af;font-size:13px;">已等待 ${elapsed}s</span>` : ''}
+            `;
         }
 
         function displayReport(data) {
