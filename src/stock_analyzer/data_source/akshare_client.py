@@ -67,6 +67,21 @@ class KlineBar:
     change_pct: float = 0.0
 
 
+_INDUSTRY_CACHE: dict[str, list[str]] = {}   # date_str -> list of board names
+_MOCK_INDUSTRIES = [
+    "半导体", "消费电子", "电子元件", "光学光电子",
+    "新能源汽车", "电池", "储能设备", "光伏设备",
+    "人工智能", "云计算", "软件开发", "算力基础设施",
+    "医疗器械", "生物制品", "创新药", "医疗服务",
+    "军工", "航空航天", "船舶制造",
+    "白酒", "食品饮料", "商业百货",
+    "银行", "保险", "证券",
+    "房地产", "建筑材料", "工程机械",
+    "煤炭", "有色金属", "钢铁",
+    "传媒", "游戏", "互联网电商",
+]
+
+
 class AkshareClient:
     """统一的行情入口。"""
 
@@ -88,6 +103,30 @@ class AkshareClient:
                 if not self.allow_mock_fallback:
                     raise
         return self._fetch_mock()
+
+    def fetch_industry_list(self) -> list[str]:
+        """获取东方财富行业板块名称列表（日级缓存）。
+
+        Returns:
+            板块名称列表，如 ["半导体", "新能源汽车", ...]
+        """
+        today = date.today().isoformat()
+        if today in _INDUSTRY_CACHE:
+            return _INDUSTRY_CACHE[today]
+
+        if self._ak_available:
+            try:
+                import akshare as ak  # type: ignore
+                df = ak.stock_board_industry_name_em()
+                names = [str(row) for row in df["板块名称"].dropna().tolist()]
+                _INDUSTRY_CACHE.clear()
+                _INDUSTRY_CACHE[today] = names
+                logger.info("Industry list loaded: %d boards", len(names))
+                return names
+            except Exception as e:
+                logger.warning("fetch_industry_list failed: %s，用 mock 列表", e)
+
+        return _MOCK_INDUSTRIES
 
     # ------------------------------------------------------------------
     # Real

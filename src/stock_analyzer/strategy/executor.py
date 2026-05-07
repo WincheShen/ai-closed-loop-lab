@@ -133,6 +133,47 @@ def _check_filter(stock: StockQuote, f: FilterCondition) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Industry filter resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_industry_filters(spec: StrategySpec, industry_list: list[str]) -> StrategySpec:
+    """将 industry contains X 条件替换为精确 industry in [匹配的板块名] 条件。
+
+    匹配规则：从真实板块列表中找出所有包含关键词的板块名。
+    如果没有任何匹配，保留原 contains 条件（不误杀）。
+    """
+    if not industry_list:
+        return spec
+
+    new_filters: list[FilterCondition] = []
+    for f in spec.filters:
+        if f.field == "industry" and f.op == "contains":
+            keyword = str(f.value)
+            matched_boards = [b for b in industry_list if keyword in b]
+            if matched_boards:
+                logger.info(
+                    "industry contains '%s' → in %s (%d boards)",
+                    keyword, matched_boards[:5], len(matched_boards),
+                )
+                new_filters.append(FilterCondition(
+                    field="industry",
+                    op="in",
+                    value=matched_boards,
+                    description=f.description or f"行业匹配「{keyword}」→ {len(matched_boards)}个板块",
+                ))
+            else:
+                logger.warning("industry contains '%s' 无匹配板块，保留原条件", keyword)
+                new_filters.append(f)
+        else:
+            new_filters.append(f)
+
+    from copy import copy
+    resolved = copy(spec)
+    resolved.filters = new_filters
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
 
@@ -159,6 +200,9 @@ class StrategyExecutor:
             "Executing strategy '%s' against %d stocks (mock=%s)",
             spec.name, len(snapshot.stocks), snapshot.is_mock,
         )
+
+        # 0. 将 industry contains 条件解析为精确 in 匹配
+        spec = _resolve_industry_filters(spec, self.akshare_client.fetch_industry_list())
 
         # 1. 过滤
         passed: list[tuple[StockQuote, list[str], list[str]]] = []

@@ -170,6 +170,24 @@ class StrategyCompiler:
             self._llm = get_llm(model_name="gpt-5.4-mini")
         return self._llm
 
+    def _get_industry_hint(self) -> str:
+        """尝试获取真实板块列表，生成注入 prompt 的 hint 文本。"""
+        try:
+            from ..data_source import AkshareClient
+            client = AkshareClient(allow_mock_fallback=True)
+            boards = client.fetch_industry_list()
+            if boards:
+                sample = "、".join(boards[:60])  # 前60个给 LLM 参考
+                return (
+                    f"\n\n【当前东方财富真实行业板块列表（共{len(boards)}个，以下为部分）】\n"
+                    f"{sample}...\n"
+                    f"当用户提到行业时，请从以上列表中选取最匹配的板块名，"
+                    f"使用 contains + 最短区分关键词（如"半导体"而非"芯片半导体"）。"
+                )
+        except Exception as e:
+            logger.warning("获取行业列表失败: %s", e)
+        return ""
+
     def compile(self, user_strategy: str) -> StrategySpec:
         """将自然语言策略编译为 StrategySpec。
 
@@ -182,8 +200,9 @@ class StrategyCompiler:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         llm = self._get_llm()
+        system_content = SYSTEM_PROMPT + self._get_industry_hint()
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
+            SystemMessage(content=system_content),
             HumanMessage(content=f"请解析以下选股策略：\n\n{user_strategy}"),
         ]
 
