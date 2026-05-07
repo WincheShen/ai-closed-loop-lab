@@ -14,11 +14,13 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Linux Docker 需要显式声明
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
       - WEBHOOK_AUTO_SMA_DISPATCH=false
-      - TRADING_AGENT_URL=http://192.168.3.73:8010  # 同 NAS 上的 Trading Agent
+      - TRADING_AGENT_URL=http://host.docker.internal:8010  # 访问宿主机上的 Trading Agent
     restart: unless-stopped
     command: ["python", "-m", "uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"]
 
