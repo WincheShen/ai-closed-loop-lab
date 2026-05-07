@@ -17,7 +17,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-      - WEBHOOK_AUTO_SMA_DISPATCH=false  # NAS 上可能不需要自动发社媒
+      - WEBHOOK_AUTO_SMA_DISPATCH=false
+      - TRADING_AGENT_URL=http://192.168.3.73:8010  # 同 NAS 上的 Trading Agent
     restart: unless-stopped
     command: ["python", "-m", "uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"]
 

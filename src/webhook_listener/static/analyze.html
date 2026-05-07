@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Lab - 个股分析</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f4f8; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #1e293b; margin-bottom: 8px; }
+        .subtitle { color: #64748b; margin-bottom: 24px; font-size: 14px; }
+        a { color: #3b82f6; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .card h2 { font-size: 16px; color: #374151; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .card h2 .icon { font-size: 20px; }
+
+        /* Input Area */
+        .input-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+        .input-group { flex: 1; min-width: 200px; }
+        .input-group label { display: block; margin-bottom: 6px; font-weight: 500; color: #374151; font-size: 14px; }
+        .input-group input, .input-group select { width: 100%; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+        .input-group input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
+
+        button { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-primary:hover { background: #2563eb; }
+        .btn-secondary { background: #e5e7eb; color: #374151; }
+        .btn-secondary:hover { background: #d1d5db; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Report */
+        .report-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+        .stock-title { display: flex; align-items: baseline; gap: 12px; }
+        .stock-title h2 { font-size: 22px; margin: 0; }
+        .stock-title .code { color: #6b7280; font-size: 14px; }
+        .stock-price { font-size: 28px; font-weight: 700; }
+
+        .decision-badge { display: inline-block; padding: 8px 20px; border-radius: 20px; font-size: 16px; font-weight: 700; }
+        .decision-BUY { background: #dcfce7; color: #166534; }
+        .decision-HOLD { background: #fef3c7; color: #92400e; }
+        .decision-SELL { background: #fee2e2; color: #991b1b; }
+
+        .confidence-bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+        .confidence-track { flex: 1; max-width: 200px; height: 8px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+        .confidence-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+        .confidence-label { font-size: 13px; color: #6b7280; }
+
+        .report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 768px) { .report-grid { grid-template-columns: 1fr; } }
+
+        .section-title { font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+        .section-content { font-size: 13px; color: #4b5563; line-height: 1.8; white-space: pre-wrap; word-break: break-word; }
+
+        .key-levels { display: flex; gap: 16px; margin-top: 8px; }
+        .level-item { padding: 6px 12px; border-radius: 6px; font-size: 12px; }
+        .level-support { background: #dcfce7; color: #166534; }
+        .level-resistance { background: #fee2e2; color: #991b1b; }
+
+        .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; margin-top: 10px; }
+        .meta-item { text-align: center; padding: 8px; background: #f9fafb; border-radius: 6px; }
+        .meta-item .label { font-size: 11px; color: #6b7280; }
+        .meta-item .value { font-size: 16px; font-weight: 600; color: #1e293b; margin-top: 2px; }
+
+        .debate-card { padding: 14px; border-radius: 8px; margin-bottom: 12px; }
+        .bull-card { background: #f0fdf4; border-left: 4px solid #22c55e; }
+        .bear-card { background: #fef2f2; border-left: 4px solid #ef4444; }
+        .debate-label { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+        .bull-label { color: #166534; }
+        .bear-label { color: #991b1b; }
+        .debate-text { font-size: 13px; line-height: 1.7; color: #374151; }
+
+        .summary-box { background: #eff6ff; padding: 16px; border-radius: 8px; font-size: 14px; line-height: 1.8; color: #1e40af; margin-top: 16px; }
+        .risk-box { background: #fffbeb; padding: 12px; border-radius: 8px; font-size: 12px; color: #92400e; margin-top: 12px; }
+
+        .report-meta { display: flex; gap: 16px; margin-top: 12px; font-size: 12px; color: #9ca3af; }
+
+        /* Loading */
+        .loading { text-align: center; padding: 40px; color: #6b7280; }
+        .spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #e5e7eb; border-top-color: #3b82f6; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 10px; vertical-align: middle; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .empty-state { text-align: center; padding: 60px 20px; color: #9ca3af; }
+        .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+
+        .hidden { display: none; }
+        .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; font-size: 14px; z-index: 1000; animation: slideIn 0.3s; }
+        .toast-success { background: #10b981; }
+        .toast-error { background: #ef4444; }
+        @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
+        /* History */
+        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px; cursor: pointer; transition: all 0.2s; }
+        .history-item:hover { border-color: #3b82f6; background: #f0f9ff; }
+        .history-info { display: flex; align-items: center; gap: 10px; }
+        .history-decision { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+        .history-time { font-size: 12px; color: #9ca3af; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 个股深度分析</h1>
+        <p class="subtitle">
+            <a href="/ui/">← 返回首页</a> |
+            <a href="/ui/strategy.html">策略选股</a> |
+            输入股票代码 → TradingAgents 多智能体辩论 → 生成投资建议
+        </p>
+
+        <!-- 输入区 -->
+        <div class="card">
+            <h2><span class="icon">📊</span>分析请求</h2>
+            <div class="input-row">
+                <div class="input-group">
+                    <label>股票代码</label>
+                    <input type="text" id="symbol-input" placeholder="如 600519、000001、688981" 
+                           onkeydown="if(event.key==='Enter')doAnalyze()">
+                </div>
+                <div class="input-group" style="max-width:160px;">
+                    <label>分析深度</label>
+                    <select id="depth-select">
+                        <option value="deep">深度分析</option>
+                        <option value="quick">快速分析</option>
+                    </select>
+                </div>
+                <div class="input-group" style="max-width:160px;">
+                    <label>&nbsp;</label>
+                    <div style="display:flex;gap:8px;">
+                        <button class="btn-primary" id="btn-analyze" onclick="doAnalyze()">分析</button>
+                        <button class="btn-secondary" onclick="doAnalyze(true)">强制刷新</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 报告展示区 -->
+        <div id="report-area">
+            <div class="card empty-state" id="empty-state">
+                <div class="icon">📈</div>
+                <p>输入股票代码并点击"分析"，AI 将生成深度投资报告</p>
+                <p style="margin-top:8px;font-size:12px;">基于 TradingAgents 多智能体系统：研究员调研 → 多空辩论 → 风控评估 → 交易决策</p>
+            </div>
+
+            <div id="loading-state" class="card loading hidden">
+                <span class="spinner"></span>
+                <span>AI 正在分析中，深度分析可能需要 30-60 秒...</span>
+            </div>
+
+            <div id="report-content" class="hidden"></div>
+        </div>
+
+        <!-- 历史记录 -->
+        <div class="card" id="history-section">
+            <h2><span class="icon">📂</span>历史分析记录</h2>
+            <div id="history-list">
+                <p style="color:#9ca3af;text-align:center;padding:16px;">分析过的股票将显示在这里</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Trading Agent 代理地址（通过 webhook 服务代理转发）
+        const ANALYZE_API = '/api/stock/analyze';
+        const REPORT_API = '/api/stock/report';
+
+        let analysisHistory = JSON.parse(localStorage.getItem('analysis_history') || '[]');
+
+        async function doAnalyze(forceRefresh = false) {
+            const symbol = document.getElementById('symbol-input').value.trim();
+            if (!symbol) { showToast('请输入股票代码', 'error'); return; }
+
+            const depth = document.getElementById('depth-select').value;
+            const btn = document.getElementById('btn-analyze');
+            btn.disabled = true;
+
+            document.getElementById('empty-state').classList.add('hidden');
+            document.getElementById('report-content').classList.add('hidden');
+            document.getElementById('loading-state').classList.remove('hidden');
+
+            try {
+                const resp = await fetch(ANALYZE_API, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        symbol: symbol,
+                        depth: depth,
+                        force_refresh: forceRefresh
+                    })
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+
+                const data = await resp.json();
+                displayReport(data);
+                addToHistory(data);
+                showToast(`${data.name}(${data.symbol}) 分析完成`, 'success');
+            } catch (e) {
+                showToast('分析失败: ' + e.message, 'error');
+                document.getElementById('loading-state').classList.add('hidden');
+                document.getElementById('empty-state').classList.remove('hidden');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function displayReport(data) {
+            document.getElementById('loading-state').classList.add('hidden');
+            const report = data.report;
+            const meta = data.metadata;
+
+            const decisionColor = report.final_decision === 'BUY' ? '#22c55e' :
+                                  report.final_decision === 'SELL' ? '#ef4444' : '#f59e0b';
+            const confidencePct = (report.confidence * 100).toFixed(0);
+
+            let html = `
+            <div class="card">
+                <div class="report-header">
+                    <div>
+                        <div class="stock-title">
+                            <h2>${report.name}</h2>
+                            <span class="code">${report.symbol}</span>
+                            <span class="stock-price">¥${report.current_price.toFixed(2)}</span>
+                        </div>
+                        <div class="confidence-bar">
+                            <span class="decision-badge decision-${report.final_decision}">${report.final_decision}</span>
+                            <div class="confidence-track">
+                                <div class="confidence-fill" style="width:${confidencePct}%;background:${decisionColor}"></div>
+                            </div>
+                            <span class="confidence-label">置信度 ${confidencePct}%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="summary-box">${report.summary}</div>
+
+                <div class="report-grid" style="margin-top:20px;">
+                    <!-- 技术面 -->
+                    <div>
+                        <div class="section-title">📉 技术面分析</div>
+                        <div style="margin-bottom:8px;">
+                            <span style="font-size:13px;color:#6b7280;">趋势：</span>
+                            <strong>${report.technical.trend}</strong>
+                        </div>
+                        <div class="key-levels">
+                            <span class="level-item level-support">支撑 ¥${report.technical.key_levels.support || '-'}</span>
+                            <span class="level-item level-resistance">阻力 ¥${report.technical.key_levels.resistance || '-'}</span>
+                        </div>
+                        ${report.technical.summary ? `<div class="section-content" style="margin-top:10px;">${truncate(report.technical.summary, 500)}</div>` : ''}
+                    </div>
+
+                    <!-- 基本面 -->
+                    <div>
+                        <div class="section-title">📊 基本面分析</div>
+                        <div class="meta-grid">
+                            <div class="meta-item">
+                                <div class="label">行业</div>
+                                <div class="value" style="font-size:12px;">${report.fundamental.industry || '-'}</div>
+                            </div>
+                            <div class="meta-item">
+                                <div class="label">PE(TTM)</div>
+                                <div class="value">${report.fundamental.pe_ttm ? report.fundamental.pe_ttm.toFixed(1) : '-'}</div>
+                            </div>
+                            <div class="meta-item">
+                                <div class="label">PB</div>
+                                <div class="value">${report.fundamental.pb ? report.fundamental.pb.toFixed(2) : '-'}</div>
+                            </div>
+                            <div class="meta-item">
+                                <div class="label">ROE</div>
+                                <div class="value">${report.fundamental.roe ? report.fundamental.roe.toFixed(1) + '%' : '-'}</div>
+                            </div>
+                            <div class="meta-item">
+                                <div class="label">市值(亿)</div>
+                                <div class="value">${report.fundamental.market_cap_yi ? report.fundamental.market_cap_yi.toFixed(0) : '-'}</div>
+                            </div>
+                        </div>
+                        ${report.fundamental.summary ? `<div class="section-content" style="margin-top:10px;">${truncate(report.fundamental.summary, 500)}</div>` : ''}
+                    </div>
+                </div>
+
+                <!-- 多空辩论 -->
+                <div style="margin-top:20px;">
+                    <div class="section-title">⚔️ 多空辩论</div>
+                    <div class="debate-card bull-card">
+                        <div class="debate-label bull-label">🟢 多方观点</div>
+                        <div class="debate-text">${report.bull_case}</div>
+                    </div>
+                    <div class="debate-card bear-card">
+                        <div class="debate-label bear-label">🔴 空方观点</div>
+                        <div class="debate-text">${report.bear_case}</div>
+                    </div>
+                </div>
+
+                <!-- 风险提示 -->
+                ${report.risk_warning ? `<div class="risk-box">⚠️ ${report.risk_warning}</div>` : ''}
+
+                <!-- 元信息 -->
+                <div class="report-meta">
+                    <span>分析时间: ${new Date(meta.evaluated_at).toLocaleString('zh-CN')}</span>
+                    <span>深度: ${meta.depth}</span>
+                    <span>${meta.cache_hit ? '📦 缓存命中' : '🔄 实时分析'}</span>
+                    <span>耗时: ${meta.elapsed_seconds.toFixed(1)}s</span>
+                    <span>有效期至: ${report.valid_until}</span>
+                </div>
+            </div>`;
+
+            document.getElementById('report-content').innerHTML = html;
+            document.getElementById('report-content').classList.remove('hidden');
+        }
+
+        function addToHistory(data) {
+            const item = {
+                symbol: data.symbol,
+                name: data.name,
+                decision: data.report.final_decision,
+                price: data.report.current_price,
+                time: new Date().toISOString()
+            };
+            // 去重（同一 symbol 只保留最新）
+            analysisHistory = analysisHistory.filter(h => h.symbol !== item.symbol);
+            analysisHistory.unshift(item);
+            if (analysisHistory.length > 20) analysisHistory = analysisHistory.slice(0, 20);
+            localStorage.setItem('analysis_history', JSON.stringify(analysisHistory));
+            renderHistory();
+        }
+
+        function renderHistory() {
+            if (analysisHistory.length === 0) {
+                document.getElementById('history-list').innerHTML =
+                    '<p style="color:#9ca3af;text-align:center;padding:16px;">分析过的股票将显示在这里</p>';
+                return;
+            }
+            const html = analysisHistory.map(h => {
+                const decCls = `decision-${h.decision}`;
+                const time = new Date(h.time).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+                return `
+                <div class="history-item" onclick="loadFromHistory('${h.symbol}')">
+                    <div class="history-info">
+                        <strong>${h.name}</strong>
+                        <span style="color:#6b7280;font-size:12px;">${h.symbol}</span>
+                        <span class="history-decision decision-badge ${decCls}" style="font-size:11px;padding:2px 8px;">${h.decision}</span>
+                        <span style="font-size:13px;">¥${h.price.toFixed(2)}</span>
+                    </div>
+                    <span class="history-time">${time}</span>
+                </div>`;
+            }).join('');
+            document.getElementById('history-list').innerHTML = html;
+        }
+
+        function loadFromHistory(symbol) {
+            document.getElementById('symbol-input').value = symbol;
+            doAnalyze();
+        }
+
+        function truncate(text, max) {
+            if (!text) return '';
+            return text.length > max ? text.substring(0, max) + '...' : text;
+        }
+
+        function showToast(msg, type) {
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // 初始化
+        renderHistory();
+    </script>
+</body>
+</html>

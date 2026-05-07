@@ -285,6 +285,44 @@ def list_social_posts(limit: int = 20) -> list[dict]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Stock Analysis Proxy（转发到 Trading Agent Service）
+# ---------------------------------------------------------------------------
+_TRADING_AGENT_URL = os.environ.get("TRADING_AGENT_URL", "http://localhost:8010")
+
+
+@app.post("/api/stock/analyze")
+async def proxy_analyze(request: dict):
+    """代理转发个股分析请求到 Trading Agent Service。"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(f"{_TRADING_AGENT_URL}/analyze", json=request)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Trading Agent 分析超时（>120s），请稍后重试")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"无法连接 Trading Agent: {e}")
+
+
+@app.get("/api/stock/report/{symbol}")
+async def proxy_report(symbol: str):
+    """代理获取缓存报告。"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{_TRADING_AGENT_URL}/report/{symbol}")
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"无法连接 Trading Agent: {e}")
+
+
 # 挂载静态文件（管理页面）- 挂载到 /ui 路径
 _static_dir = Path(__file__).resolve().parent / "static"
 if _static_dir.exists():
