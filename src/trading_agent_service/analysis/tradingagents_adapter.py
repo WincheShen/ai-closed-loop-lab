@@ -131,10 +131,19 @@ def reset_graph() -> None:
 # Stock metadata loader（拉数值字段，不走 LLM）
 # ---------------------------------------------------------------------------
 
+def _is_us_symbol(symbol: str) -> bool:
+    """判断是否为美股代码（如 AAPL, TSLA, NVDA.US）。"""
+    s = symbol.upper().strip()
+    if s.endswith(".US"):
+        return True
+    # 纯大写字母，1-5字符，常见美股格式
+    return s.isalpha() and s.isupper() and 1 <= len(s) <= 5
+
+
 def _load_stock_meta(symbol: str) -> dict:
     """从 akshare 拉行情 + 基本面，组装数值字段。
 
-    失败不抛异常，返回带默认值的字典。
+    支持 A 股和美股。失败不抛异常，返回带默认值的字典。
     """
     out = {
         "name": f"代码{symbol}",
@@ -151,8 +160,30 @@ def _load_stock_meta(symbol: str) -> dict:
         logger.warning("stock_analyzer not on path; cannot load stock meta")
         return out
 
+    client = AkshareClient(allow_mock_fallback=True)
+
+    # 美股分支
+    if _is_us_symbol(symbol):
+        try:
+            match = client.fetch_us_stock(symbol)
+            if match is not None:
+                out.update({
+                    "name": match.name,
+                    "current_price": match.price,
+                    "industry": match.industry or "美股",
+                    "market_cap_yi": match.market_cap_yi,
+                    "pe_ttm": match.pe_ttm,
+                    "pb": match.pb,
+                })
+                logger.info("US stock meta loaded: %s @ %.2f", symbol, match.price)
+            else:
+                logger.warning("US stock %s not found in akshare", symbol)
+        except Exception as e:
+            logger.warning("US stock meta load failed for %s: %s", symbol, e)
+        return out
+
+    # A 股分支
     try:
-        client = AkshareClient(allow_mock_fallback=True)
         snap = client.fetch_snapshot()
         match = next(
             (s for s in snap.stocks if s.symbol == symbol or s.symbol.endswith(symbol)),
@@ -168,7 +199,7 @@ def _load_stock_meta(symbol: str) -> dict:
                 "pb": match.pb,
             })
     except Exception as e:  # noqa: BLE001
-        logger.warning("akshare meta load failed for %s: %s", symbol, e)
+        logger.warning("A-share meta load failed for %s: %s", symbol, e)
     return out
 
 

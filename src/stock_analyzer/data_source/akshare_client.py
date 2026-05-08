@@ -128,6 +128,44 @@ class AkshareClient:
 
         return _MOCK_INDUSTRIES
 
+    def fetch_us_stock(self, symbol: str) -> Optional[StockQuote]:
+        """拉取单只美股实时行情（东方财富美股接口）。
+
+        Args:
+            symbol: 美股代码，如 "AAPL", "TSLA"（可带 .US 后缀）
+
+        Returns:
+            StockQuote 或 None（未找到或接口失败）
+        """
+        if not self._ak_available:
+            return None
+        try:
+            import akshare as ak  # type: ignore
+            # 东方财富美股全量接口
+            df = ak.stock_us_spot_em()
+            # 统一代码格式：去掉 .US 后缀，转大写
+            clean_symbol = symbol.upper().replace(".US", "").strip()
+            match = df[df["代码"].str.upper() == clean_symbol]
+            if match.empty:
+                return None
+            row = match.iloc[0]
+            return StockQuote(
+                symbol=clean_symbol,
+                name=str(row.get("名称", clean_symbol)),
+                price=float(row.get("最新价", 0) or 0),
+                change_pct=float(row.get("涨跌幅", 0) or 0),
+                volume=float(row.get("成交量", 0) or 0),
+                turnover=float(row.get("成交额", 0) or 0),
+                turnover_rate=0.0,  # 美股接口无换手率
+                pe_ttm=_safe_float(row.get("市盈率")),
+                pb=_safe_float(row.get("市净率")),
+                market_cap_yi=_safe_float(row.get("总市值"), divisor=1e8),
+                industry="美股",  # 东方财富美股接口无细分行业
+            )
+        except Exception as e:
+            logger.warning("fetch_us_stock failed for %s: %s", symbol, e)
+            return None
+
     # ------------------------------------------------------------------
     # Real
     # ------------------------------------------------------------------
