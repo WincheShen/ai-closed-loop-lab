@@ -189,6 +189,46 @@ class MemoryStore:
                 last_metrics_at TEXT,
                 error TEXT
             );
+            -- ---------------------------------------------------------------
+            -- Position tracking with original thesis
+            -- ---------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS positions (
+                position_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                side TEXT DEFAULT 'long',
+                entry_price REAL NOT NULL,
+                current_qty INTEGER DEFAULT 0,
+                entry_date TEXT NOT NULL,
+                status TEXT DEFAULT 'open',
+                original_signal_id TEXT,
+                original_thesis TEXT,
+                original_strategy TEXT,
+                bull_case TEXT,
+                bear_case TEXT,
+                target_price REAL,
+                stop_loss REAL,
+                last_review_at TEXT,
+                last_review_action TEXT,
+                last_review_reason TEXT,
+                closed_at TEXT,
+                close_price REAL,
+                realized_pnl REAL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS position_reviews (
+                review_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                review_at TEXT NOT NULL,
+                current_price REAL,
+                pnl_pct REAL,
+                action TEXT NOT NULL,
+                reason TEXT,
+                market_summary TEXT,
+                model TEXT,
+                tokens_used INTEGER DEFAULT 0,
+                FOREIGN KEY (position_id) REFERENCES positions(position_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
             CREATE INDEX IF NOT EXISTS idx_signals_session ON trade_signals(session_id);
             CREATE INDEX IF NOT EXISTS idx_orders_session ON orders(session_id);
@@ -197,6 +237,9 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_llm_request ON llm_calls(request_id);
             CREATE INDEX IF NOT EXISTS idx_posts_account ON social_posts(account_id);
             CREATE INDEX IF NOT EXISTS idx_posts_date ON social_posts(dispatched_at);
+            CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+            CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
+            CREATE INDEX IF NOT EXISTS idx_reviews_position ON position_reviews(position_id);
             """
         )
         conn.commit()
@@ -540,6 +583,139 @@ class MemoryStore:
             "total_tokens": row["tokens"],
             "total_cost_usd": round(row["cost_usd"], 4),
         }
+
+    # ------------------------------------------------------------------
+    # Position & thesis management
+    # ------------------------------------------------------------------
+
+    def open_position(
+        self,
+        position_id: str,
+        symbol: str,
+        entry_price: float,
+        qty: int,
+        entry_date: str,
+        name: str = "",
+        side: str = "long",
+        signal_id: str | None = None,
+        thesis: str | None = None,
+        strategy: str | None = None,
+        bull_case: str | None = None,
+        bear_case: str | None = None,
+        target_price: float | None = None,
+        stop_loss: float | None = None,
+    ) -> None:
+        """Open a new position with the original analysis thesis attached."""
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO positions
+            (position_id, symbol, name, side, entry_price, current_qty, entry_date,
+             status, original_signal_id, original_thesis, original_strategy,
+             bull_case, bear_case, target_price, stop_loss, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                position_id, symbol, name, side, entry_price, qty, entry_date,
+                signal_id, thesis, strategy, bull_case, bear_case,
+                target_price, stop_loss, datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def list_open_positions(self) -> list[dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_date"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_position(self, position_id: str) -> dict | None:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM positions WHERE position_id = ?", (position_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_position_review(
+        self,
+        position_id: str,
+        action: str,
+        reason: str,
+        review_at: str | None = None,
+    ) -> None:
+        """Update position with latest review result."""
+        conn = self._conn()
+        ts = review_at or datetime.now().isoformat()
+        conn.execute(
+            """UPDATE positions
+            SET last_review_at = ?, last_review_action = ?, last_review_reason = ?
+            WHERE position_id = ?""",
+            (ts, action, reason, position_id),
+        )
+        conn.commit()
+
+    def update_position_qty(self, position_id: str, new_qty: int) -> None:
+        conn = self._conn()
+        conn.execute(
+            "UPDATE positions SET current_qty = ? WHERE position_id = ?",
+            (new_qty, position_id),
+        )
+        conn.commit()
+
+    def close_position(
+        self,
+        position_id: str,
+        close_price: float,
+        realized_pnl: float,
+        closed_at: str | None = None,
+    ) -> None:
+        conn = self._conn()
+        ts = closed_at or datetime.now().isoformat()
+        conn.execute(
+            """UPDATE positions
+            SET status = 'closed', close_price = ?, realized_pnl = ?,
+                closed_at = ?, current_qty = 0
+            WHERE position_id = ?""",
+            (close_price, realized_pnl, ts, position_id),
+        )
+        conn.commit()
+
+    def save_position_review(
+        self,
+        review_id: str,
+        position_id: str,
+        current_price: float,
+        pnl_pct: float,
+        action: str,
+        reason: str,
+        market_summary: str = "",
+        model: str = "",
+        tokens_used: int = 0,
+    ) -> None:
+        """Persist one review record for audit trail."""
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO position_reviews
+            (review_id, position_id, review_at, current_price, pnl_pct,
+             action, reason, market_summary, model, tokens_used)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                review_id, position_id, datetime.now().isoformat(),
+                current_price, pnl_pct, action, reason,
+                market_summary, model, tokens_used,
+            ),
+        )
+        conn.commit()
+
+    def list_position_reviews(
+        self, position_id: str, limit: int = 50,
+    ) -> list[dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM position_reviews WHERE position_id = ? "
+            "ORDER BY review_at DESC LIMIT ?",
+            (position_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # =============================================================================
