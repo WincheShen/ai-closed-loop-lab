@@ -11,5 +11,6 @@ akshare
 Pillow
 sqlite-vec
 langchain-openai
+schedule
 # langchain-google-genai
 # langgraph
