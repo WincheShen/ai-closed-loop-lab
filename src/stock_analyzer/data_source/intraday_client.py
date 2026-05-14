@@ -84,6 +84,8 @@ class IntradayClient:
     ) -> list[MinuteBar]:
         """拉取分钟K线。
 
+        数据源优先级：akshare(eastmoney) → 新浪财经 → mock
+
         Args:
             symbol: 6位股票代码
             period: K线周期 '1'/'5'/'15'/'30'/'60'
@@ -97,11 +99,15 @@ class IntradayClient:
                 return self._fetch_minute_real(symbol, period, limit)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    "分钟K线拉取失败 %s(period=%s): %s，降级 mock",
+                    "分钟K线拉取失败 %s(period=%s): %s，尝试新浪",
                     symbol, period, e,
                 )
-                if not self.allow_mock_fallback:
-                    raise
+        try:
+            return self._fetch_minute_sina(symbol, period, limit)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("新浪分钟K线也失败 %s: %s，降级 mock", symbol, e)
+        if not self.allow_mock_fallback:
+            raise RuntimeError(f"分钟K线不可用: {symbol}")
         return self._fetch_minute_mock(symbol, period, limit)
 
     def fetch_intraday_ticks(self, symbol: str) -> list[IntradayTick]:
@@ -205,6 +211,64 @@ class IntradayClient:
             except Exception:  # noqa: BLE001
                 continue
         return ticks
+
+    # ------------------------------------------------------------------
+    # Sina fallback (push2.eastmoney.com 被封时使用)
+    # ------------------------------------------------------------------
+
+    _SINA_KLINE_URL = (
+        "http://money.finance.sina.com.cn/quotes_service"
+        "/api/json_v2.php/CN_MarketData.getKLineData"
+    )
+    _SINA_HEADERS = {"Referer": "http://finance.sina.com.cn"}
+
+    def _fetch_minute_sina(
+        self, symbol: str, period: PeriodType, limit: int,
+    ) -> list[MinuteBar]:
+        """通过新浪财经 API 拉取分钟K线。"""
+        import requests as _req
+
+        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+        sina_symbol = f"{prefix}{symbol}"
+
+        params = {
+            "symbol": sina_symbol,
+            "scale": int(period),
+            "ma": "no",
+            "datalen": limit,
+        }
+        resp = _req.get(
+            self._SINA_KLINE_URL, params=params,
+            headers=self._SINA_HEADERS, timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        bars: list[MinuteBar] = []
+        prev_close = 0.0
+        for item in data:
+            try:
+                ts_str = str(item.get("day", ""))
+                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                close = float(item.get("close", 0))
+                change_pct = (
+                    round((close / prev_close - 1) * 100, 2)
+                    if prev_close > 0 else 0
+                )
+                bars.append(MinuteBar(
+                    timestamp=ts,
+                    open=float(item.get("open", 0)),
+                    high=float(item.get("high", 0)),
+                    low=float(item.get("low", 0)),
+                    close=close,
+                    volume=float(item.get("volume", 0)) / 100,  # 股→手
+                    turnover=0.0,  # 新浪分钟 K 线不含成交额
+                    change_pct=change_pct,
+                ))
+                prev_close = close
+            except Exception:  # noqa: BLE001
+                continue
+        return bars[-limit:]
 
     # ------------------------------------------------------------------
     # Mock implementations

@@ -99,9 +99,14 @@ class AkshareClient:
             try:
                 return self._fetch_real()
             except Exception as e:  # noqa: BLE001
-                logger.warning("akshare 真实拉取失败：%s，降级到 mock", e)
-                if not self.allow_mock_fallback:
-                    raise
+                logger.warning("akshare 拉取失败：%s，尝试新浪 API", e)
+        # Sina fallback (push2.eastmoney.com 被封时)
+        try:
+            return self._fetch_sina()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("新浪 API 也失败：%s，降级到 mock", e)
+        if not self.allow_mock_fallback:
+            raise RuntimeError("所有数据源均不可用")
         return self._fetch_mock()
 
     def fetch_industry_list(self) -> list[str]:
@@ -223,6 +228,119 @@ class AkshareClient:
         )
 
     # ------------------------------------------------------------------
+    # Sina fallback (push2.eastmoney.com 被封时使用)
+    # ------------------------------------------------------------------
+
+    _SINA_HQ_URL = (
+        "http://vip.stock.finance.sina.com.cn/quotes_service"
+        "/api/json_v2.php/Market_Center.getHQNodeData"
+    )
+    _SINA_KLINE_URL = (
+        "http://money.finance.sina.com.cn/quotes_service"
+        "/api/json_v2.php/CN_MarketData.getKLineData"
+    )
+    _SINA_HEADERS = {"Referer": "http://finance.sina.com.cn"}
+
+    def _fetch_sina(self) -> MarketSnapshot:
+        """通过新浪财经 API 拉取全 A 股行情快照。
+
+        新浪 Market_Center 接口分页返回所有 A 股实时行情，
+        字段覆盖：代码/名称/最新价/涨跌幅/成交量/成交额/换手率/PE/PB/市值。
+        不含行业板块数据，HotSectorDetector 会返回空列表。
+        """
+        import requests as _req
+
+        all_data: list[dict] = []
+        for page in range(1, 120):  # ~5000 stocks / 80 per page ≈ 63 pages
+            params = {
+                "page": page, "num": 80,
+                "sort": "symbol", "asc": 1,
+                "node": "hs_a", "_s_r_a": "init",
+            }
+            resp = _req.get(
+                self._SINA_HQ_URL, params=params,
+                headers=self._SINA_HEADERS, timeout=20,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            all_data.extend(batch)
+
+        stocks: list[StockQuote] = []
+        for item in all_data:
+            try:
+                price = float(item.get("trade", 0) or 0)
+                if price <= 0:
+                    continue
+                stocks.append(StockQuote(
+                    symbol=str(item.get("code", "")).zfill(6),
+                    name=str(item.get("name", "")),
+                    price=price,
+                    change_pct=float(item.get("changepercent", 0) or 0),
+                    volume=float(item.get("volume", 0) or 0) / 100,  # 股→手
+                    turnover=float(item.get("amount", 0) or 0),
+                    turnover_rate=float(item.get("turnoverratio", 0) or 0),
+                    pe_ttm=_safe_float(item.get("per")),
+                    pb=_safe_float(item.get("pb")),
+                    market_cap_yi=_safe_float(item.get("mktcap"), divisor=1e8),
+                ))
+            except Exception:  # noqa: BLE001
+                continue
+
+        logger.info("新浪行情快照：%d 只股票（无板块数据）", len(stocks))
+        return MarketSnapshot(
+            snapshot_date=date.today(),
+            stocks=stocks,
+            sectors=[],  # 新浪不提供行业板块，HotSectorDetector 返回空
+            is_mock=False,
+        )
+
+    def _fetch_kline_sina(self, symbol: str, days: int) -> list[KlineBar]:
+        """通过新浪财经 API 拉取日K线。"""
+        import requests as _req
+
+        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+        sina_symbol = f"{prefix}{symbol}"
+
+        params = {
+            "symbol": sina_symbol,
+            "scale": 240,  # 日K (240 分钟 = 一个交易日)
+            "ma": "no",
+            "datalen": days,
+        }
+        resp = _req.get(
+            self._SINA_KLINE_URL, params=params,
+            headers=self._SINA_HEADERS, timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        bars: list[KlineBar] = []
+        prev_close = 0.0
+        for item in data:
+            try:
+                close = float(item.get("close", 0))
+                change_pct = (
+                    round((close / prev_close - 1) * 100, 2)
+                    if prev_close > 0 else 0
+                )
+                bars.append(KlineBar(
+                    date=date.fromisoformat(str(item.get("day", ""))[:10]),
+                    open=float(item.get("open", 0)),
+                    high=float(item.get("high", 0)),
+                    low=float(item.get("low", 0)),
+                    close=close,
+                    volume=float(item.get("volume", 0)) / 100,  # 股→手
+                    turnover=0.0,  # 新浪 K 线不含成交额
+                    change_pct=change_pct,
+                ))
+                prev_close = close
+            except Exception:  # noqa: BLE001
+                continue
+        return bars
+
+    # ------------------------------------------------------------------
     # Mock
     # ------------------------------------------------------------------
 
@@ -267,6 +385,8 @@ class AkshareClient:
     def fetch_kline(self, symbol: str, days: int = 60) -> list[KlineBar]:
         """拉取单只股票的日K线（最近 N 个交易日）。
 
+        数据源优先级：akshare(eastmoney) → 新浪财经 → mock
+
         Args:
             symbol: 6位股票代码，如 "600519"
             days: 向前取多少个交易日（约=自然日数 * 5/7）
@@ -278,9 +398,13 @@ class AkshareClient:
             try:
                 return self._fetch_kline_real(symbol, days)
             except Exception as e:
-                logger.warning("akshare kline failed for %s: %s，降级 mock", symbol, e)
-                if not self.allow_mock_fallback:
-                    raise
+                logger.warning("akshare kline failed for %s: %s，尝试新浪", symbol, e)
+        try:
+            return self._fetch_kline_sina(symbol, days)
+        except Exception as e:
+            logger.warning("新浪 kline 也失败 %s: %s，降级 mock", symbol, e)
+        if not self.allow_mock_fallback:
+            raise RuntimeError(f"K线数据不可用: {symbol}")
         return self._fetch_kline_mock(symbol, days)
 
     def _fetch_kline_real(self, symbol: str, days: int) -> list[KlineBar]:
