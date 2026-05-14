@@ -283,7 +283,7 @@ class AkshareClient:
                     turnover_rate=float(item.get("turnoverratio", 0) or 0),
                     pe_ttm=_safe_float(item.get("per")),
                     pb=_safe_float(item.get("pb")),
-                    market_cap_yi=_safe_float(item.get("mktcap"), divisor=1e8),
+                    market_cap_yi=_safe_float(item.get("mktcap"), divisor=1e4),
                 ))
             except Exception:  # noqa: BLE001
                 continue
