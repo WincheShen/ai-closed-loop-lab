@@ -130,6 +130,10 @@ class TradingState(TypedDict):
     run_mode: Literal["scan", "paper", "live"]  # 运行模式
     timestamp: str                   # 状态最后更新时间
 
+    # ===== Phase 0: 认知层 (MarketBrain + Persona) =====
+    market_regime: Optional[dict]    # MarketRegimeSnapshot 序列化
+    persona_version: Optional[str]   # 当前生效的 TradingPersona 版本
+
     # ===== Phase 1: 探索 (Explorer) =====
     hot_sectors: list[str]           # 热门板块列表
     target_stocks: list[StockCandidate]  # Qlib 选出的候选票
@@ -138,6 +142,7 @@ class TradingState(TypedDict):
     # ===== Phase 2: 决策 (Strategist) =====
     trade_signals: list[TradeSignal]  # 生成的交易信号
     risk_assessment: dict            # 整体风控评估
+    risk_decisions: list[dict]       # RiskGovernor 的 approve/reduce/reject 记录
     portfolio_status: Optional[dict]  # 当前持仓快照
 
     # ===== Phase 3: 执行 (Executioner) =====
@@ -166,11 +171,14 @@ def create_empty_state(session_id: str, run_mode: str = "scan") -> TradingState:
         "session_id": session_id,
         "run_mode": run_mode,  # type: ignore[typeddict-item]
         "timestamp": datetime.now().isoformat(),
+        "market_regime": None,
+        "persona_version": None,
         "hot_sectors": [],
         "target_stocks": [],
         "social_sentiment": {},
         "trade_signals": [],
         "risk_assessment": {},
+        "risk_decisions": [],
         "portfolio_status": None,
         "active_orders": [],
         "filled_orders": [],

@@ -148,11 +148,16 @@ class ExecutionEngine:
             bear_case=signal.get("bear_case", ""),  # type: ignore[arg-type]
             target_price=signal.get("target_price"),
             stop_loss=signal.get("stop_loss"),
+            # Cognitive Agent Phase 1 元数据
+            market_regime=signal.get("market_regime", ""),  # type: ignore[arg-type]
+            persona_version=signal.get("persona_version", ""),  # type: ignore[arg-type]
+            sector=signal.get("sector", ""),  # type: ignore[arg-type]
         )
         self.logger.info(
-            "[MOCK] 自动建仓 %s | %s | 成本=%.2f | 数量=%d | 策略=%s",
+            "[MOCK] 自动建仓 %s | %s | 成本=%.2f | 数量=%d | 策略=%s | regime=%s",
             position_id, signal["symbol"], fill["avg_price"],
             fill["quantity"], signal.get("strategy", ""),
+            signal.get("market_regime", "n/a"),  # type: ignore[arg-type]
         )
 
     async def _paper_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:

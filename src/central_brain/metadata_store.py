@@ -229,6 +229,42 @@ class MemoryStore:
                 tokens_used INTEGER DEFAULT 0,
                 FOREIGN KEY (position_id) REFERENCES positions(position_id)
             );
+            -- ---------------------------------------------------------------
+            -- Cognitive Agent Phase 1: MarketBrain + RiskGovernor
+            -- ---------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS market_regime_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                trade_date TEXT NOT NULL,
+                regime TEXT NOT NULL,
+                risk_appetite TEXT,
+                recommended_posture TEXT,
+                max_total_position_pct REAL,
+                hot_sectors_json TEXT,
+                dominant_styles_json TEXT,
+                avoid_styles_json TEXT,
+                strategy_bias_json TEXT,
+                daily_questions_json TEXT,
+                summary TEXT,
+                evidence_json TEXT,
+                persona_version TEXT,
+                is_mock_data INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS risk_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT,
+                decision TEXT NOT NULL,
+                original_position_pct REAL,
+                approved_position_pct REAL,
+                reason TEXT,
+                risk_flags_json TEXT,
+                market_regime TEXT,
+                persona_version TEXT,
+                created_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
             CREATE INDEX IF NOT EXISTS idx_signals_session ON trade_signals(session_id);
             CREATE INDEX IF NOT EXISTS idx_orders_session ON orders(session_id);
@@ -240,8 +276,36 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
             CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
             CREATE INDEX IF NOT EXISTS idx_reviews_position ON position_reviews(position_id);
+            CREATE INDEX IF NOT EXISTS idx_regime_date ON market_regime_snapshots(trade_date);
+            CREATE INDEX IF NOT EXISTS idx_risk_session ON risk_decisions(session_id);
+            CREATE INDEX IF NOT EXISTS idx_risk_signal ON risk_decisions(signal_id);
             """
         )
+        conn.commit()
+        # 兼容旧数据库：为已存在的表补字段
+        self._apply_phase1_migrations(conn)
+
+    def _apply_phase1_migrations(self, conn: sqlite3.Connection) -> None:
+        """为 Phase 1 增加 trade_signals/positions 的认知元数据字段。
+
+        使用 ALTER TABLE ADD COLUMN，每个字段单独 try/except 防止重复执行报错。
+        """
+        migrations = [
+            ("trade_signals", "market_regime TEXT"),
+            ("trade_signals", "persona_version TEXT"),
+            ("trade_signals", "risk_decision TEXT"),
+            ("trade_signals", "approved_position_pct REAL"),
+            ("positions", "market_regime TEXT"),
+            ("positions", "persona_version TEXT"),
+            ("positions", "sector TEXT"),
+        ]
+        for table, col_def in migrations:
+            col_name = col_def.split()[0]
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.debug("ALTER %s.%s skipped: %s", table, col_name, e)
         conn.commit()
 
     def save_session(self, session_id: str, run_mode: str, state: dict) -> None:
@@ -281,8 +345,9 @@ class MemoryStore:
         conn.execute(
             """INSERT OR REPLACE INTO trade_signals
             (signal_id, session_id, symbol, action, entry_price, target_price,
-             stop_loss, position_pct, strategy, rationale, timestamp, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             stop_loss, position_pct, strategy, rationale, timestamp, status,
+             market_regime, persona_version, risk_decision, approved_position_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal["signal_id"],
                 session_id,
@@ -296,6 +361,80 @@ class MemoryStore:
                 signal.get("rationale"),
                 signal.get("timestamp"),
                 "active",
+                signal.get("market_regime"),
+                signal.get("persona_version"),
+                signal.get("risk_decision"),
+                signal.get("approved_position_pct"),
+            ),
+        )
+        conn.commit()
+
+    # ------------------------------------------------------------------
+    # Phase 1: MarketBrain + RiskGovernor 持久化
+    # ------------------------------------------------------------------
+
+    def save_market_regime(self, session_id: str, snapshot: dict) -> None:
+        """保存 MarketBrain 输出的 regime 快照。"""
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO market_regime_snapshots
+            (snapshot_id, session_id, trade_date, regime, risk_appetite,
+             recommended_posture, max_total_position_pct,
+             hot_sectors_json, dominant_styles_json, avoid_styles_json,
+             strategy_bias_json, daily_questions_json,
+             summary, evidence_json, persona_version, is_mock_data, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                snapshot["snapshot_id"],
+                session_id,
+                snapshot["trade_date"],
+                snapshot["regime"],
+                snapshot.get("risk_appetite"),
+                snapshot.get("recommended_posture"),
+                snapshot.get("max_total_position_pct"),
+                json.dumps(snapshot.get("hot_sectors", []), ensure_ascii=False),
+                json.dumps(snapshot.get("dominant_styles", []), ensure_ascii=False),
+                json.dumps(snapshot.get("avoid_styles", []), ensure_ascii=False),
+                json.dumps(snapshot.get("strategy_bias", {}), ensure_ascii=False),
+                json.dumps(snapshot.get("daily_questions", []), ensure_ascii=False),
+                snapshot.get("summary"),
+                json.dumps(snapshot.get("evidence", {}), ensure_ascii=False, default=str),
+                snapshot.get("persona_version"),
+                1 if snapshot.get("is_mock_data") else 0,
+                snapshot.get("created_at") or datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def latest_market_regime(self) -> dict | None:
+        """获取最近一次的 market regime 快照。"""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_risk_decision(self, session_id: str, decision: dict) -> None:
+        """保存单条 RiskGovernor 裁决。"""
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO risk_decisions
+            (session_id, signal_id, symbol, decision,
+             original_position_pct, approved_position_pct, reason,
+             risk_flags_json, market_regime, persona_version, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                decision["signal_id"],
+                decision.get("symbol"),
+                decision["decision"],
+                decision.get("original_position_pct"),
+                decision.get("approved_position_pct"),
+                decision.get("reason"),
+                json.dumps(decision.get("risk_flags", []), ensure_ascii=False),
+                decision.get("market_regime"),
+                decision.get("persona_version"),
+                decision.get("created_at") or datetime.now().isoformat(),
             ),
         )
         conn.commit()
@@ -604,6 +743,9 @@ class MemoryStore:
         bear_case: str | None = None,
         target_price: float | None = None,
         stop_loss: float | None = None,
+        market_regime: str | None = None,
+        persona_version: str | None = None,
+        sector: str | None = None,
     ) -> None:
         """Open a new position with the original analysis thesis attached."""
         conn = self._conn()
@@ -611,12 +753,14 @@ class MemoryStore:
             """INSERT OR REPLACE INTO positions
             (position_id, symbol, name, side, entry_price, current_qty, entry_date,
              status, original_signal_id, original_thesis, original_strategy,
-             bull_case, bear_case, target_price, stop_loss, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
+             bull_case, bear_case, target_price, stop_loss, created_at,
+             market_regime, persona_version, sector)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 position_id, symbol, name, side, entry_price, qty, entry_date,
                 signal_id, thesis, strategy, bull_case, bear_case,
                 target_price, stop_loss, datetime.now().isoformat(),
+                market_regime, persona_version, sector,
             ),
         )
         conn.commit()

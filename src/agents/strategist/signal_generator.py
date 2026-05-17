@@ -2,8 +2,9 @@
 
 职责：
 1. 对 Explorer 选出的候选票用 LLM 进行深度分析（技术/资金/热点）
-2. 结合交易规则约束生成带真实价格的 TradeSignal
+2. 结合交易规则约束和投资人格 (TradingPersona) 生成带真实价格的 TradeSignal
 3. 只为 LLM 判定 BUY 的标的生成信号，PASS 的不出信号
+4. Phase 1: 接收 MarketBrain 的 regime + posture + strategy_bias 作为决策上下文
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from src.agents.cio.trading_persona import TradingPersona, get_persona
 from src.central_brain import get_central_brain
 from src.graph.state import StockCandidate, TradeSignal, TradingState
 from src.infra.config import cfg
@@ -23,29 +25,53 @@ logger = get_agent_logger("strategist", "init")
 
 MAX_LLM_ANALYSIS = 8
 
+# 策略人类名称 → strategy_id 映射（用于 RiskGovernor 的 persona 兼容性检查）
+_STRATEGY_NAME_TO_ID = {
+    "20日线回踩": "hot_sector_pullback",
+    "热点板块前排回踩": "hot_sector_pullback",
+    "热点回踩": "hot_sector_pullback",
+    "回踩": "hot_sector_pullback",
+    "放量突破": "volume_breakout",
+    "突破前高": "volume_breakout",
+    "MACD金叉": "volume_breakout",
+    "防守蓝筹": "defensive_bluechip",
+    "高股息": "defensive_bluechip",
+    "均值回归": "mean_reversion",
+    "超跌反弹": "mean_reversion",
+}
+
+
+def _infer_strategy_id(strategy_name: str) -> str:
+    """从人类可读策略名称推断标准 strategy_id。"""
+    if not strategy_name:
+        return "unknown"
+    name = strategy_name.strip()
+    if name in _STRATEGY_NAME_TO_ID:
+        return _STRATEGY_NAME_TO_ID[name]
+    # 模糊匹配
+    for key, sid in _STRATEGY_NAME_TO_ID.items():
+        if key in name:
+            return sid
+    return "unknown"
+
 # ─────────────────────────────────────────────────────────────────
 # LLM Prompts
 # ─────────────────────────────────────────────────────────────────
 
 STRATEGIST_SYSTEM_PROMPT = """\
-你是一位专业的A股短线交易分析师。根据给定的行情数据，决定是否买入该股票。
+你是一位 Cognitive Agent 的交易决策者。你必须严格遵守"投资人格"约束，
+并根据"当日市场作战指令"调整决策。不要每只票都给 BUY，宁可错过不要做错。
+
+## 决策原则
+1. 必须先读懂今日 market_regime 和 recommended_posture，再判断个股
+2. 在禁用策略 (forbidden) 上不要 BUY
+3. 在 degraded 策略上要明显降低仓位
+4. 风险收益比 < 1.2 一律 PASS
+5. 弱势市场 (bear/panic) 必须更严格，能不交易就不交易
 
 ## 决策框架
-1. **BUY** — 技术形态良好、资金面支持、热点逻辑清晰，短期有上涨空间
-2. **PASS** — 不满足买入条件（技术形态不佳/估值过高/资金流出/逻辑不清）
-
-## 分析维度
-- **技术面**: 均线系统（MA5/MA10/MA20）、量价关系、支撑阻力、近期趋势
-- **资金面**: 主力资金流向、换手率、成交额
-- **热点逻辑**: 是否属于当前市场热点板块，概念是否有持续性
-- **估值**: PE/PB是否合理
-
-## 交易规则约束
-- 止损: 入场价下方 5%
-- 目标: 8%-12% 收益
-- 持仓周期: 1-5 个交易日
-- 单票仓位: 5%-10%
-- 入场价应接近当前价格（限价单，可略低于现价设定买入点）
+- BUY: 技术形态良好 + 资金面支持 + 与当日 posture 匹配 + 风险收益比合理
+- PASS: 任一关键条件不满足，或与 persona 禁忌冲突
 
 ## 输出格式（严格 JSON）
 ```json
@@ -54,10 +80,10 @@ STRATEGIST_SYSTEM_PROMPT = """\
     "entry_price": 建议入场价,
     "target_price": 目标价,
     "stop_loss": 止损价,
-    "position_pct": 建议仓位比例(0.05到0.10),
-    "strategy": "策略名称(如20日线回踩/放量突破前高/MACD金叉等)",
+    "position_pct": 建议仓位比例(0.02-0.10),
+    "strategy": "策略名称(如 热点板块前排回踩/放量突破/防守蓝筹/均值回归 等)",
     "confidence": 0.0到1.0,
-    "rationale": "完整的买入或不买逻辑(2-3句话)",
+    "rationale": "完整的买入或不买逻辑(2-3句话, 必须引用 regime/posture)",
     "bull_case": "最大的看多理由",
     "bear_case": "最大的风险点"
 }
@@ -65,6 +91,15 @@ STRATEGIST_SYSTEM_PROMPT = """\
 """
 
 STRATEGIST_USER_TEMPLATE = """\
+{persona_block}
+
+## 今日市场作战指令 (来自 MarketBrain)
+- regime: {regime}  | posture: {posture}  | risk_appetite: {risk_appetite}
+- 总仓位上限: {max_total_pos:.0%}
+- 偏好策略 (bias): {strategy_bias}
+- 应避免风格: {avoid_styles}
+- 摘要: {regime_summary}
+
 ## 候选股票
 - 代码: {symbol}
 - 名称: {name}
@@ -96,7 +131,7 @@ STRATEGIST_USER_TEMPLATE = """\
 ## 当前热点板块
 {hot_sectors}
 
-请分析并给出你的决策。
+请基于以上信息，特别是结合 regime 和 persona 给出决策。
 """
 
 
@@ -104,13 +139,41 @@ class StrategistEngine:
     """决策者引擎 — LLM 驱动的候选股分析。"""
 
     def __init__(
-        self, session_id: str, hot_sectors: list[str] | None = None,
+        self,
+        session_id: str,
+        hot_sectors: list[str] | None = None,
+        persona: TradingPersona | None = None,
+        market_regime: dict[str, Any] | None = None,
     ) -> None:
         self.session_id = session_id
         self.logger = get_agent_logger("strategist", session_id)
         self.brain = get_central_brain()
         self.config = cfg()
         self.hot_sectors = hot_sectors or []
+        self.persona = persona or get_persona()
+        self.market_regime = market_regime or {}
+
+    def _persona_block(self) -> str:
+        return self.persona.prompt_summary()
+
+    def _regime_kwargs(self) -> dict[str, Any]:
+        regime = self.market_regime or {}
+        return {
+            "regime": regime.get("regime", "neutral"),
+            "posture": regime.get("recommended_posture", "selective_attack"),
+            "risk_appetite": regime.get("risk_appetite", "medium"),
+            "max_total_pos": float(
+                regime.get(
+                    "max_total_position_pct",
+                    self.persona.max_total_position_for(regime.get("regime", "neutral")),
+                )
+            ),
+            "strategy_bias": ", ".join(
+                f"{k}={v:.2f}" for k, v in (regime.get("strategy_bias") or {}).items()
+            ) or "无明显偏好",
+            "avoid_styles": ", ".join(regime.get("avoid_styles", [])) or "无",
+            "regime_summary": regime.get("summary", "—"),
+        }
 
     def analyze_candidate(self, candidate: StockCandidate) -> TradeSignal | None:
         """对单只候选票调用 LLM 深度分析，返回 TradeSignal 或 None（PASS）。"""
@@ -120,6 +183,7 @@ class StrategistEngine:
         fund = candidate.get("fund_flow", {})
 
         user_msg = STRATEGIST_USER_TEMPLATE.format(
+            persona_block=self._persona_block(),
             symbol=symbol,
             name=name,
             sector=candidate.get("sector", "未知"),
@@ -145,6 +209,7 @@ class StrategistEngine:
             turnover_yi=round(fund.get("turnover", 0) / 1e8, 2),
             turnover_rate=fund.get("turnover_rate", 0),
             hot_sectors=", ".join(self.hot_sectors) if self.hot_sectors else "无",
+            **self._regime_kwargs(),
         )
 
         try:
@@ -192,15 +257,21 @@ class StrategistEngine:
             "expiry": (datetime.now() + timedelta(days=5)).isoformat(),
         }
 
-        # Attach extra fields for downstream Position creation
+        # Attach extra fields for downstream RiskGovernor / Position creation
         signal["name"] = name  # type: ignore[typeddict-unknown-key]
+        signal["sector"] = candidate.get("sector", "")  # type: ignore[typeddict-unknown-key]
         signal["bull_case"] = result.get("bull_case", "")  # type: ignore[typeddict-unknown-key]
         signal["bear_case"] = result.get("bear_case", "")  # type: ignore[typeddict-unknown-key]
         signal["confidence"] = result.get("confidence", 0.5)  # type: ignore[typeddict-unknown-key]
+        signal["strategy_id"] = _infer_strategy_id(signal["strategy"])  # type: ignore[typeddict-unknown-key]
+        # 来自 MarketBrain 的认知元数据
+        signal["market_regime"] = self.market_regime.get("regime", "")  # type: ignore[typeddict-unknown-key]
+        signal["persona_version"] = self.persona.persona_version  # type: ignore[typeddict-unknown-key]
 
         self.logger.info(
-            "生成信号 %s | %s %s | 策略=%s | 入场=%.2f | 止损=%.2f | 目标=%.2f | 置信=%.0f%%",
+            "生成信号 %s | %s %s | 策略=%s (id=%s) | regime=%s | 入场=%.2f | 止损=%.2f | 目标=%.2f | 置信=%.0f%%",
             signal["signal_id"], symbol, name, signal["strategy"],
+            signal["strategy_id"], signal["market_regime"],  # type: ignore[typeddict-unknown-key]
             signal["entry_price"], signal["stop_loss"], signal["target_price"],
             result.get("confidence", 0) * 100,
         )
@@ -282,12 +353,19 @@ class StrategistEngine:
 def run_strategy_node(state: TradingState) -> dict[str, Any]:
     """LangGraph 节点函数 — 决策者分析。
 
-    输入：含 target_stocks 的 TradingState
+    输入：含 target_stocks + market_regime 的 TradingState
     输出：{"trade_signals": [...], "risk_assessment": {...}}
     """
     session_id = state["session_id"]
     hot_sectors = state.get("hot_sectors", [])
-    engine = StrategistEngine(session_id, hot_sectors=hot_sectors)
+    market_regime = state.get("market_regime") or {}
+    persona = get_persona()
+    engine = StrategistEngine(
+        session_id,
+        hot_sectors=hot_sectors,
+        persona=persona,
+        market_regime=market_regime,
+    )
 
     candidates = state.get("target_stocks", [])
     if not candidates:
@@ -307,7 +385,8 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
         "trade_signals": signals,
         "risk_assessment": risk,
         "logs": state.get("logs", []) + [
-            f"[Strategist] 分析 {min(len(candidates), MAX_LLM_ANALYSIS)} 只, "
+            f"[Strategist] regime={market_regime.get('regime', 'n/a')} 分析 "
+            f"{min(len(candidates), MAX_LLM_ANALYSIS)} 只, "
             f"生成 {len(signals)} 条买入信号, 风控={risk['risk_level']}"
         ],
     }

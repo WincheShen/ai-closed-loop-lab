@@ -1,7 +1,7 @@
-"""Main Workflow — LangGraph 编排四大 Agent 簇。
+"""Main Workflow — LangGraph 编排 Cognitive Agent 工作流。
 
-日常交易流 (Daily):
-    Explorer → Strategist → Executioner → Influencer
+日常交易流 (Daily) — Phase 1 认知化:
+    MarketBrain → Explorer → Strategist → RiskGovernor → Executioner → Influencer
 
 周末复盘流 (Weekly):
     FeedbackLoop (Backtest + Prompt Evolution)
@@ -20,9 +20,11 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
+from src.agents.cio.market_brain import run_market_brain_node
 from src.agents.explorer.scanner import run_discovery_node
 from src.agents.executioner.executor import run_execution_node
 from src.agents.influencer.content_engine import run_influencer_node
+from src.agents.risk.risk_governor import run_risk_governor_node
 from src.agents.strategist.signal_generator import run_strategy_node
 from src.central_brain import get_central_brain
 from src.feedback_loop.backtest_engine import run_weekly_feedback_node
@@ -37,6 +39,19 @@ logger = get_agent_logger("workflow", "init")
 # 条件路由函数
 # =============================================================================
 
+def _route_after_market_brain(state: TradingState) -> str:
+    """MarketBrain 后路由：posture=exit 时不开新仓，直接结束。"""
+    regime = state.get("market_regime") or {}
+    posture = regime.get("recommended_posture", "")
+    if posture == "exit":
+        logger.warning(
+            "MarketBrain posture=exit (regime=%s)，禁止开新仓，流程提前结束",
+            regime.get("regime"),
+        )
+        return END
+    return "explorer"
+
+
 def _route_after_explorer(state: TradingState) -> str:
     """探索后路由：有候选票则去决策，否则结束。"""
     if state.get("target_stocks"):
@@ -46,10 +61,18 @@ def _route_after_explorer(state: TradingState) -> str:
 
 
 def _route_after_strategist(state: TradingState) -> str:
-    """决策后路由：有信号则去执行，否则结束。"""
+    """决策后路由：有信号则去风控，否则结束。"""
+    if state.get("trade_signals"):
+        return "risk_governor"
+    logger.warning("Strategist 未生成信号，流程终止")
+    return END
+
+
+def _route_after_risk_governor(state: TradingState) -> str:
+    """风控后路由：有通过的信号才进入执行。"""
     if state.get("trade_signals"):
         return "executioner"
-    logger.warning("Strategist 未生成信号，流程终止")
+    logger.info("RiskGovernor 拒绝了所有信号，跳过执行")
     return END
 
 
@@ -71,21 +94,28 @@ def _route_after_influencer(state: TradingState) -> str:
 # =============================================================================
 
 def build_daily_graph() -> StateGraph:
-    """构建日常交易流 LangGraph。"""
+    """构建日常交易流 LangGraph (Cognitive Agent Phase 1)。
+
+    新工作流: MarketBrain → Explorer → Strategist → RiskGovernor → Executioner → Influencer
+    """
     graph = StateGraph(TradingState)
 
     # 注册节点
+    graph.add_node("market_brain", run_market_brain_node)
     graph.add_node("explorer", run_discovery_node)
     graph.add_node("strategist", run_strategy_node)
+    graph.add_node("risk_governor", run_risk_governor_node)
     graph.add_node("executioner", run_execution_node)
     graph.add_node("influencer", run_influencer_node)
 
     # 入口
-    graph.set_entry_point("explorer")
+    graph.set_entry_point("market_brain")
 
     # 边
+    graph.add_conditional_edges("market_brain", _route_after_market_brain)
     graph.add_conditional_edges("explorer", _route_after_explorer)
     graph.add_conditional_edges("strategist", _route_after_strategist)
+    graph.add_conditional_edges("risk_governor", _route_after_risk_governor)
     graph.add_conditional_edges("executioner", _route_after_executioner)
     graph.add_edge("influencer", END)
 
@@ -127,8 +157,24 @@ async def run_daily_pipeline(run_mode: str = "mock") -> TradingState:
 
     logger.info("=" * 60)
     logger.info("✅ 日常交易流完成 — session=%s", session_id)
+    regime = result.get("market_regime") or {}
+    if regime:
+        logger.info(
+            "   市场状态: %s | posture=%s | 上限=%.0f%%",
+            regime.get("regime"), regime.get("recommended_posture"),
+            (regime.get("max_total_position_pct") or 0) * 100,
+        )
     logger.info("   候选票: %d", len(result.get("target_stocks", [])))
     logger.info("   交易信号: %d", len(result.get("trade_signals", [])))
+    decisions = result.get("risk_decisions") or []
+    if decisions:
+        approve = sum(1 for d in decisions if d.get("decision") == "approve")
+        reduce = sum(1 for d in decisions if d.get("decision") == "reduce")
+        reject = sum(1 for d in decisions if d.get("decision") == "reject")
+        logger.info(
+            "   风控裁决: approve=%d reduce=%d reject=%d",
+            approve, reduce, reject,
+        )
     logger.info("   成交: %d", len(result.get("filled_orders", [])))
     logger.info("   发布: %d", len(result.get("published_posts", [])))
     logger.info("=" * 60)
