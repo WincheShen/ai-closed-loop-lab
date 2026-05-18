@@ -45,19 +45,22 @@ persona:
     consecutive_loss_limit: 3            # 连续 N 笔亏损后降频
 
   # 策略 regime 兼容性
+  # Phase 1 调宽: 大部分 regime 用 degraded 减仓而非 forbidden，
+  # 避免在 bear 市场连续多日不交易导致样本荒。
   strategy_regime_compatibility:
     hot_sector_pullback:
       compatible: [bull, neutral, rebound]
-      forbidden: [bear, panic]
+      forbidden: []                 # 不强制禁
+      degraded: [bear, panic]       # 弱市场减半仓位但允许做
     volume_breakout:
       compatible: [bull, rebound]
-      forbidden: [bear, panic]
-      degraded: [neutral]                # neutral 下减仓
+      forbidden: [panic]            # 只在恐慌完全禁
+      degraded: [bear, neutral]
     defensive_bluechip:
       compatible: [neutral, bear, rebound]
       forbidden: []
     mean_reversion:
-      compatible: [neutral, rebound]
+      compatible: [neutral, rebound, bear]   # bear 也给均值回归一个出口
       forbidden: [bull, panic]
 
   social_style:

@@ -7,7 +7,10 @@
     - 也可改用 APScheduler/Celery 替代
 
 调度表：
+    - 9:35: 开盘后 MarketBrain 第一次判定 (intraday regime snapshot)
     - 盘中 9:30-15:00 每 30 分钟: 持仓复审 (intraday_review)
+    - 11:35: 午盘后 MarketBrain 重判定
+    - 14:00: 尾盘前 MarketBrain 重判定
     - 15:05: 收盘分析 + 发帖 (closing_analysis)
     - 15:35: 每日选股扫描 (daily_scan)
     - 15:40: 模拟盘建仓 (daily_mock)
@@ -18,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,6 +32,8 @@ import time
 
 import schedule
 
+from src.agents.cio.market_brain import MarketBrain
+from src.agents.cio.trading_persona import get_persona
 from src.agents.reviewer.intraday_loop import run_intraday_review
 from src.graph.workflow import run_daily_pipeline, run_weekly_feedback
 from src.infra.logger import setup_logging
@@ -43,6 +50,23 @@ def job_intraday_review() -> None:
     actions = [r for r in results if r.get("action") != "HOLD"]
     if actions:
         logger.info("复审产生 %d 个交易动作", len(actions))
+
+
+def job_market_brain_only() -> None:
+    """盘中 MarketBrain 单独判定（不触发交易），用于积累 regime 漂移数据。"""
+    logger.info("⏰ 定时任务触发: MarketBrain 单独判定")
+    session_id = f"mb-{datetime.now().strftime('%Y%m%d-%H%M')}-{uuid.uuid4().hex[:4]}"
+    try:
+        brain = MarketBrain(session_id, persona=get_persona())
+        snap = brain.generate_snapshot()
+        logger.info(
+            "MarketBrain 盘中判定: regime=%s posture=%s max_pos=%.0f%% hot=%s",
+            snap.regime, snap.recommended_posture,
+            snap.max_total_position_pct * 100,
+            ",".join(snap.hot_sectors[:3]) or "无",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("MarketBrain 盘中判定失败: %s", e)
 
 
 def job_closing_analysis() -> None:
@@ -88,6 +112,12 @@ def setup_schedule() -> None:
                 continue  # 14:30 太接近收盘，跳过
             t = f"{hour:02d}:{minute:02d}"
             schedule.every().day.at(t).do(job_intraday_review)
+
+    # 盘中 MarketBrain 单独判定（轻量，仅记录 regime 漂移）
+    # 开盘后 5 分钟 / 午盘后 5 分钟 / 尾盘前 1 小时
+    schedule.every().day.at("09:35").do(job_market_brain_only)
+    schedule.every().day.at("11:35").do(job_market_brain_only)
+    schedule.every().day.at("14:00").do(job_market_brain_only)
 
     # 每日收盘分析 (15:05)
     schedule.every().day.at("15:05").do(job_closing_analysis)
