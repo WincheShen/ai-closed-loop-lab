@@ -247,25 +247,67 @@ class AkshareClient:
         新浪 Market_Center 接口分页返回所有 A 股实时行情，
         字段覆盖：代码/名称/最新价/涨跌幅/成交量/成交额/换手率/PE/PB/市值。
         不含行业板块数据，HotSectorDetector 会返回空列表。
+
+        容错策略 (避免单页超时导致整体降级到 mock):
+        - 单页失败重试 2 次, 每次 sleep 1s
+        - 已经拿到 >= 1000 只票时, 任何后续单页失败都跳过, 不抛异常
+        - 完全失败的页数 > 5 才抛异常让外层降级
         """
+        import time
         import requests as _req
 
         all_data: list[dict] = []
-        for page in range(1, 120):  # ~5000 stocks / 80 per page ≈ 63 pages
+        failed_pages: list[int] = []
+        # num 最大 100 (sina 限制); 加 250ms 请求间隔避免触发 rate limit (HTTP 456)
+        for page in range(1, 70):  # ~5500 stocks / 100 per page ≈ 56 pages
             params = {
-                "page": page, "num": 80,
+                "page": page, "num": 100,
                 "sort": "symbol", "asc": 1,
                 "node": "hs_a", "_s_r_a": "init",
             }
-            resp = _req.get(
-                self._SINA_HQ_URL, params=params,
-                headers=self._SINA_HEADERS, timeout=20,
-            )
-            resp.raise_for_status()
-            batch = resp.json()
+            batch: list[dict] | None = None
+            for attempt in range(3):
+                try:
+                    resp = _req.get(
+                        self._SINA_HQ_URL, params=params,
+                        headers=self._SINA_HEADERS, timeout=15,
+                    )
+                    resp.raise_for_status()
+                    batch = resp.json()
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if attempt < 2:
+                        # 456/429 类限流退避更久
+                        backoff = 3.0 if "456" in str(e) or "429" in str(e) else 1.0
+                        time.sleep(backoff * (attempt + 1))
+                        continue
+                    logger.warning(
+                        "新浪 page=%d 拉取失败 (重试 3 次): %s",
+                        page, str(e)[:80],
+                    )
+                    failed_pages.append(page)
+
+            if batch is None:
+                # 已经拿到一定数据就容忍这页失败
+                if len(all_data) >= 1000 and len(failed_pages) <= 5:
+                    continue
+                # 失败页太多, 让外层降级
+                if len(failed_pages) > 5:
+                    raise RuntimeError(
+                        f"新浪 API 失败页数过多: {failed_pages}",
+                    )
+                continue
+
             if not batch:
                 break
             all_data.extend(batch)
+            time.sleep(0.25)  # 限流缓解
+
+        if failed_pages:
+            logger.warning(
+                "新浪 API 拉取期间失败页: %s, 但仍拿到 %d 条数据",
+                failed_pages, len(all_data),
+            )
 
         stocks: list[StockQuote] = []
         for item in all_data:
