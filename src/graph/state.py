@@ -133,6 +133,7 @@ class TradingState(TypedDict):
     # ===== Phase 0: 认知层 (MarketBrain + Persona) =====
     market_regime: Optional[dict]    # MarketRegimeSnapshot 序列化
     persona_version: Optional[str]   # 当前生效的 TradingPersona 版本
+    market_snapshot: Optional[dict]  # MarketSnapshot 序列化（供 Explorer 复用）
 
     # ===== Phase 1: 探索 (Explorer) =====
     hot_sectors: list[str]           # 热门板块列表
@@ -173,6 +174,7 @@ def create_empty_state(session_id: str, run_mode: str = "scan") -> TradingState:
         "timestamp": datetime.now().isoformat(),
         "market_regime": None,
         "persona_version": None,
+        "market_snapshot": None,
         "hot_sectors": [],
         "target_stocks": [],
         "social_sentiment": {},

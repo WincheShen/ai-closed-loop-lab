@@ -144,13 +144,13 @@ class MarketBrain:
         """生成今日 MarketRegimeSnapshot。"""
         self.logger.info("MarketBrain 启动 — 抓取行情并形成 regime")
 
-        snapshot = self.akshare.fetch_snapshot()
-        base_regime, evidence = self._compute_base_regime(snapshot)
-        hot_results = self.hot_detector.detect(snapshot, top_k=5)
+        self._last_snapshot = self.akshare.fetch_snapshot()  # 保存供 Explorer 复用
+        base_regime, evidence = self._compute_base_regime(self._last_snapshot)
+        hot_results = self.hot_detector.detect(self._last_snapshot, top_k=5)
         hot_sectors = [h.sector.name for h in hot_results]
 
         # LLM 综合判断
-        llm_result = self._llm_judge(snapshot, base_regime, hot_results, evidence)
+        llm_result = self._llm_judge(self._last_snapshot, base_regime, hot_results, evidence)
 
         regime = llm_result.get("regime", base_regime)
         risk_appetite = llm_result.get(
@@ -164,7 +164,7 @@ class MarketBrain:
 
         result = MarketRegimeSnapshot(
             snapshot_id=f"REG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-            trade_date=str(snapshot.snapshot_date),
+            trade_date=str(self._last_snapshot.snapshot_date),
             regime=regime,
             risk_appetite=risk_appetite,
             recommended_posture=posture,
@@ -177,7 +177,7 @@ class MarketBrain:
             summary=llm_result.get("summary", ""),
             evidence=evidence,
             persona_version=self.persona.persona_version,
-            is_mock_data=snapshot.is_mock,
+            is_mock_data=self._last_snapshot.is_mock,
             created_at=datetime.now().isoformat(),
         )
 
@@ -366,9 +366,43 @@ def run_market_brain_node(state: TradingState) -> dict[str, Any]:
     brain = MarketBrain(session_id, persona=persona)
     snapshot = brain.generate_snapshot()
 
+    # 同时保存 MarketSnapshot 供 Explorer 复用（避免重复拉取）
+    market_snapshot_dict = {
+        "snapshot_date": str(snapshot.trade_date),
+        "is_mock_data": snapshot.is_mock_data,
+        "stocks": [
+            {
+                "symbol": s.symbol,
+                "name": s.name,
+                "price": s.price,
+                "change_pct": s.change_pct,
+                "volume": s.volume,
+                "turnover": s.turnover,
+                "turnover_rate": s.turnover_rate,
+                "pe_ttm": s.pe_ttm,
+                "pb": s.pb,
+                "market_cap_yi": s.market_cap_yi,
+                "industry": s.industry,
+                "main_fund_net_inflow": s.main_fund_net_inflow,
+            }
+            for s in brain._last_snapshot.stocks
+        ],
+        "sectors": [
+            {
+                "name": s.name,
+                "change_pct": s.change_pct,
+                "turnover": s.turnover,
+                "leading_stocks": s.leading_stocks,
+                "main_fund_net_inflow": s.main_fund_net_inflow,
+            }
+            for s in brain._last_snapshot.sectors
+        ],
+    }
+
     return {
         "market_regime": snapshot.to_dict(),
         "persona_version": persona.persona_version,
+        "market_snapshot": market_snapshot_dict,  # 供 Explorer 复用
         "hot_sectors": snapshot.hot_sectors,  # 兼容下游 Explorer
         "timestamp": datetime.now().isoformat(),
         "logs": state.get("logs", []) + [

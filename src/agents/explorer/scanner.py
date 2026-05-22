@@ -37,17 +37,30 @@ class ExplorerScanner:
         self._snapshot = None
         self._hot_names: list[str] = []
 
-    def scan_market(self, date_str: str | None = None) -> list[StockCandidate]:
-        """全市场扫描 → 热点检测 → 规则引擎 → 候选票列表。"""
+    def scan_market(self, date_str: str | None = None, snapshot: MarketSnapshot | None = None) -> list[StockCandidate]:
+        """全市场扫描 → 热点检测 → 规则引擎 → 候选票列表。
+
+        Args:
+            date_str: 日期字符串（可选，用于日志）
+            snapshot: 预先拉取的 MarketSnapshot（可选，传入则复用，避免重复拉取）
+        """
         self.logger.info("开始全市场扫描")
 
-        # 1. 全市场快照（真实 AKShare 数据，失败降级 mock）
-        self._snapshot = self.akshare.fetch_snapshot()
-        self.logger.info(
-            "行情快照: date=%s mock=%s stocks=%d sectors=%d",
-            self._snapshot.snapshot_date, self._snapshot.is_mock,
-            len(self._snapshot.stocks), len(self._snapshot.sectors),
-        )
+        # 1. 全市场快照（优先使用传入的 snapshot，否则真实 AKShare 数据，失败降级 mock）
+        if snapshot is not None:
+            self._snapshot = snapshot
+            self.logger.info(
+                "复用传入快照: date=%s mock=%s stocks=%d sectors=%d",
+                self._snapshot.snapshot_date, self._snapshot.is_mock,
+                len(self._snapshot.stocks), len(self._snapshot.sectors),
+            )
+        else:
+            self._snapshot = self.akshare.fetch_snapshot()
+            self.logger.info(
+                "行情快照: date=%s mock=%s stocks=%d sectors=%d",
+                self._snapshot.snapshot_date, self._snapshot.is_mock,
+                len(self._snapshot.stocks), len(self._snapshot.sectors),
+            )
 
         # 2. 热点板块 Top 5
         hot_results = self.hot_detector.detect(self._snapshot, top_k=5)
@@ -174,10 +187,55 @@ def run_discovery_node(state: TradingState) -> dict[str, Any]:
     输入：TradingState (空或含上次状态)
     输出：{"target_stocks": [...], "hot_sectors": [...]}
     """
+    from src.stock_analyzer.data_source.akshare_client import MarketSnapshot, StockQuote, SectorQuote
+    from datetime import date
+
     session_id = state["session_id"]
     scanner = ExplorerScanner(session_id)
 
-    candidates = scanner.scan_market()
+    # 尝试从 state 中复用 MarketBrain 的快照
+    market_snapshot_dict = state.get("market_snapshot")
+    if market_snapshot_dict:
+        # 反序列化 MarketSnapshot
+        stocks = [
+            StockQuote(
+                symbol=s["symbol"],
+                name=s["name"],
+                price=s["price"],
+                change_pct=s["change_pct"],
+                volume=s["volume"],
+                turnover=s["turnover"],
+                turnover_rate=s["turnover_rate"],
+                pe_ttm=s["pe_ttm"],
+                pb=s["pb"],
+                market_cap_yi=s["market_cap_yi"],
+                industry=s["industry"],
+                main_fund_net_inflow=s["main_fund_net_inflow"],
+            )
+            for s in market_snapshot_dict.get("stocks", [])
+        ]
+        sectors = [
+            SectorQuote(
+                name=s["name"],
+                change_pct=s["change_pct"],
+                turnover=s["turnover"],
+                leading_stocks=s["leading_stocks"],
+                main_fund_net_inflow=s["main_fund_net_inflow"],
+            )
+            for s in market_snapshot_dict.get("sectors", [])
+        ]
+        snapshot = MarketSnapshot(
+            snapshot_date=date.fromisoformat(market_snapshot_dict["snapshot_date"]),
+            stocks=stocks,
+            sectors=sectors,
+            is_mock=market_snapshot_dict["is_mock_data"],
+        )
+        logger.info("Explorer 复用 MarketBrain 快照: %d 只股票, %d 个板块", len(stocks), len(sectors))
+    else:
+        snapshot = None
+        logger.info("Explorer 未找到 market_snapshot，将独立拉取快照")
+
+    candidates = scanner.scan_market(snapshot=snapshot)
     hot_sectors = scanner.fetch_hot_sectors()
 
     return {
