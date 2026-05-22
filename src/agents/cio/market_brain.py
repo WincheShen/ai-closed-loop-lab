@@ -29,6 +29,9 @@ from src.stock_analyzer.data_source import (
     HotSectorDetector,
     MarketSnapshot,
 )
+from src.stock_analyzer.data_source.emappdata_hot_sector import (
+    EmappdataHotSectorDetector,
+)
 
 logger = get_agent_logger("market_brain", "init")
 
@@ -135,6 +138,7 @@ class MarketBrain:
         self.persona = persona or get_persona()
         self.akshare = AkshareClient(allow_mock_fallback=True)
         self.hot_detector = HotSectorDetector()
+        self.emappdata_detector = EmappdataHotSectorDetector(top_k=100)
 
     # ----------------------------------------------------------------------
     # 公共入口
@@ -146,7 +150,25 @@ class MarketBrain:
 
         self._last_snapshot = self.akshare.fetch_snapshot()  # 保存供 Explorer 复用
         base_regime, evidence = self._compute_base_regime(self._last_snapshot)
+
+        # 热点板块检测：优先用传统方式，如果板块数据为空则用 emappdata
         hot_results = self.hot_detector.detect(self._last_snapshot, top_k=5)
+        if not hot_results or not self._last_snapshot.sectors:
+            self.logger.info("传统板块检测无数据，尝试 emappdata 热度榜推断")
+            # 构建股票代码 -> 名称映射
+            stock_names = {s.symbol: s.name for s in self._last_snapshot.stocks}
+            emappdata_sectors = self.emappdata_detector.detect(stock_names)
+            if emappdata_sectors:
+                # 转换为 SectorScore 格式
+                from src.stock_analyzer.data_source.hot_sector_detector import SectorScore
+                hot_results = [
+                    SectorScore(sector=sector, score=0.0, rank=idx + 1)
+                    for idx, sector in enumerate(emappdata_sectors)
+                ]
+                self.logger.info("emappdata 推断成功: %d 个板块", len(emappdata_sectors))
+            else:
+                self.logger.warning("emappdata 推断也失败，热点板块为空")
+
         hot_sectors = [h.sector.name for h in hot_results]
 
         # LLM 综合判断
