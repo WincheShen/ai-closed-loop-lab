@@ -37,12 +37,13 @@ class ExplorerScanner:
         self._snapshot = None
         self._hot_names: list[str] = []
 
-    def scan_market(self, date_str: str | None = None, snapshot: MarketSnapshot | None = None) -> list[StockCandidate]:
+    def scan_market(self, date_str: str | None = None, snapshot: MarketSnapshot | None = None, hot_sectors: list[str] | None = None) -> list[StockCandidate]:
         """全市场扫描 → 热点检测 → 规则引擎 → 候选票列表。
 
         Args:
             date_str: 日期字符串（可选，用于日志）
             snapshot: 预先拉取的 MarketSnapshot（可选，传入则复用，避免重复拉取）
+            hot_sectors: 预先检测的热点板块（可选，传入则复用，避免重复检测）
         """
         self.logger.info("开始全市场扫描")
 
@@ -62,10 +63,14 @@ class ExplorerScanner:
                 len(self._snapshot.stocks), len(self._snapshot.sectors),
             )
 
-        # 2. 热点板块 Top 5
-        hot_results = self.hot_detector.detect(self._snapshot, top_k=5)
-        self._hot_names = [h.sector.name for h in hot_results]
-        self.logger.info("热点板块: %s", self._hot_names)
+        # 2. 热点板块 Top 5（优先使用传入的 hot_sectors，否则独立检测）
+        if hot_sectors is not None:
+            self._hot_names = hot_sectors
+            self.logger.info("复用传入热点板块: %s", self._hot_names)
+        else:
+            hot_results = self.hot_detector.detect(self._snapshot, top_k=5)
+            self._hot_names = [h.sector.name for h in hot_results]
+            self.logger.info("热点板块: %s", self._hot_names)
 
         # 3. 规则引擎筛选
         rules = load_rules_from_yaml(_RULES_YAML)
@@ -235,7 +240,9 @@ def run_discovery_node(state: TradingState) -> dict[str, Any]:
         snapshot = None
         logger.info("Explorer 未找到 market_snapshot，将独立拉取快照")
 
-    candidates = scanner.scan_market(snapshot=snapshot)
+    candidates = scanner.scan_market(snapshot=snapshot, hot_sectors=state.get("hot_sectors"))
+
+    # 热点板块已经在 scan_market 中从 state 获取
     hot_sectors = scanner.fetch_hot_sectors()
 
     return {
