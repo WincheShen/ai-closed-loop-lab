@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 20% 4%;
+    --foreground: 210 40% 90%;
+    --card: 240 18% 8%;
+    --card-foreground: 210 40% 90%;
+    --popover: 240 18% 8%;
+    --popover-foreground: 210 40% 90%;
+    --primary: 185 100% 50%;
+    --primary-foreground: 240 20% 4%;
+    --secondary: 240 15% 14%;
+    --secondary-foreground: 210 40% 90%;
+    --muted: 215 20% 25%;
+    --muted-foreground: 215 15% 55%;
+    --accent: 185 100% 50%;
+    --accent-foreground: 240 20% 4%;
+    --destructive: 350 100% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 15% 14%;
+    --input: 240 15% 14%;
+    --ring: 185 100% 50%;
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    background-color: #0a0a0f;
+  }
+
+  /* 自定义滚动条 — 赛博风格 */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0a0a0f;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e1e2e;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #2d2d44;
+  }
+
+  /* 终端风格文字选中 */
+  ::selection {
+    background: rgba(0, 240, 255, 0.2);
+    color: #00f0ff;
+  }
+}
+
+@layer components {
+  /* 数据卡片基础样式 */
+  .data-card {
+    @apply bg-panel border border-panel-border rounded-lg p-4;
+    @apply hover:border-accent/30 transition-all duration-300;
+  }
+
+  /* 终端风格文本 */
+  .terminal-text {
+    @apply font-mono text-sm;
+  }
+
+  /* 状态指示灯 */
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block;
+  }
+  .status-dot.running {
+    @apply bg-status-running animate-pulse;
+    box-shadow: 0 0 8px rgba(0, 200, 83, 0.5);
+  }
+  .status-dot.idle {
+    @apply bg-status-idle;
+  }
+  .status-dot.error {
+    @apply bg-status-error;
+    box-shadow: 0 0 8px rgba(255, 23, 68, 0.5);
+  }
+
+  /* 金融涨跌色 */
+  .text-bullish {
+    @apply text-bullish;
+  }
+  .text-bearish {
+    @apply text-bearish;
+  }
+
+  /* 图表占位轮廓 */
+  .chart-placeholder {
+    @apply bg-panel border border-panel-border rounded-lg;
+    @apply flex items-center justify-center text-muted-foreground;
+  }
+}
+
+@layer utilities {
+  /* 文字渐变 */
+  .text-gradient-accent {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-accent to-cyan-400;
+  }
+}
