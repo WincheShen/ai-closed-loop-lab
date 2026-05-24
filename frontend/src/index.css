@@ -86,14 +86,6 @@
     box-shadow: 0 0 8px rgba(255, 23, 68, 0.5);
   }
 
-  /* 金融涨跌色 */
-  .text-bullish {
-    @apply text-bullish;
-  }
-  .text-bearish {
-    @apply text-bearish;
-  }
-
   /* 图表占位轮廓 */
   .chart-placeholder {
     @apply bg-panel border border-panel-border rounded-lg;
