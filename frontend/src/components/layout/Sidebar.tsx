@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import {
@@ -19,7 +19,7 @@ const navItems = [
     path: '/',
     label: '核心控制台',
     icon: LayoutDashboard,
-    badge: 'Live',
+    badge: null,
   },
   {
     path: '/quant',
@@ -35,13 +35,13 @@ const navItems = [
     path: '/agents',
     label: '多智能体工作流',
     icon: Bot,
-    badge: '3 运行中',
+    badge: null,
   },
   {
     path: '/content',
     label: '社交媒体管线',
     icon: PenTool,
-    badge: '2 待发',
+    badge: null,
   },
   {
     path: '/records',
@@ -54,7 +54,45 @@ const navItems = [
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
   const [expandedGroup, setExpandedGroup] = useState<string | null>('/quant')
+  const [badges, setBadges] = useState<Record<string, string | null>>({
+    '/': 'Live',
+    '/agents': '0 运行中',
+    '/content': '0 待发',
+  })
   const location = useLocation()
+
+  // 获取徽章数据
+  useEffect(() => {
+    const fetchBadges = async () => {
+      try {
+        // 获取待发社媒任务数量
+        const postsResp = await fetch('/api/social-posts')
+        if (postsResp.ok) {
+          const posts = await postsResp.json()
+          const pendingCount = posts.filter((p: any) => p.sma_status === 'pending' || p.sma_status === 'running').length
+          setBadges((prev) => ({ ...prev, '/content': pendingCount > 0 ? `${pendingCount} 待发` : null }))
+        }
+
+        // 获取运行中的 agent 数量（从事件流推断）
+        const eventsResp = await fetch('/events/recent?limit=50')
+        if (eventsResp.ok) {
+          const events = await eventsResp.json()
+          // 统计最近 5 分钟内的事件类型
+          const fiveMinutesAgo = Date.now() - 5 * 60 * 1000
+          const recentEvents = events.filter((e: any) => new Date(e.created_at).getTime() > fiveMinutesAgo)
+          const agentTypes = new Set(recentEvents.map((e: any) => e.event_type.split('.')[0]))
+          setBadges((prev) => ({ ...prev, '/agents': agentTypes.size > 0 ? `${agentTypes.size} 运行中` : null }))
+        }
+      } catch (err) {
+        console.error('Failed to fetch badges:', err)
+      }
+    }
+
+    fetchBadges()
+    // 每 30 秒更新一次
+    const interval = setInterval(fetchBadges, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   return (
     <aside
@@ -115,20 +153,24 @@ export function Sidebar() {
                 {!collapsed && (
                   <>
                     <span className="text-sm font-medium flex-1">{item.label}</span>
-                    {item.badge && (
-                      <span
-                        className={cn(
-                          'text-[10px] px-1.5 py-0.5 rounded font-mono',
-                          item.badge.includes('运行中')
-                            ? 'bg-status-running/20 text-status-running'
-                            : item.badge.includes('待发')
-                            ? 'bg-warning/20 text-warning'
-                            : 'bg-accent/20 text-accent'
-                        )}
-                      >
-                        {item.badge}
-                      </span>
-                    )}
+                    {(() => {
+                      const badge = badges[item.path]
+                      if (!badge) return null
+                      return (
+                        <span
+                          className={cn(
+                            'text-[10px] px-1.5 py-0.5 rounded font-mono',
+                            badge.includes('运行中')
+                              ? 'bg-status-running/20 text-status-running'
+                              : badge.includes('待发')
+                              ? 'bg-warning/20 text-warning'
+                              : 'bg-accent/20 text-accent'
+                          )}
+                        >
+                          {badge}
+                        </span>
+                      )
+                    })()}
                     {hasChildren && (
                       <ChevronRight
                         className={cn(

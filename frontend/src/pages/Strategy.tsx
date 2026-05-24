@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
+import { useToast } from '@/hooks/useToast'
 import {
   Lightbulb,
   Zap,
@@ -15,7 +16,6 @@ import {
   BarChart3,
   Activity,
   Loader2,
-  ChevronRight,
 } from 'lucide-react'
 
 // ── 类型定义 ──
@@ -70,17 +70,6 @@ interface StrategyResult {
   total_stocks: number
   filtered_count: number
   picks: StockPick[]
-}
-
-// ── Toast Hook ──
-function useToast() {
-  const [toasts, setToasts] = useState<{ id: number; msg: string; type: 'success' | 'error' }[]>([])
-  const show = useCallback((msg: string, type: 'success' | 'error') => {
-    const id = Date.now()
-    setToasts((prev) => [...prev, { id, msg, type }])
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3000)
-  }, [])
-  return { toasts, show }
 }
 
 // ── 主页面 ──
@@ -323,7 +312,7 @@ export default function Strategy() {
               )}
 
               {/* 技术面 */}
-              {currentSpec.technicals?.length > 0 && (
+              {currentSpec.technicals && currentSpec.technicals.length > 0 && (
                 <div className="mb-4">
                   <h3 className="text-xs text-muted-foreground mb-2 uppercase tracking-wider">技术面要求</h3>
                   <div className="space-y-1.5">

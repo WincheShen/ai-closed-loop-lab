@@ -2,13 +2,11 @@ import { useState, useRef, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import {
   Play,
-  Square,
   RotateCcw,
   Bot,
   BrainCircuit,
   FileText,
   Send,
-  ChevronRight,
   Circle,
   CheckCircle2,
   XCircle,
@@ -125,11 +123,9 @@ const mockLogs: LogEntry[] = [
 // ── 子组件：工作流节点 ──
 function WorkflowNodeComponent({
   node,
-  index,
   isLast,
 }: {
   node: WorkflowNode
-  index: number
   isLast: boolean
 }) {
   const Icon = node.icon
@@ -218,7 +214,7 @@ function LogLine({ entry }: { entry: LogEntry }) {
 
 // ── 主页面 ──
 export default function AgentWorkspace() {
-  const [nodes, setNodes] = useState(workflowNodes)
+  const [nodes] = useState(workflowNodes)
   const [logs, setLogs] = useState(mockLogs)
   const logRef = useRef<HTMLDivElement>(null)
 
@@ -228,6 +224,34 @@ export default function AgentWorkspace() {
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
   }, [logs])
+
+  // 轮询事件流并更新日志
+  useEffect(() => {
+    const fetchEvents = async () => {
+      try {
+        const resp = await fetch('/events/recent?limit=20')
+        if (resp.ok) {
+          const data = await resp.json()
+          // 将事件转换为日志格式
+          const newLogs: LogEntry[] = data.map((event: any) => ({
+            timestamp: new Date(event.created_at).toLocaleTimeString('zh-CN', { hour12: false }),
+            level: event.event_type.includes('error') ? 'error' : event.event_type.includes('success') ? 'success' : 'info',
+            agent: event.event_type.split('.')[0] || 'System',
+            message: event.event_type,
+          }))
+          if (newLogs.length > 0) {
+            setLogs(newLogs)
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch events:', err)
+      }
+    }
+    fetchEvents()
+    // 每 5 秒轮询一次
+    const interval = setInterval(fetchEvents, 5000)
+    return () => clearInterval(interval)
+  }, [])
 
   const runningCount = nodes.filter((n) => n.status === 'running').length
   const completedCount = nodes.filter((n) => n.status === 'completed').length
@@ -272,7 +296,6 @@ export default function AgentWorkspace() {
               <WorkflowNodeComponent
                 key={node.id}
                 node={node}
-                index={index}
                 isLast={index === nodes.length - 1}
               />
             ))}

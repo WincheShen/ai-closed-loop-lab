@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
+import { useToast } from '@/hooks/useToast'
 import {
   Upload,
   RefreshCw,
@@ -7,7 +8,6 @@ import {
   MessageSquare,
   CheckCircle2,
   XCircle,
-  AlertCircle,
   Activity,
   Clock,
   ImageIcon,
@@ -37,21 +37,6 @@ interface SocialPost {
   sma_status: 'pending' | 'running' | 'completed' | 'failed'
   topic: string
   dispatched_at: string | null
-}
-
-// ── Toast Hook ──
-function useToast() {
-  const [toasts, setToasts] = useState<{ id: number; msg: string; type: 'success' | 'error' }[]>([])
-
-  const show = useCallback((msg: string, type: 'success' | 'error') => {
-    const id = Date.now()
-    setToasts((prev) => [...prev, { id, msg, type }])
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, 3000)
-  }, [])
-
-  return { toasts, show }
 }
 
 // ── 状态徽章 ──
@@ -104,7 +89,7 @@ export default function Records() {
     }
 
     try {
-      const resp = await fetch('http://127.0.0.1:8003/health')
+      const resp = await fetch('/sma-health')
       if (resp.ok) {
         const data = await resp.json()
         results.push({ name: 'SMA 创作服务', status: 'online', detail: `${data.accounts?.length || 0} 账号` })

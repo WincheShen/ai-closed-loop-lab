@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { cn, formatNumber, formatPercent } from '@/lib/utils'
+import { cn, formatPercent } from '@/lib/utils'
 import {
   TrendingUp,
   TrendingDown,
@@ -7,7 +7,6 @@ import {
   Bot,
   Play,
   Globe,
-  Coins,
   BarChart3,
 } from 'lucide-react'
 
@@ -38,11 +37,6 @@ const marketIndices: MarketIndex[] = [
   { name: '纳斯达克', symbol: 'NDX', price: 16834.92, change: 142.58, changePercent: 0.85 },
   { name: '黄金现货', symbol: 'XAU', price: 2348.60, change: 8.20, changePercent: 0.35 },
 ]
-
-const apiStats = {
-  gemini: { calls: 1248, latency: [820, 950, 1100, 890, 1240, 980, 1050] },
-  claude: { calls: 856, latency: [720, 680, 890, 950, 890, 760, 890] },
-}
 
 const agents: AgentCard[] = [
   {
@@ -208,6 +202,10 @@ function AgentCardComponent({ agent }: { agent: AgentCard }) {
 // ── 主页面 ──
 export default function Dashboard() {
   const [scriptRuns, setScriptRuns] = useState(47)
+  const [apiStats] = useState({
+    gemini: { calls: 1248, latency: [820, 950, 1100, 890, 1240, 980, 1050] },
+    claude: { calls: 856, latency: [720, 680, 890, 950, 890, 760, 890] },
+  })
 
   // 模拟脚本计数器自动增长
   useEffect(() => {
@@ -215,6 +213,44 @@ export default function Dashboard() {
       setScriptRuns((prev) => prev + Math.floor(Math.random() * 3))
     }, 8000)
     return () => clearInterval(timer)
+  }, [])
+
+  // 获取 Trading Agent Service 统计数据
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const resp = await fetch('/tas/stats')
+        if (resp.ok) {
+          const data = await resp.json()
+          // data 应该包含 cache_hits, uptime 等信息
+          // 这里我们暂时保持 mock 格式，但可以扩展
+          console.log('TAS Stats:', data)
+        }
+      } catch (err) {
+        console.error('Failed to fetch TAS stats:', err)
+      }
+    }
+    fetchStats()
+  }, [])
+
+  // 获取最近事件（用于 Agent 状态更新）
+  useEffect(() => {
+    const fetchEvents = async () => {
+      try {
+        const resp = await fetch('/events/recent?limit=20')
+        if (resp.ok) {
+          const data = await resp.json()
+          console.log('Recent events:', data)
+          // 可以根据事件类型更新 Agent 状态
+        }
+      } catch (err) {
+        console.error('Failed to fetch events:', err)
+      }
+    }
+    fetchEvents()
+    // 每 30 秒轮询一次
+    const interval = setInterval(fetchEvents, 30000)
+    return () => clearInterval(interval)
   }, [])
 
   return (

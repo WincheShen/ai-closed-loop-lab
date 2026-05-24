@@ -10,7 +10,6 @@ import {
   Activity,
   BarChart3,
   CandlestickChart,
-  Minus,
 } from 'lucide-react'
 
 // ── 类型定义 ──

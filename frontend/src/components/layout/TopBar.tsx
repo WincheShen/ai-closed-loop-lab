@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { cn, formatLatency } from '@/lib/utils'
 import {
   Activity,
@@ -75,6 +76,15 @@ function StatusBadge({ status }: { status: ApiStatus['status'] }) {
 }
 
 export function TopBar() {
+  const [currentTime, setCurrentTime] = useState(new Date())
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date())
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [])
+
   const totalTokens = apiStatuses.reduce((sum, api) => sum + api.tokensUsed, 0)
   const totalLimit = apiStatuses.reduce((sum, api) => sum + api.tokensLimit, 0)
   const tokenPercent = (totalTokens / totalLimit) * 100
@@ -154,7 +164,7 @@ export function TopBar() {
         <div className="flex items-center gap-2 text-muted-foreground">
           <Zap className="w-4 h-4 text-accent" />
           <span className="text-xs font-mono">
-            {new Date().toLocaleTimeString('zh-CN', { hour12: false })}
+            {currentTime.toLocaleTimeString('zh-CN', { hour12: false })}
           </span>
         </div>
       </div>

@@ -7,20 +7,20 @@ import ContentPipeline from '@/pages/ContentPipeline'
 import Strategy from '@/pages/Strategy'
 import Analyze from '@/pages/Analyze'
 import Records from '@/pages/Records'
+import NotFound from '@/pages/NotFound'
 
 function App() {
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/quant" element={<QuantMonitor />} />
-        <Route path="/agents" element={<AgentWorkspace />} />
-        <Route path="/content" element={<ContentPipeline />} />
-        <Route path="/strategy" element={<Strategy />} />
-        <Route path="/analyze" element={<Analyze />} />
-        <Route path="/records" element={<Records />} />
-      </Routes>
-    </Layout>
+    <Routes>
+      <Route path="/" element={<Layout><Dashboard /></Layout>} />
+      <Route path="/quant" element={<Layout><QuantMonitor /></Layout>} />
+      <Route path="/agents" element={<Layout><AgentWorkspace /></Layout>} />
+      <Route path="/content" element={<Layout><ContentPipeline /></Layout>} />
+      <Route path="/strategy" element={<Layout><Strategy /></Layout>} />
+      <Route path="/analyze" element={<Layout><Analyze /></Layout>} />
+      <Route path="/records" element={<Layout><Records /></Layout>} />
+      <Route path="*" element={<NotFound />} />
+    </Routes>
   )
 }
 

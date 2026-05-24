@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
+import { useToast } from '@/hooks/useToast'
+import type { Toast } from '@/hooks/useToast'
 import {
-  Smartphone,
   RefreshCw,
   Send,
   Clock,
@@ -16,6 +17,7 @@ import {
   Hash,
   User,
   ChevronRight,
+  Loader2,
 } from 'lucide-react'
 
 // ── 类型定义 ──
@@ -208,6 +210,46 @@ function XiaohongshuPreview({ content }: { content: string }) {
 export default function ContentPipeline() {
   const [previewContent, setPreviewContent] = useState(xiaohongshuPreview)
   const [activeTab, setActiveTab] = useState<'all' | 'pending' | 'published'>('all')
+  const [generating, setGenerating] = useState(false)
+  const [publishing, setPublishing] = useState(false)
+  const { toasts, show } = useToast()
+
+  const handleRegenerate = async () => {
+    setGenerating(true)
+    try {
+      // TODO: 调用后端 API 生成内容
+      // const resp = await fetch('/api/content/generate', { method: 'POST' })
+      // const data = await resp.json()
+      // setPreviewContent(data.content)
+      // 模拟延迟
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      setPreviewContent(xiaohongshuPreview) // 暂时重置为 mock
+      show('内容生成成功', 'success')
+    } catch (err) {
+      show('内容生成失败', 'error')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const handlePublish = async () => {
+    setPublishing(true)
+    try {
+      // TODO: 调用后端 API 发布内容
+      // const resp = await fetch('/api/content/publish', {
+      //   method: 'POST',
+      //   headers: { 'Content-Type': 'application/json' },
+      //   body: JSON.stringify({ content: previewContent })
+      // })
+      // 模拟延迟
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      show('内容发布成功', 'success')
+    } catch (err) {
+      show('内容发布失败', 'error')
+    } finally {
+      setPublishing(false)
+    }
+  }
 
   const filteredQueue = publishQueue.filter((item) => {
     if (activeTab === 'pending') return item.status === 'pending' || item.status === 'reviewing'
@@ -217,6 +259,21 @@ export default function ContentPipeline() {
 
   return (
     <div className="space-y-6 h-full flex flex-col">
+      {/* Toast */}
+      <div className="fixed top-20 right-6 z-50 space-y-2">
+        {toasts.map((t: Toast) => (
+          <div
+            key={t.id}
+            className={cn(
+              'px-4 py-3 rounded-lg text-sm font-medium shadow-lg animate-fade-in',
+              t.type === 'success' ? 'bg-bullish/90 text-white' : 'bg-status-error/90 text-white'
+            )}
+          >
+            {t.msg}
+          </div>
+        ))}
+      </div>
+
       {/* 页面标题 */}
       <div className="shrink-0">
         <h1 className="text-2xl font-bold text-foreground">社交媒体管线</h1>
@@ -241,10 +298,11 @@ export default function ContentPipeline() {
                   <span className="text-sm font-medium text-foreground">原始分析报告</span>
                 </div>
                 <button
-                  onClick={() => setPreviewContent(xiaohongshuPreview)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors border border-accent/20"
+                  onClick={handleRegenerate}
+                  disabled={generating}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors border border-accent/20 disabled:opacity-50"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
+                  {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                   重新生成
                 </button>
               </div>
@@ -267,12 +325,20 @@ export default function ContentPipeline() {
 
             {/* 操作按钮 */}
             <div className="flex items-center gap-3 mt-3">
-              <button className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-accent/10 text-accent text-sm font-medium hover:bg-accent/20 transition-colors border border-accent/20">
-                <RefreshCw className="w-4 h-4" />
+              <button
+                onClick={handleRegenerate}
+                disabled={generating}
+                className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-accent/10 text-accent text-sm font-medium hover:bg-accent/20 transition-colors border border-accent/20 disabled:opacity-50"
+              >
+                {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                 重新生成
               </button>
-              <button className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-bullish/10 text-bullish text-sm font-medium hover:bg-bullish/20 transition-colors border border-bullish/20">
-                <Send className="w-4 h-4" />
+              <button
+                onClick={handlePublish}
+                disabled={publishing}
+                className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-bullish/10 text-bullish text-sm font-medium hover:bg-bullish/20 transition-colors border border-bullish/20 disabled:opacity-50"
+              >
+                {publishing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                 一键发布
               </button>
             </div>
