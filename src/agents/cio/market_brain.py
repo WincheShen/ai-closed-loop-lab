@@ -155,9 +155,13 @@ class MarketBrain:
         hot_results = self.hot_detector.detect(self._last_snapshot, top_k=5)
         if not hot_results or not self._last_snapshot.sectors:
             self.logger.info("传统板块检测无数据，尝试 emappdata 热度榜推断")
-            # 构建股票代码 -> 名称映射
+            # 构建股票代码 -> 名称映射 及 股票数据映射
             stock_names = {s.symbol: s.name for s in self._last_snapshot.stocks}
-            emappdata_sectors = self.emappdata_detector.detect(stock_names)
+            stock_data = {
+                s.symbol: (s.change_pct, s.turnover, s.main_fund_net_inflow)
+                for s in self._last_snapshot.stocks
+            }
+            emappdata_sectors = self.emappdata_detector.detect(stock_names, stock_data)
             if emappdata_sectors:
                 # 转换为 SectorScore 格式
                 from src.stock_analyzer.data_source.hot_sector_detector import SectorScore

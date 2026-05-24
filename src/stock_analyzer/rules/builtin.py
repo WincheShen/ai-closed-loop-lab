@@ -83,9 +83,12 @@ def in_hot_sector(stock: StockQuote, params: dict) -> bool:
         hot_sectors: list[str]   动态注入的当日热门板块名
     """
     hot = params.get("hot_sectors") or []
-    if not hot:
+    if not hot or not stock.industry:
         return False
-    return any(h in stock.industry or stock.industry in h for h in hot)
+    return any(
+        (len(h) >= 2 and h in stock.industry) or (len(stock.industry) >= 2 and stock.industry in h)
+        for h in hot
+    )
 
 
 # 便于外部一次性导入

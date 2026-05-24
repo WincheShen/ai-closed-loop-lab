@@ -68,6 +68,7 @@ class KlineBar:
 
 
 _INDUSTRY_CACHE: dict[str, list[str]] = {}   # date_str -> list of board names
+_SYMBOL_INDUSTRY_CACHE: dict[str, dict[str, str]] = {}  # date_str -> {symbol: industry}
 _MOCK_INDUSTRIES = [
     "半导体", "消费电子", "电子元件", "光学光电子",
     "新能源汽车", "电池", "储能设备", "光伏设备",
@@ -80,6 +81,44 @@ _MOCK_INDUSTRIES = [
     "煤炭", "有色金属", "钢铁",
     "传媒", "游戏", "互联网电商",
 ]
+
+# 股票名称 → 行业推断关键词映射（Sina fallback 时使用，与 emappdata_hot_sector 保持一致）
+_NAME_INDUSTRY_KEYWORDS: dict[str, list[str]] = {
+    "半导体": ["半导体", "芯片", "集成电路", "晶圆", "封测"],
+    "人工智能": ["AI", "人工智能", "算力", "大模型", "智能"],
+    "新能源车": ["新能源车", "电动车", "动力电池", "锂电", "充电桩"],
+    "光伏储能": ["光伏", "储能", "太阳能", "风电"],
+    "消费电子": ["消费电子", "手机", "面板", "显示"],
+    "医疗器械": ["医疗", "医药", "生物", "疫苗", "诊断"],
+    "军工": ["军工", "航天", "航空", "导弹", "雷达"],
+    "白酒": ["白酒", "酒", "茅台", "五粮液"],
+    "房地产": ["地产", "房地产", "物业"],
+    "银行": ["银行"],
+    "证券": ["证券", "券商"],
+    "传媒": ["传媒", "游戏", "影视"],
+    "电力": ["电力", "火电", "水电", "核电"],
+    "煤炭": ["煤炭", "煤"],
+    "有色金属": ["有色", "铜", "铝"],
+    "钢铁": ["钢铁", "钢"],
+    "化工": ["化工", "化学"],
+    "机械": ["机械", "设备"],
+    "汽车": ["汽车", "整车"],
+    "家电": ["家电", "空调"],
+}
+
+
+def _infer_industry_from_name(name: str) -> str:
+    """从股票名称推断行业（Sina fallback 时使用）。
+
+    返回第一个匹配的板块名称，无匹配返回空字符串。
+    """
+    if not name:
+        return ""
+    for sector, keywords in _NAME_INDUSTRY_KEYWORDS.items():
+        for kw in keywords:
+            if len(kw) >= 2 and kw in name:
+                return sector
+    return ""
 
 
 class AkshareClient:
@@ -172,27 +211,78 @@ class AkshareClient:
             return None
 
     # ------------------------------------------------------------------
+    # Industry mapping (日级缓存)
+    # ------------------------------------------------------------------
+
+    def _fetch_industry_mapping(self) -> dict[str, str]:
+        """获取 symbol→行业板块 映射（日级缓存）。
+
+        遍历东方财富行业板块成分股构建映射。
+        首次调用约需 30-60s，同一天内后续调用直接返回缓存。
+
+        Returns:
+            {六位代码: 板块名称} 映射
+        """
+        today = date.today().isoformat()
+        if today in _SYMBOL_INDUSTRY_CACHE:
+            return _SYMBOL_INDUSTRY_CACHE[today]
+
+        import time
+        import akshare as ak  # type: ignore
+
+        mapping: dict[str, str] = {}
+        try:
+            board_df = ak.stock_board_industry_name_em()
+            board_names = board_df["板块名称"].dropna().tolist()
+            logger.info("开始构建行业映射，共 %d 个板块...", len(board_names))
+            for i, board_name in enumerate(board_names):
+                try:
+                    cons_df = ak.stock_board_industry_cons_em(symbol=str(board_name))
+                    for code in cons_df["代码"].dropna().tolist():
+                        mapping[str(code).zfill(6)] = str(board_name)
+                except Exception:  # noqa: BLE001
+                    continue
+                if i > 0 and i % 10 == 0:
+                    time.sleep(0.3)  # 每 10 个板块暂停一下避免限流
+        except Exception as e:  # noqa: BLE001
+            logger.warning("行业成分股映射构建失败：%s", e)
+
+        if mapping:
+            _SYMBOL_INDUSTRY_CACHE.clear()
+            _SYMBOL_INDUSTRY_CACHE[today] = mapping
+            logger.info("行业映射构建完成：%d 只股票有行业归属", len(mapping))
+        else:
+            logger.warning("行业映射为空，in_hot_sector 规则将不生效")
+
+        return mapping
+
+    # ------------------------------------------------------------------
     # Real
     # ------------------------------------------------------------------
 
     def _fetch_real(self) -> MarketSnapshot:
         """真实数据拉取。
 
-        TODO(Phase 2): 完整接入
-            - ak.stock_zh_a_spot_em()        全市场实时行情
+        数据源:
+            - ak.stock_zh_a_spot_em()            全市场实时行情
             - ak.stock_board_industry_name_em()  行业板块
-            - ak.stock_individual_fund_flow_rank()  资金流
+            - 行业板块成分股 → 构建 symbol→industry 映射（日级缓存）
         """
         import akshare as ak  # type: ignore
 
         df = ak.stock_zh_a_spot_em()  # 全市场快照
+
+        # 获取 symbol → industry 映射（日级缓存）
+        symbol_industry = self._fetch_industry_mapping()
+
         # 字段映射（参考 akshare 文档）：
         # 代码 / 名称 / 最新价 / 涨跌幅 / 成交量 / 成交额 / 换手率 / 市盈率-动态 / 市净率 / 总市值
         stocks: list[StockQuote] = []
         for _, row in df.iterrows():
             try:
+                sym = str(row.get("代码", "")).zfill(6)
                 stocks.append(StockQuote(
-                    symbol=str(row.get("代码", "")).zfill(6),
+                    symbol=sym,
                     name=str(row.get("名称", "")),
                     price=float(row.get("最新价", 0) or 0),
                     change_pct=float(row.get("涨跌幅", 0) or 0),
@@ -202,6 +292,7 @@ class AkshareClient:
                     pe_ttm=_safe_float(row.get("市盈率-动态")),
                     pb=_safe_float(row.get("市净率")),
                     market_cap_yi=_safe_float(row.get("总市值"), divisor=1e8),
+                    industry=symbol_industry.get(sym, ""),
                 ))
             except Exception:  # noqa: BLE001
                 continue
@@ -315,9 +406,10 @@ class AkshareClient:
                 price = float(item.get("trade", 0) or 0)
                 if price <= 0:
                     continue
+                name = str(item.get("name", ""))
                 stocks.append(StockQuote(
                     symbol=str(item.get("code", "")).zfill(6),
-                    name=str(item.get("name", "")),
+                    name=name,
                     price=price,
                     change_pct=float(item.get("changepercent", 0) or 0),
                     volume=float(item.get("volume", 0) or 0) / 100,  # 股→手
@@ -326,11 +418,12 @@ class AkshareClient:
                     pe_ttm=_safe_float(item.get("per")),
                     pb=_safe_float(item.get("pb")),
                     market_cap_yi=_safe_float(item.get("mktcap"), divisor=1e4),
+                    industry=_infer_industry_from_name(name),
                 ))
             except Exception:  # noqa: BLE001
                 continue
 
-        logger.info("新浪行情快照：%d 只股票（无板块数据）", len(stocks))
+        logger.info("新浪行情快照：%d 只股票（无板块数据，行业从名称推断）", len(stocks))
         return MarketSnapshot(
             snapshot_date=date.today(),
             stocks=stocks,

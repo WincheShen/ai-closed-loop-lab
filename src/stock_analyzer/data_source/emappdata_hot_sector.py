@@ -10,10 +10,7 @@
 from __future__ import annotations
 
 import logging
-import re
-from collections import Counter
 from dataclasses import dataclass
-from typing import Optional
 
 import requests
 
@@ -122,56 +119,19 @@ class EmappdataHotSectorDetector:
         matched = []
         for sector, keywords in _SECTOR_KEYWORDS.items():
             for kw in keywords:
-                if kw in name:
+                if len(kw) >= 2 and kw in name:
                     matched.append(sector)
                     break  # 每个板块只匹配一次
         return matched
 
-    def cluster_sectors(self, hot_stocks: list[HotStock]) -> dict[str, list[HotStock]]:
-        """将热度股票聚类成板块。
-
-        Args:
-            hot_stocks: 热度股票列表
-
-        Returns:
-            板块 -> 热度股票列表的映射
-        """
-        sector_stocks: dict[str, list[HotStock]] = {}
-
-        for stock in hot_stocks:
-            # 从股票代码推断名称（这里简化处理，实际应该调用股票信息接口）
-            # 临时方案：只根据代码前缀做简单判断
-            # TODO: 后续可以从 Sina 快照中获取股票名称
-            sectors = self._extract_keywords_from_symbol(stock.symbol)
-            for sector in sectors:
-                if sector not in sector_stocks:
-                    sector_stocks[sector] = []
-                sector_stocks[sector].append(stock)
-
-        return sector_stocks
-
-    def extract_keywords_from_symbol(self, symbol: str) -> list[str]:
-        """从股票代码推断板块（临时方案）。
-
-        由于 emappdata 只返回代码，不返回名称，我们只能根据代码做简单推断。
-        后续应该从 Sina 快照中获取股票名称。
-
-        Args:
-            symbol: 股票代码，如 "SZ000725"
-
-        Returns:
-            匹配的板块关键词列表
-        """
-        # 临时方案：返回空列表，等待后续改进
-        # TODO: 从 Sina 快照中获取股票名称，然后调用 extract_keywords
-        return []
-
-    def detect(self, stock_names: dict[str, str]) -> list[SectorQuote]:
+    def detect(self, stock_names: dict[str, str], stock_data: dict[str, tuple[float, float, float]] | None = None) -> list[SectorQuote]:
         """推断热点板块。
 
         Args:
-            stock_names: 股票代码 -> 名称的映射（从 Sina 快照中获取）
+            stock_names: 股票代码 -> 名称的映射（从快照中获取）
                          代码格式应为 6 位数字，如 "000725"
+            stock_data: 可选，股票代码 -> (change_pct, turnover, main_fund_net_inflow)
+                        用于计算板块级别指标
 
         Returns:
             热点板块列表（按热度排序）
@@ -184,6 +144,7 @@ class EmappdataHotSectorDetector:
 
         # 2. 聚类板块
         sector_stocks: dict[str, list[HotStock]] = {}
+        sector_symbols: dict[str, list[str]] = {}  # 板块 -> 成分股代码列表
         for stock in hot_stocks:
             # 统一代码格式：去掉交易所前缀，补齐 6 位
             clean_symbol = stock.symbol.replace("SH", "").replace("SZ", "").zfill(6)
@@ -196,7 +157,9 @@ class EmappdataHotSectorDetector:
             for sector in keywords:
                 if sector not in sector_stocks:
                     sector_stocks[sector] = []
+                    sector_symbols[sector] = []
                 sector_stocks[sector].append(stock)
+                sector_symbols[sector].append(clean_symbol)
 
         if not sector_stocks:
             logger.warning("聚类后无板块数据")
@@ -210,22 +173,41 @@ class EmappdataHotSectorDetector:
             score = len(stocks) * 10 + (100 - avg_rank)
             sector_scores.append((sector, score, stocks))
 
-        # 4. 排序并转换为 SectorQuote
+        # 4. 排序并转换为 SectorQuote（尽量填充真实指标）
         sector_scores.sort(key=lambda x: x[1], reverse=True)
 
-        result = [
-            SectorQuote(
+        result = []
+        for sector, score, stocks in sector_scores[:5]:
+            symbols = sector_symbols[sector]
+            leading = [s.symbol.replace("SH", "").replace("SZ", "").zfill(6) for s in stocks[:3]]
+
+            # 从快照股票数据计算板块级指标
+            change_pct = 0.0
+            turnover = 0.0
+            main_fund = 0.0
+            if stock_data:
+                pcts, tos, mfs = [], 0.0, 0.0
+                for sym in symbols:
+                    if sym in stock_data:
+                        pct, to, mf = stock_data[sym]
+                        pcts.append(pct)
+                        tos += to
+                        mfs += mf
+                if pcts:
+                    change_pct = sum(pcts) / len(pcts)
+                    turnover = tos
+                    main_fund = mfs
+
+            result.append(SectorQuote(
                 name=sector,
-                change_pct=0.0,  # emappdata 不提供涨跌幅
-                turnover=0.0,  # emappdata 不提供成交额
-                leading_stocks=[s.symbol.replace("SH", "").replace("SZ", "").zfill(6) for s in stocks[:3]],  # 前 3 只龙头
-                main_fund_net_inflow=0.0,  # emappdata 不提供资金流
-            )
-            for sector, score, stocks in sector_scores[:5]  # Top 5 板块
-        ]
+                change_pct=round(change_pct, 2),
+                turnover=turnover,
+                leading_stocks=leading,
+                main_fund_net_inflow=main_fund,
+            ))
 
         logger.info(
             "推断热点板块: %s",
-            [s.name for s in result],
+            [f"{s.name}({s.change_pct:+.1f}%)" for s in result],
         )
         return result
