@@ -22,6 +22,7 @@ import httpx
 
 from ..data_source import AkshareClient, HotSectorDetector
 from ..data_source.akshare_client import StockQuote
+from ..data_source.emappdata_hot_sector import EmappdataHotSectorDetector
 from ..rules import RuleEngine, load_rules_from_yaml
 from ..rules import builtin  # noqa: F401  触发 @register 装饰器执行
 
@@ -84,6 +85,7 @@ class DailyScanPipeline:
 
         self.akshare = AkshareClient()
         self.hot_detector = HotSectorDetector()
+        self.emappdata_detector = EmappdataHotSectorDetector(top_k=100)
 
     # ------------------------------------------------------------------
     # Run
@@ -100,8 +102,23 @@ class DailyScanPipeline:
             len(snapshot.stocks), len(snapshot.sectors),
         )
 
-        # 2. 热点板块
+        # 2. 热点板块（优先传统方式，fallback 到 emappdata）
         hot = self.hot_detector.detect(snapshot, top_k=5)
+        if not hot or not snapshot.sectors:
+            logger.info("传统板块检测无数据，尝试 emappdata 热度榜推断")
+            stock_names = {s.symbol: s.name for s in snapshot.stocks}
+            stock_data = {
+                s.symbol: (s.change_pct, s.turnover, s.main_fund_net_inflow)
+                for s in snapshot.stocks
+            }
+            emappdata_sectors = self.emappdata_detector.detect(stock_names, stock_data)
+            if emappdata_sectors:
+                from ..data_source.hot_sector_detector import SectorScore
+                hot = [
+                    SectorScore(sector=sector, score=0.0, rank=idx + 1)
+                    for idx, sector in enumerate(emappdata_sectors)
+                ]
+                logger.info("emappdata 推断成功: %d 个板块", len(emappdata_sectors))
         hot_names = [h.sector.name for h in hot]
         logger.info("hot sectors: %s", hot_names)
 
