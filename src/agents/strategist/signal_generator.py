@@ -25,7 +25,6 @@ logger = get_agent_logger("strategist", "init")
 
 MAX_LLM_ANALYSIS = 8
 
-# 策略人类名称 → strategy_id 映射（用于 RiskGovernor 的 persona 兼容性检查）
 _STRATEGY_NAME_TO_ID = {
     "20日线回踩": "hot_sector_pullback",
     "热点板块前排回踩": "hot_sector_pullback",
@@ -42,21 +41,16 @@ _STRATEGY_NAME_TO_ID = {
 
 
 def _infer_strategy_id(strategy_name: str) -> str:
-    """从人类可读策略名称推断标准 strategy_id。"""
     if not strategy_name:
         return "unknown"
     name = strategy_name.strip()
     if name in _STRATEGY_NAME_TO_ID:
         return _STRATEGY_NAME_TO_ID[name]
-    # 模糊匹配
     for key, sid in _STRATEGY_NAME_TO_ID.items():
         if key in name:
             return sid
     return "unknown"
 
-# ─────────────────────────────────────────────────────────────────
-# LLM Prompts
-# ─────────────────────────────────────────────────────────────────
 
 STRATEGIST_SYSTEM_PROMPT = """\
 你是一位 Cognitive Agent 的交易决策者。你必须严格遵守"投资人格"约束，
@@ -142,7 +136,6 @@ STRATEGIST_USER_TEMPLATE = """\
 
 
 class StrategistEngine:
-    """决策者引擎 — LLM 驱动的候选股分析。"""
 
     def __init__(
         self,
@@ -161,6 +154,28 @@ class StrategistEngine:
 
     def _persona_block(self) -> str:
         return self.persona.prompt_summary()
+
+    def _lessons_block(self) -> str:
+        regime = self.market_regime.get("regime")
+        try:
+            lessons = self.brain.store.get_recent_lessons(regime=regime, limit=3)
+        except Exception:
+            lessons = []
+
+        if not lessons:
+            return ""
+
+        lines = []
+        for l in lessons:
+            txt = l.get("lesson_text") or l.get("lesson") or ""
+            symbol = l.get("symbol", "")
+            if txt:
+                lines.append(f"- {symbol}: {txt}")
+
+        if not lines:
+            return ""
+
+        return "\n\n## 历史交易教训（避免重复错误）\n" + "\n".join(lines)
 
     def _regime_kwargs(self) -> dict[str, Any]:
         regime = self.market_regime or {}
@@ -182,7 +197,6 @@ class StrategistEngine:
         }
 
     def analyze_candidate(self, candidate: StockCandidate) -> TradeSignal | None:
-        """对单只候选票调用 LLM 深度分析，返回 TradeSignal 或 None（PASS）。"""
         symbol = candidate["symbol"]
         name = candidate["name"]
         kline = candidate.get("kline_summary", {})
@@ -217,6 +231,8 @@ class StrategistEngine:
             hot_sectors=", ".join(self.hot_sectors) if self.hot_sectors else "无",
             **self._regime_kwargs(),
         )
+
+        user_msg += self._lessons_block()
 
         try:
             llm = get_llm()
@@ -263,21 +279,19 @@ class StrategistEngine:
             "expiry": (datetime.now() + timedelta(days=5)).isoformat(),
         }
 
-        # Attach extra fields for downstream RiskGovernor / Position creation
-        signal["name"] = name  # type: ignore[typeddict-unknown-key]
-        signal["sector"] = candidate.get("sector", "")  # type: ignore[typeddict-unknown-key]
-        signal["bull_case"] = result.get("bull_case", "")  # type: ignore[typeddict-unknown-key]
-        signal["bear_case"] = result.get("bear_case", "")  # type: ignore[typeddict-unknown-key]
-        signal["confidence"] = result.get("confidence", 0.5)  # type: ignore[typeddict-unknown-key]
-        signal["strategy_id"] = _infer_strategy_id(signal["strategy"])  # type: ignore[typeddict-unknown-key]
-        # 来自 MarketBrain 的认知元数据
-        signal["market_regime"] = self.market_regime.get("regime", "")  # type: ignore[typeddict-unknown-key]
-        signal["persona_version"] = self.persona.persona_version  # type: ignore[typeddict-unknown-key]
+        signal["name"] = name
+        signal["sector"] = candidate.get("sector", "")
+        signal["bull_case"] = result.get("bull_case", "")
+        signal["bear_case"] = result.get("bear_case", "")
+        signal["confidence"] = result.get("confidence", 0.5)
+        signal["strategy_id"] = _infer_strategy_id(signal["strategy"])
+        signal["market_regime"] = self.market_regime.get("regime", "")
+        signal["persona_version"] = self.persona.persona_version
 
         self.logger.info(
             "生成信号 %s | %s %s | 策略=%s (id=%s) | regime=%s | 入场=%.2f | 止损=%.2f | 目标=%.2f | 置信=%.0f%%",
             signal["signal_id"], symbol, name, signal["strategy"],
-            signal["strategy_id"], signal["market_regime"],  # type: ignore[typeddict-unknown-key]
+            signal["strategy_id"], signal["market_regime"],
             signal["entry_price"], signal["stop_loss"], signal["target_price"],
             result.get("confidence", 0) * 100,
         )
@@ -286,7 +300,6 @@ class StrategistEngine:
     def generate_signals(
         self, candidates: list[StockCandidate],
     ) -> list[TradeSignal]:
-        """批量分析候选票（上限 MAX_LLM_ANALYSIS 只），返回 BUY 信号。"""
         signals: list[TradeSignal] = []
         analyze_count = min(len(candidates), MAX_LLM_ANALYSIS)
         self.logger.info("开始 LLM 深度分析 — Top %d 候选", analyze_count)
@@ -311,7 +324,6 @@ class StrategistEngine:
         return signals
 
     def risk_assessment(self, signals: list[TradeSignal]) -> dict:
-        """整体风控评估：集中度、总仓位。"""
         total_position = sum(s["position_pct"] for s in signals)
         assessment = {
             "total_position_pct": round(total_position, 2),
@@ -333,7 +345,6 @@ class StrategistEngine:
         return assessment
 
     def _parse_response(self, content: str) -> dict:
-        """解析 LLM JSON 输出，容错处理。"""
         text = content.strip()
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
@@ -357,11 +368,6 @@ class StrategistEngine:
 
 
 def run_strategy_node(state: TradingState) -> dict[str, Any]:
-    """LangGraph 节点函数 — 决策者分析。
-
-    输入：含 target_stocks + market_regime 的 TradingState
-    输出：{"trade_signals": [...], "risk_assessment": {...}}
-    """
     session_id = state["session_id"]
     hot_sectors = state.get("hot_sectors", [])
     market_regime = state.get("market_regime") or {}
