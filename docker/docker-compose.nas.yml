@@ -1,32 +1,45 @@
 version: "3.8"
 
-# NAS 部署配置（部署到 /volume1/docker/ai-lab-web/）
-# 用法: cd /volume1/docker/ai-lab-web && sudo docker-compose -f docker-compose.nas.yml up -d
+# AI Closed Loop Lab — 群晖 NAS 部署配置
+#
+# 部署位置: /volume1/docker/ai-lab/
+#
+# 用法:
+#   启动 Web 服务:           sudo docker-compose up -d web
+#   启动 Web + 调度器:       sudo docker-compose --profile scheduler up -d
+#   启动全部 (含 SMA):       sudo docker-compose --profile scheduler --profile sma up -d
+#   查看日志:                sudo docker-compose logs -f web
+#   停止:                    sudo docker-compose down
 
 services:
-  # Webhook Listener + 策略选股 UI
-  webhook:
-    image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
-    container_name: ai-lab-webhook
+  # ═══════════════════════════════════════════
+  # 核心 Web 服务 (React UI + 所有 API)
+  # ═══════════════════════════════════════════
+  web:
+    image: ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
+    container_name: ai-lab-web
     ports:
       - "8002:8002"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # Linux Docker 需要显式声明
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-      - WEBHOOK_AUTO_SMA_DISPATCH=false
-      - TRADING_AGENT_URL=http://host.docker.internal:8010  # 访问宿主机上的 Trading Agent
+      - TRADING_AGENT_URL=http://ai-lab-web:8002
     restart: unless-stopped
-    command: ["python", "-m", "uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
-  # 日常选股扫描调度器（可选，如果不跑每日扫描可注释掉）
+  # ═══════════════════════════════════════════
+  # 定时调度器 (盘中复审 / 收盘扫描 / 周复盘)
+  # ═══════════════════════════════════════════
   scheduler:
-    image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+    image: ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
     container_name: ai-lab-scheduler
     volumes:
       - ./data:/app/data
@@ -36,25 +49,28 @@ services:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    # 调度器持续运行，执行定时任务
     command: ["python", "scripts/scheduler.py"]
     profiles:
-      - scheduler  # 默认不启动，需要时加 --profile scheduler
+      - scheduler
+    depends_on:
+      web:
+        condition: service_healthy
 
-  # 独立的策略选股服务（如果只想跑策略选股，可以单独用这个）
-  strategy:
-    image: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
-    container_name: ai-lab-strategy
+  # ═══════════════════════════════════════════
+  # Social Media Automation (SMA) — 来自另一个项目
+  # ═══════════════════════════════════════════
+  sma:
+    image: ghcr.io/wincheshen/social-media-automation:latest
+    container_name: ai-lab-sma
     ports:
-      - "8003:8002"
+      - "8003:8003"
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./data/sma:/app/data
       - ./.env:/app/.env:ro
     environment:
       - TZ=Asia/Shanghai
-      - PYTHONUNBUFFERED=1
+      - SMA_API_PORT=8003
+      - SMA_API_HOST=0.0.0.0
     restart: unless-stopped
     profiles:
-      - strategy
-    command: ["python", "-m", "uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"]
+      - sma

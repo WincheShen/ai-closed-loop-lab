@@ -537,14 +537,34 @@ def get_agent_report(date: str) -> dict:
     return result
 
 
-# 挂载静态文件（管理页面）- 挂载到 /ui 路径
+# 挂载静态文件
+# 优先级: React 构建产物 (frontend/dist) > 旧 vanilla UI (/ui)
+_react_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _static_dir = Path(__file__).resolve().parent / "static"
-if _static_dir.exists():
+
+if _react_dist.exists():
+    # React SPA: 所有非 API 路径回落到 index.html
+    from fastapi.responses import FileResponse
+
+    @app.get("/")
+    def serve_root():
+        return FileResponse(str(_react_dist / "index.html"))
+
+    app.mount("/assets", StaticFiles(directory=str(_react_dist / "assets")), name="react-assets")
+
+    # SPA fallback: 任何非 /api、/webhook、/health 路径都返回 index.html
+    @app.get("/{path:path}")
+    def serve_spa(path: str):
+        file_path = _react_dist / path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(_react_dist / "index.html"))
+
+elif _static_dir.exists():
     app.mount("/ui", StaticFiles(directory=str(_static_dir), html=True), name="static")
 
-
-@app.get("/")
-def root_redirect():
-    """根路径重定向到管理页面。"""
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/ui/")
+    @app.get("/")
+    def root_redirect():
+        """根路径重定向到管理页面。"""
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/ui/")

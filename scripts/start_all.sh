@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 
-# Simple startup script for the AI Closed Loop Lab local stack.
-# Starts the core services needed for development.
+# AI Closed Loop Lab — 一键启动（本地开发）
+#
+# 用法:
+#   ./scripts/start_all.sh          # 启动后端 + 前端
+#   ./scripts/start_all.sh --backend-only   # 只启动后端服务
+#
+# 服务端口:
+#   8001  TradingAgent Service (mock 模式)
+#   8002  Webhook Listener + Strategy API + Agent Report API
+#   5173  React 前端 (Vite dev server, 代理到 8002)
+#
+# 停止: Ctrl+C
 
 set -e
 
@@ -10,58 +20,63 @@ cd "$PROJECT_ROOT"
 
 export PYTHONPATH="$PROJECT_ROOT/src"
 
-echo "Starting AI Closed Loop Lab services..."
+BACKEND_ONLY=false
+[[ "$1" == "--backend-only" ]] && BACKEND_ONLY=true
 
-# ---- Trading Agent Service ----
-echo "[1/5] Starting TradingAgent service on :8001"
-TAS_ANALYZER=${TAS_ANALYZER:-mock} python scripts/run_trading_agent_service.py &
-PID_TRADING=$!
+PIDS=()
 
-sleep 1
+cleanup() {
+    echo ""
+    echo "Stopping all services..."
+    for pid in "${PIDS[@]}"; do
+        kill "$pid" 2>/dev/null
+    done
+    wait 2>/dev/null
+    echo "Done."
+}
+trap cleanup INT TERM
 
-# ---- Webhook Listener ----
-echo "[2/5] Starting Webhook Listener on :8002"
+echo "╔══════════════════════════════════════════╗"
+echo "║    AI Closed Loop Lab — Local Dev       ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+
+# ---- Webhook Listener (核心服务, 含 Strategy + Agent Report API) ----
+echo "[1/3] Webhook Listener + API  →  :8002"
 python scripts/run_webhook_listener.py &
-PID_WEBHOOK=$!
-
+PIDS+=($!)
 sleep 1
 
-# ---- Event Monitor ----
-echo "[3/5] Starting Event Monitor on :8010"
-python scripts/run_event_monitor.py &
-PID_MONITOR=$!
-
+# ---- TradingAgent Service ----
+echo "[2/3] TradingAgent Service    →  :8001"
+TAS_ANALYZER=${TAS_ANALYZER:-mock} python scripts/run_trading_agent_service.py &
+PIDS+=($!)
 sleep 1
 
-# ---- Strategy Metrics API ----
-echo "[4/5] Starting Strategy Metrics API on :8011"
-python scripts/run_strategy_metrics.py &
-PID_METRICS=$!
+# ---- Frontend (Vite dev server) ----
+if [ "$BACKEND_ONLY" = false ]; then
+    echo "[3/3] React Frontend (Vite)   →  :5173"
+    cd "$PROJECT_ROOT/frontend"
+    npm run dev -- --host 2>/dev/null &
+    PIDS+=($!)
+    cd "$PROJECT_ROOT"
+else
+    echo "[3/3] Frontend skipped (--backend-only)"
+fi
 
-sleep 1
-
-# ---- Usage Help ----
-echo "[5/5] All services started."
 echo ""
-echo "Trigger daily scan:"
-echo "  python scripts/run_daily_workflow.py"
+echo "════════════════════════════════════════════"
+echo "  Services running:"
+echo "    Frontend:   http://localhost:5173"
+echo "    Backend:    http://localhost:8002"
+echo "    Agent API:  http://localhost:8001"
 echo ""
-echo "View event stream:"
-echo "  http://localhost:8010/events/recent"
-echo ""
-echo "View strategy metrics:"
-echo "  http://localhost:8011/strategy/summary"
-echo ""
-
-echo "Service PIDs:"
-echo "  TradingAgent : $PID_TRADING"
-echo "  Webhook      : $PID_WEBHOOK"
-echo "  EventMonitor : $PID_MONITOR"
-echo "  MetricsAPI   : $PID_METRICS"
-
+echo "  Quick actions:"
+echo "    Run daily scan:  python scripts/run_daily_scan.py"
+echo "    Run full loop:   python scripts/run_daily_workflow.py"
+echo "════════════════════════════════════════════"
 echo ""
 echo "Press Ctrl+C to stop all services."
-
-trap "echo 'Stopping services...'; kill $PID_TRADING $PID_WEBHOOK $PID_MONITOR $PID_METRICS 2>/dev/null" INT TERM
+echo ""
 
 wait

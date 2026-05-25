@@ -1,4 +1,4 @@
-name: Build and Push TradingAgent Image
+name: Build and Push Docker Image
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'README.md'
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build-and-push:
@@ -16,15 +16,8 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout ai-closed-loop-lab
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Checkout TradingAgents
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/TradingAgents
-          token: ${{ secrets.PAT_TOKEN }}
-          path: libs/tradingAgents_neo
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -39,13 +32,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: docker/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          # GHCR 镜像名必须全小写
           tags: |
-            ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
-            ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:${{ github.sha }}
+            ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
+            ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

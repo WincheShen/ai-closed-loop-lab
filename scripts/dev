@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
-# Unified developer helper for AI Closed Loop Lab
+# AI Closed Loop Lab — 开发者辅助脚本
+#
 # Usage:
-#   ./scripts/dev up
-#   ./scripts/dev down
-#   ./scripts/dev restart
-#   ./scripts/dev scan
-#   ./scripts/dev events
-#   ./scripts/dev metrics
-#   ./scripts/dev test
+#   ./scripts/dev up           启动所有服务 (后端 + 前端)
+#   ./scripts/dev down         停止所有服务
+#   ./scripts/dev scan         执行一次每日选股扫描
+#   ./scripts/dev workflow     执行完整 Agent 工作流
+#   ./scripts/dev report       查看最新 Agent 日报
+#   ./scripts/dev test         运行测试
 
 set -e
 
@@ -17,39 +17,34 @@ CMD=$1
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+export PYTHONPATH="$PROJECT_ROOT/src"
+
 start() {
-    echo "Starting services..."
     ./scripts/start_all.sh
 }
 
 stop() {
     echo "Stopping services..."
-    pkill -f run_trading_agent_service.py || true
-    pkill -f run_webhook_listener.py || true
-    pkill -f run_event_monitor.py || true
-    pkill -f run_strategy_metrics.py || true
+    pkill -f run_trading_agent_service.py 2>/dev/null || true
+    pkill -f run_webhook_listener.py 2>/dev/null || true
+    pkill -f "npm run dev" 2>/dev/null || true
+    pkill -f "vite" 2>/dev/null || true
     echo "Done."
 }
 
-restart() {
-    stop
-    sleep 1
-    start
-}
-
 scan() {
-    echo "Running daily workflow..."
-    python scripts/run_daily_workflow.py
+    echo "Running daily scan..."
+    python scripts/run_daily_scan.py "$@"
 }
 
-events() {
-    echo "Opening recent events..."
-    curl -s http://localhost:8010/events/recent | python -m json.tool
+workflow() {
+    echo "Running full daily workflow..."
+    python scripts/run_daily_workflow.py "$@"
 }
 
-metrics() {
-    echo "Fetching strategy metrics..."
-    curl -s http://localhost:8011/strategy/summary | python -m json.tool
+report() {
+    echo "Latest agent report:"
+    curl -s http://localhost:8002/api/agent-report/dates | python -m json.tool
 }
 
 tests() {
@@ -58,29 +53,38 @@ tests() {
 }
 
 case "$CMD" in
-    up)
+    up|start)
         start
         ;;
-    down)
+    down|stop)
         stop
         ;;
-    restart)
-        restart
-        ;;
     scan)
-        scan
+        shift
+        scan "$@"
         ;;
-    events)
-        events
+    workflow)
+        shift
+        workflow "$@"
         ;;
-    metrics)
-        metrics
+    report)
+        report
         ;;
     test)
         tests
         ;;
     *)
-        echo "Usage: ./scripts/dev {up|down|restart|scan|events|metrics|test}"
+        echo "AI Closed Loop Lab — 开发者辅助"
+        echo ""
+        echo "Usage: ./scripts/dev <command>"
+        echo ""
+        echo "Commands:"
+        echo "  up        启动所有服务 (后端 + 前端)"
+        echo "  down      停止所有服务"
+        echo "  scan      执行一次每日选股扫描"
+        echo "  workflow   执行完整 Agent 工作流"
+        echo "  report    查看最新 Agent 日报日期列表"
+        echo "  test      运行测试"
         exit 1
         ;;
 esac
