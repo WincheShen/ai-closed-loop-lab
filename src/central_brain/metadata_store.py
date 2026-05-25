@@ -279,6 +279,53 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_regime_date ON market_regime_snapshots(trade_date);
             CREATE INDEX IF NOT EXISTS idx_risk_session ON risk_decisions(session_id);
             CREATE INDEX IF NOT EXISTS idx_risk_signal ON risk_decisions(signal_id);
+            -- ---------------------------------------------------------------
+            -- Sprint 1: 交易归因 + Lesson 学习
+            -- ---------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS trade_attributions (
+                attribution_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                entry_price REAL,
+                close_price REAL,
+                realized_pnl REAL,
+                pnl_pct REAL,
+                holding_days INTEGER,
+                outcome TEXT NOT NULL,
+                primary_cause TEXT NOT NULL,
+                secondary_causes_json TEXT,
+                entry_regime TEXT,
+                close_regime TEXT,
+                regime_changed INTEGER DEFAULT 0,
+                strategy_id TEXT,
+                original_thesis TEXT,
+                actual_narrative TEXT,
+                lesson TEXT,
+                should_have TEXT,
+                tags_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (position_id) REFERENCES positions(position_id)
+            );
+            CREATE TABLE IF NOT EXISTS lessons (
+                lesson_id TEXT PRIMARY KEY,
+                attribution_id TEXT,
+                symbol TEXT,
+                strategy_id TEXT,
+                regime TEXT,
+                outcome TEXT,
+                lesson_text TEXT NOT NULL,
+                tags_json TEXT,
+                relevance_score REAL DEFAULT 1.0,
+                cited_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_attr_position ON trade_attributions(position_id);
+            CREATE INDEX IF NOT EXISTS idx_attr_outcome ON trade_attributions(outcome);
+            CREATE INDEX IF NOT EXISTS idx_attr_strategy ON trade_attributions(strategy_id);
+            CREATE INDEX IF NOT EXISTS idx_lessons_strategy ON lessons(strategy_id);
+            CREATE INDEX IF NOT EXISTS idx_lessons_regime ON lessons(regime);
+            CREATE INDEX IF NOT EXISTS idx_lessons_outcome ON lessons(outcome);
             """
         )
         conn.commit()
@@ -860,6 +907,148 @@ class MemoryStore:
             (position_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Sprint 1: 交易归因 + Lesson 持久化
+    # ------------------------------------------------------------------
+
+    def save_attribution(self, attr: dict) -> None:
+        """保存交易归因记录。"""
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO trade_attributions
+            (attribution_id, position_id, symbol, name,
+             entry_price, close_price, realized_pnl, pnl_pct, holding_days,
+             outcome, primary_cause, secondary_causes_json,
+             entry_regime, close_regime, regime_changed,
+             strategy_id, original_thesis, actual_narrative,
+             lesson, should_have, tags_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                attr["attribution_id"],
+                attr["position_id"],
+                attr["symbol"],
+                attr.get("name", ""),
+                attr.get("entry_price"),
+                attr.get("close_price"),
+                attr.get("realized_pnl"),
+                attr.get("pnl_pct"),
+                attr.get("holding_days"),
+                attr["outcome"],
+                attr["primary_cause"],
+                json.dumps(attr.get("secondary_causes", []), ensure_ascii=False),
+                attr.get("entry_regime", ""),
+                attr.get("close_regime", ""),
+                1 if attr.get("regime_changed") else 0,
+                attr.get("strategy_id", ""),
+                attr.get("original_thesis", ""),
+                attr.get("actual_narrative", ""),
+                attr.get("lesson", ""),
+                attr.get("should_have", ""),
+                json.dumps(attr.get("tags", []), ensure_ascii=False),
+                attr.get("created_at") or datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def save_lesson(self, lesson: dict) -> None:
+        """保存单条 lesson。"""
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO lessons
+            (lesson_id, attribution_id, symbol, strategy_id, regime,
+             outcome, lesson_text, tags_json, relevance_score, cited_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                lesson["lesson_id"],
+                lesson.get("attribution_id", ""),
+                lesson.get("symbol", ""),
+                lesson.get("strategy_id", ""),
+                lesson.get("regime", ""),
+                lesson.get("outcome", ""),
+                lesson["lesson_text"],
+                json.dumps(lesson.get("tags", []), ensure_ascii=False),
+                lesson.get("relevance_score", 1.0),
+                lesson.get("cited_count", 0),
+                lesson.get("created_at") or datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def get_recent_lessons(
+        self,
+        strategy_id: str | None = None,
+        regime: str | None = None,
+        limit: int = 5,
+    ) -> list[dict]:
+        """检索最近 lesson，支持按 strategy_id / regime 过滤。
+
+        排序逻辑: 同 strategy + 同 regime 的优先 (relevance_score DESC, 时间 DESC)。
+        """
+        conn = self._conn()
+        conditions = []
+        params: list[Any] = []
+
+        if strategy_id:
+            conditions.append("strategy_id = ?")
+            params.append(strategy_id)
+        if regime:
+            conditions.append("regime = ?")
+            params.append(regime)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+
+        rows = conn.execute(
+            f"SELECT * FROM lessons {where} "
+            f"ORDER BY relevance_score DESC, created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+
+        # 如果带过滤条件查不到足够结果，补充无过滤的最新 lesson
+        results = [dict(r) for r in rows]
+        if len(results) < limit and conditions:
+            seen = {r["lesson_id"] for r in results}
+            fill_rows = conn.execute(
+                "SELECT * FROM lessons ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            for r in fill_rows:
+                if dict(r)["lesson_id"] not in seen:
+                    results.append(dict(r))
+                    if len(results) >= limit:
+                        break
+
+        return results[:limit]
+
+    def get_attributions_since(self, days: int = 7) -> list[dict]:
+        """获取最近 N 天的归因记录。"""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM trade_attributions WHERE created_at >= ? ORDER BY created_at DESC",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_attribution_by_position(self, position_id: str) -> dict | None:
+        """获取某仓位的归因记录。"""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM trade_attributions WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def increment_lesson_cited(self, lesson_id: str) -> None:
+        """lesson 被 Strategist 引用时 +1。"""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE lessons SET cited_count = cited_count + 1 WHERE lesson_id = ?",
+            (lesson_id,),
+        )
+        conn.commit()
 
 
 # =============================================================================
