@@ -17,6 +17,7 @@ from datetime import date, datetime, time
 
 from src.agents.executioner.executor import ExecutionEngine
 from src.agents.reviewer.position_reviewer import PositionReviewAgent
+from src.agents.memory.trade_attribution import TradeAttributor
 from src.central_brain import get_central_brain
 from src.infra.config import cfg
 
@@ -160,6 +161,14 @@ async def _execute_review_action(
             if new_qty <= 0:
                 pnl = (current_price - position["entry_price"]) * current_qty
                 brain.store.close_position(position["position_id"], current_price, pnl)
+
+                # Trigger trade attribution
+                try:
+                    attributor = TradeAttributor(session_id)
+                    attributor.attribute_and_save(position, close_price=current_price)
+                except Exception as e:
+                    logger.warning("交易归因失败 %s: %s", symbol, e)
+
             result = {
                 "executed": True,
                 "trade_side": "sell",
@@ -177,6 +186,14 @@ async def _execute_review_action(
         if fills:
             pnl = (current_price - position["entry_price"]) * current_qty
             brain.store.close_position(position["position_id"], current_price, pnl)
+
+            # Trigger trade attribution
+            try:
+                attributor = TradeAttributor(session_id)
+                attributor.attribute_and_save(position, close_price=current_price)
+            except Exception as e:
+                logger.warning("交易归因失败 %s: %s", symbol, e)
+
             result = {
                 "executed": True,
                 "trade_side": "sell",
