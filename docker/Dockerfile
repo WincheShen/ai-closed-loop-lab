@@ -9,11 +9,12 @@
 # ── Stage 1: 构建 React 前端 ──
 # 使用 BUILDPLATFORM 确保在宿主架构上编译（不走 QEMU），
 # 产物为纯静态文件，与目标平台无关。
-FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-build
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-build
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --silent
 COPY frontend/ .
+ENV NODE_OPTIONS="--max_old_space_size=4096"
 RUN npm run build
 
 # ── Stage 2: Python 后端 ──
