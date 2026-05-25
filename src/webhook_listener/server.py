@@ -12,7 +12,8 @@
 """
 from __future__ import annotations
 
-import asyncio
+import glob
+import json
 import logging
 import os
 import sqlite3
@@ -365,6 +366,175 @@ async def proxy_report(symbol: str):
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"无法连接 Trading Agent: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Agent Daily Report
+# ---------------------------------------------------------------------------
+
+@app.get("/api/agent-report/dates")
+def list_report_dates() -> list[str]:
+    """列出有选股数据的日期（降序）。"""
+    dates: set[str] = set()
+    # 1) 从 daily_picks JSON 文件
+    for f in glob.glob("data/daily_picks/*.json"):
+        dates.add(Path(f).stem)
+    # 2) 从数据库 daily_picks_archive
+    try:
+        brain = _get_central_brain()
+        conn = brain.store._conn()
+        rows = conn.execute(
+            "SELECT pick_date FROM daily_picks_archive ORDER BY pick_date DESC"
+        ).fetchall()
+        for row in rows:
+            dates.add(row[0])
+    except Exception as e:
+        logger.warning("Failed to query daily_picks_archive: %s", e)
+    return sorted(dates, reverse=True)
+
+
+@app.get("/api/agent-report/{date}")
+def get_agent_report(date: str) -> dict:
+    """获取某天的完整 Agent 报告。"""
+    result: dict[str, Any] = {
+        "date": date,
+        "market_regime": None,
+        "picks": None,
+        "signals": [],
+        "risk_decisions": [],
+        "orders": [],
+        "cost": {"total_llm_cost_usd": 0.0, "total_calls": 0, "total_tokens": 0},
+    }
+
+    # 1) daily_picks JSON
+    pick_file = Path(f"data/daily_picks/{date}.json")
+    if pick_file.exists():
+        try:
+            with pick_file.open("r", encoding="utf-8") as f:
+                picks = json.load(f)
+            result["picks"] = {
+                "hot_sectors": picks.get("hot_sectors", []),
+                "aggressive": picks.get("aggressive", []),
+                "stable": picks.get("stable", []),
+                "candidates": picks.get("candidates", []),
+                "candidates_count": len(picks.get("candidates", [])),
+                "agent_calls_count": sum(
+                    1
+                    for bucket in ["aggressive", "stable", "candidates"]
+                    for s in picks.get(bucket, [])
+                    if s.get("agent_decision")
+                ),
+                "elapsed_seconds": 0,
+                "is_mock_data": picks.get("is_mock_data", False),
+            }
+        except Exception as e:
+            logger.warning("Failed to read picks file: %s", e)
+
+    # 2) 数据库查询
+    try:
+        brain = _get_central_brain()
+        conn = brain.store._conn()
+        conn.row_factory = sqlite3.Row
+
+        # market_regime
+        row = conn.execute(
+            "SELECT * FROM market_regime_snapshots WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
+            (date,),
+        ).fetchone()
+        if row:
+            r = dict(row)
+            result["market_regime"] = {
+                "regime": r.get("regime", ""),
+                "risk_appetite": r.get("risk_appetite", ""),
+                "recommended_posture": r.get("recommended_posture", ""),
+                "max_total_position_pct": r.get("max_total_position_pct", 0),
+                "hot_sectors": json.loads(r.get("hot_sectors_json", "[]")),
+                "dominant_styles": json.loads(r.get("dominant_styles_json", "[]")),
+                "avoid_styles": json.loads(r.get("avoid_styles_json", "[]")),
+                "strategy_bias": json.loads(r.get("strategy_bias_json", "{}")),
+                "daily_questions": json.loads(r.get("daily_questions_json", "[]")),
+                "summary": r.get("summary", ""),
+                "evidence": json.loads(r.get("evidence_json", "{}")),
+            }
+
+        # trade_signals
+        rows = conn.execute(
+            "SELECT * FROM trade_signals WHERE date(timestamp) = ?",
+            (date,),
+        ).fetchall()
+        for row in rows:
+            r = dict(row)
+            result["signals"].append({
+                "signal_id": r.get("signal_id", ""),
+                "symbol": r.get("symbol", ""),
+                "action": r.get("action", ""),
+                "entry_price": r.get("entry_price", 0),
+                "target_price": r.get("target_price", 0),
+                "stop_loss": r.get("stop_loss", 0),
+                "position_pct": r.get("position_pct", 0),
+                "strategy": r.get("strategy", ""),
+                "rationale": r.get("rationale", ""),
+                "timestamp": r.get("timestamp", ""),
+            })
+
+        # risk_decisions
+        rows = conn.execute(
+            "SELECT * FROM risk_decisions WHERE date(created_at) = ?",
+            (date,),
+        ).fetchall()
+        for row in rows:
+            r = dict(row)
+            result["risk_decisions"].append({
+                "signal_id": r.get("signal_id", ""),
+                "symbol": r.get("symbol", ""),
+                "decision": r.get("decision", ""),
+                "original_position_pct": r.get("original_position_pct", 0),
+                "approved_position_pct": r.get("approved_position_pct", 0),
+                "reason": r.get("reason", ""),
+                "risk_flags": json.loads(r.get("risk_flags_json", "[]")),
+            })
+
+        # orders + fills
+        rows = conn.execute(
+            """SELECT o.*, f.avg_price, f.fees, f.filled_at
+               FROM orders o
+               LEFT JOIN fills f ON o.order_id = f.order_id
+               WHERE date(o.submitted_at) = ?""",
+            (date,),
+        ).fetchall()
+        for row in rows:
+            r = dict(row)
+            result["orders"].append({
+                "order_id": r.get("order_id", ""),
+                "signal_id": r.get("signal_id", ""),
+                "symbol": r.get("symbol", ""),
+                "side": r.get("side", ""),
+                "quantity": r.get("quantity", 0),
+                "order_type": r.get("order_type", ""),
+                "limit_price": r.get("limit_price"),
+                "status": r.get("status", ""),
+                "submitted_at": r.get("submitted_at", ""),
+                "avg_price": r.get("avg_price"),
+                "fees": r.get("fees"),
+                "filled_at": r.get("filled_at"),
+            })
+
+        # llm cost
+        row = conn.execute(
+            """SELECT COUNT(*) as calls, SUM(total_tokens) as tokens, SUM(cost_usd) as cost
+               FROM llm_calls WHERE date(ts) = ?""",
+            (date,),
+        ).fetchone()
+        if row:
+            result["cost"] = {
+                "total_llm_cost_usd": row["cost"] or 0,
+                "total_calls": row["calls"] or 0,
+                "total_tokens": row["tokens"] or 0,
+            }
+    except Exception as e:
+        logger.warning("Failed to query agent report db: %s", e)
+
+    return result
 
 
 # 挂载静态文件（管理页面）- 挂载到 /ui 路径

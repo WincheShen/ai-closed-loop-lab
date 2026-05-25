@@ -12,6 +12,7 @@ import {
   Target,
   Search,
   ClipboardList,
+  FileText,
 } from 'lucide-react'
 
 const navItems = [
@@ -36,6 +37,10 @@ const navItems = [
     label: '多智能体工作流',
     icon: Bot,
     badge: null,
+    children: [
+      { path: '/agents', label: '工作流监控', icon: Bot },
+      { path: '/agent-report', label: 'Agent 日报', icon: FileText },
+    ],
   },
   {
     path: '/content',
