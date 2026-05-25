@@ -1,0 +1,33 @@
+# Docker build context exclusions
+.git
+.github
+.env
+.env.*
+!.env.example
+
+# Python artifacts
+__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+.mypy_cache
+
+# Frontend build artifacts (rebuilt in Docker)
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Data & logs (mounted as volumes)
+data/
+logs/
+
+# IDE
+.vscode
+.idea
+
+# Docs (not needed in image)
+docs/
+
+# Tests (not needed in image)
+tests/
+*_spec.py
