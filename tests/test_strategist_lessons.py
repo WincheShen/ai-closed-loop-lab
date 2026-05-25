@@ -31,4 +31,3 @@ def test_lessons_block(monkeypatch):
     assert "历史交易教训" in block
     assert "avoid chasing highs" in block
     assert "respect stop loss" in block
-```
