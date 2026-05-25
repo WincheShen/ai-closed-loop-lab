@@ -182,7 +182,7 @@ class StrategyCompiler:
                     f"\n\n【当前东方财富真实行业板块列表（共{len(boards)}个，以下为部分）】\n"
                     f"{sample}...\n"
                     f"当用户提到行业时，请从以上列表中选取最匹配的板块名，"
-                    f"使用 contains + 最短区分关键词（如"半导体"而非"芯片半导体"）。"
+                    f'使用 contains + 最短区分关键词（如"半导体"而非"芯片半导体"）。'
                 )
         except Exception as e:
             logger.warning("获取行业列表失败: %s", e)
