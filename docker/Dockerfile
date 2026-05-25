@@ -12,10 +12,9 @@
 FROM --platform=$BUILDPLATFORM node:22-slim AS frontend-build
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --silent
+RUN npm ci
 COPY frontend/ .
-ENV NODE_OPTIONS="--max_old_space_size=4096"
-RUN npm run build
+RUN npx vite build
 
 # ── Stage 2: Python 后端 ──
 FROM python:3.11-slim
