@@ -61,11 +61,12 @@ def job_market_brain_only() -> None:
         snap = brain.generate_snapshot()
         logger.info(
             "MarketBrain 盘中判定: regime=%s posture=%s max_pos=%.0f%% hot=%s",
-            snap.regime, snap.recommended_posture,
+            snap.regime,
+            snap.recommended_posture,
             snap.max_total_position_pct * 100,
             ",".join(snap.hot_sectors[:3]) or "无",
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("MarketBrain 盘中判定失败: %s", e)
 
 
@@ -105,43 +106,45 @@ def setup_schedule() -> None:
     for hour in range(9, 15):
         for minute in (0, 30):
             if hour == 9 and minute == 0:
-                continue  # 跳过 9:00（未开盘）
+                continue
             if hour >= 12 and hour < 13:
-                continue  # 跳过午休
+                continue
             if hour == 14 and minute == 30:
-                continue  # 14:30 太接近收盘，跳过
+                continue
             t = f"{hour:02d}:{minute:02d}"
             schedule.every().day.at(t).do(job_intraday_review)
 
-    # 盘中 MarketBrain 单独判定（轻量，仅记录 regime 漂移）
-    # 开盘后 5 分钟 / 午盘后 5 分钟 / 尾盘前 1 小时
     schedule.every().day.at("09:35").do(job_market_brain_only)
     schedule.every().day.at("11:35").do(job_market_brain_only)
     schedule.every().day.at("14:00").do(job_market_brain_only)
 
-    # 每日收盘分析 (15:05)
     schedule.every().day.at("15:05").do(job_closing_analysis)
-
-    # 每日收盘后扫描 (15:35)
     schedule.every().day.at("15:35").do(job_daily_scan)
-
-    # 每日收盘后模拟盘闭环 (15:40)
     schedule.every().day.at("15:40").do(job_daily_mock)
 
-    # 每周日 20:00 复盘
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)
 
-    logger.info("调度器已启动 — 任务列表:")
+    logger.info("调度器已启动 — 当前时间: %s", datetime.now().isoformat())
+
     for job in schedule.get_jobs():
-        logger.info("  • %s", job)
+        logger.info("任务注册: %s | 下次运行: %s", job, job.next_run)
 
 
 def run_scheduler() -> None:
     """主循环。"""
     setup_schedule()
+
+    last_heartbeat = 0
+
     while True:
         schedule.run_pending()
-        time.sleep(30)  # 每 30 秒检查一次
+
+        now = time.time()
+        if now - last_heartbeat > 300:
+            logger.info("scheduler heartbeat — alive")
+            last_heartbeat = now
+
+        time.sleep(30)
 
 
 if __name__ == "__main__":
