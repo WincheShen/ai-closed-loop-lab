@@ -12,8 +12,8 @@
     - 11:35: 午盘后 MarketBrain 重判定
     - 14:00: 尾盘前 MarketBrain 重判定
     - 15:05: 收盘分析 + 发帖 (closing_analysis)
-    - 15:35: 每日选股扫描 (daily_scan)
-    - 15:40: 模拟盘建仓 (daily_mock)
+    - 15:35: 完整 LangGraph 管线 (MarketBrain→...→Executioner→Influencer)
+    - 16:00: 健康检查 (确认各节点今日是否产出数据)
     - 每周日 20:00: 周复盘 (weekly_feedback)
 """
 
@@ -80,16 +80,57 @@ def job_closing_analysis() -> None:
         logger.warning("closing_analysis 模块尚未实现，跳过")
 
 
-def job_daily_scan() -> None:
-    """每日 15:35 收盘后扫描。"""
-    logger.info("⏰ 定时任务触发: 每日扫描")
-    asyncio.run(run_daily_pipeline("scan"))
-
-
-def job_daily_mock() -> None:
-    """每日 15:40 模拟盘闭环。"""
-    logger.info("⏰ 定时任务触发: 模拟盘闭环")
+def job_daily_pipeline() -> None:
+    """每日 15:35 收盘后完整管线 (MarketBrain→Explorer→Strategist→RiskGovernor→Executioner→Influencer)。"""
+    logger.info("⏰ 定时任务触发: 每日完整管线 (mock)")
     asyncio.run(run_daily_pipeline("mock"))
+
+
+def job_health_check() -> None:
+    """每日 16:00 健康检查 — 确认各节点今日是否产出数据。"""
+    from src.central_brain import get_central_brain
+    from datetime import date as _date
+
+    today = _date.today().isoformat()
+    brain = get_central_brain()
+    conn = brain.store._conn()
+
+    checks = {}
+
+    # MarketBrain 是否产出 regime
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM market_regime_snapshots WHERE trade_date = ?", (today,)
+    ).fetchone()
+    checks["market_regime"] = row["cnt"] > 0
+
+    # 是否有 session
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM sessions WHERE created_at LIKE ?", (f"{today}%",)
+    ).fetchone()
+    checks["pipeline_ran"] = row["cnt"] > 0
+
+    # trade_signals (0 也可以，只是记录)
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM trade_signals WHERE timestamp LIKE ?", (f"{today}%",)
+    ).fetchone()
+    checks["signals_count"] = row["cnt"]
+
+    # risk_decisions
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM risk_decisions WHERE created_at LIKE ?", (f"{today}%",)
+    ).fetchone()
+    checks["risk_decisions_count"] = row["cnt"]
+
+    # 报告
+    all_ok = checks["market_regime"] and checks["pipeline_ran"]
+    for name, val in checks.items():
+        status = "OK" if val else "MISSING"
+        if isinstance(val, int):
+            status = str(val)
+        logger.info("[HealthCheck] %s: %s", name, status)
+
+    if not all_ok:
+        logger.warning("[HealthCheck] ⚠️ 今日有节点未产出数据！检查 scheduler 日志")
 
 
 def job_weekly_feedback() -> None:
@@ -119,8 +160,8 @@ def setup_schedule() -> None:
     schedule.every().day.at("14:00").do(job_market_brain_only)
 
     schedule.every().day.at("15:05").do(job_closing_analysis)
-    schedule.every().day.at("15:35").do(job_daily_scan)
-    schedule.every().day.at("15:40").do(job_daily_mock)
+    schedule.every().day.at("15:35").do(job_daily_pipeline)
+    schedule.every().day.at("16:00").do(job_health_check)
 
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)
 

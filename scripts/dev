@@ -38,8 +38,8 @@ scan() {
 }
 
 workflow() {
-    echo "Running full daily workflow..."
-    python scripts/run_daily_workflow.py "$@"
+    echo "Running full daily pipeline (LangGraph)..."
+    python -m src.graph.workflow --mode mock "$@"
 }
 
 report() {
