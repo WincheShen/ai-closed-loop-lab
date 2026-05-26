@@ -4,6 +4,7 @@
 1. 根据配置自动选择 LLM Provider
 2. 统一管理 API Key、base_url、模型名称
 3. 记录 token 使用量与成本
+4. 记录 API 调用延迟 (供 Dashboard 监控)
 
 用法：
     from src.infra.model_adapter import get_llm, get_deep_think_llm
@@ -13,7 +14,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+import time
+from collections import defaultdict, deque
+from typing import Any, Dict
 
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
@@ -37,14 +40,19 @@ class LLMUsageTracker:
         self.calls += 1
         self.total_tokens_in += tokens_in
         self.total_tokens_out += tokens_out
-        # 粗略估算成本（USD）
         cost_per_1k = self._estimate_cost(model)
         cost = (tokens_in + tokens_out) / 1000 * cost_per_1k
         self.total_cost += cost
-        logger.debug("LLM call #%d | %s | in=%d out=%d | cost=$%.4f", self.calls, model, tokens_in, tokens_out, cost)
+        logger.debug(
+            "LLM call #%d | %s | in=%d out=%d | cost=$%.4f",
+            self.calls,
+            model,
+            tokens_in,
+            tokens_out,
+            cost,
+        )
 
     def _estimate_cost(self, model: str) -> float:
-        """每 1K tokens 的估算成本 (USD)。"""
         model_lower = model.lower()
         if "gpt-4o-mini" in model_lower:
             return 0.0015
@@ -55,7 +63,7 @@ class LLMUsageTracker:
         elif "claude-3" in model_lower:
             return 0.015
         elif "gemini" in model_lower:
-            return 0.0005  # Gemini 非常便宜
+            return 0.0005
         return 0.01
 
     @property
@@ -63,30 +71,73 @@ class LLMUsageTracker:
         return self.total_tokens_in, self.total_tokens_out
 
 
-# 全局追踪器实例
+class APILatencyTracker:
+    """记录最近 N 次 API 延迟，用于 Dashboard。"""
+
+    def __init__(self, window: int = 20) -> None:
+        self.window = window
+        self.data: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self.window))
+        self.calls: Dict[str, int] = defaultdict(int)
+
+    def record(self, key: str, latency_ms: float) -> None:
+        self.data[key].append(round(latency_ms))
+        self.calls[key] += 1
+
+    def stats(self) -> Dict[str, dict]:
+        result: Dict[str, dict] = {}
+        for key, latencies in self.data.items():
+            result[key] = {
+                "calls": self.calls[key],
+                "latency": list(latencies),
+            }
+        return result
+
+
+class LLMProxy:
+    """包装 LangChain LLM，记录调用延迟。"""
+
+    def __init__(self, llm: Any, tracker: APILatencyTracker, key: str):
+        self._llm = llm
+        self._tracker = tracker
+        self._key = key
+
+    def invoke(self, *args, **kwargs):
+        start = time.perf_counter()
+        result = self._llm.invoke(*args, **kwargs)
+        latency_ms = (time.perf_counter() - start) * 1000
+        self._tracker.record(self._key, latency_ms)
+        return result
+
+    def __getattr__(self, item):
+        return getattr(self._llm, item)
+
+
 _usage_tracker = LLMUsageTracker()
+_latency_tracker = APILatencyTracker()
 
 
 def get_usage_tracker() -> LLMUsageTracker:
     return _usage_tracker
 
 
+def get_api_stats() -> Dict[str, dict]:
+    """返回 Dashboard 使用的 API 延迟统计。"""
+    return _latency_tracker.stats()
+
+
 def get_llm(model_name: str | None = None, temperature: float = 0.3) -> Any:
-    """获取默认 LLM 实例（快速思考模型）。"""
     provider = cfg().get("default_llm_provider", "openai")
     model = model_name or cfg().get("quick_think_model", "gpt-4o-mini")
     return _create_llm(provider, model, temperature)
 
 
 def get_deep_think_llm(model_name: str | None = None, temperature: float = 0.2) -> Any:
-    """获取深度思考 LLM 实例。"""
     provider = cfg().get("default_llm_provider", "openai")
     model = model_name or cfg().get("deep_think_model", "gpt-4o")
     return _create_llm(provider, model, temperature)
 
 
 def _create_llm(provider: str, model: str, temperature: float) -> Any:
-    """根据 provider 创建对应的 LangChain LLM 实例。"""
     provider_lower = provider.lower()
 
     if provider_lower == "openai":
@@ -96,13 +147,13 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
         kwargs = dict(model=model, api_key=api_key)
         if "gpt-5" not in model:
             kwargs["temperature"] = temperature
-        return ChatOpenAI(**kwargs)
+        llm = ChatOpenAI(**kwargs)
 
     elif provider_lower == "anthropic":
         api_key = cfg().get("anthropic_api_key")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY not configured")
-        return ChatAnthropic(
+        llm = ChatAnthropic(
             model=model,
             api_key=api_key,
             temperature=temperature,
@@ -114,26 +165,28 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
         api_version = cfg().get("azure_api_version", "2025-01-01-preview")
         if not endpoint or not api_key:
             raise ValueError("Azure OpenAI credentials not configured")
-        # Azure 模型名通常不带前缀，需要 deployment_name
+
         kwargs = dict(
             azure_endpoint=endpoint,
             api_key=api_key,
             api_version=api_version,
             deployment_name=model,
         )
-        # gpt-5.3-chat (Azure reasoning models) do not accept temperature
+
         if "gpt-5" not in model:
             kwargs["temperature"] = temperature
-        return AzureChatOpenAI(**kwargs)
+
+        llm = AzureChatOpenAI(**kwargs)
 
     elif provider_lower == "google":
-        # 需要 langchain-google-genai
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
+
             api_key = cfg().get("google_api_key")
             if not api_key:
                 raise ValueError("GOOGLE_API_KEY not configured")
-            return ChatGoogleGenerativeAI(
+
+            llm = ChatGoogleGenerativeAI(
                 model=model,
                 google_api_key=api_key,
                 temperature=temperature,
@@ -143,3 +196,6 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
 
     else:
         raise ValueError(f"Unsupported LLM provider: {provider}")
+
+    key = f"{provider_lower}:{model}"
+    return LLMProxy(llm, _latency_tracker, key)
