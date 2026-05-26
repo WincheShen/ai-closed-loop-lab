@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import glob
 import json
 import logging
@@ -207,7 +208,6 @@ async def receive_trade(
             client = _get_sma_client()
             brain = _get_central_brain()
 
-            # 组装 TopicPayload
             payload = router.from_trade_record(
                 record_id=record_id,
                 safe_text=compliance.safe_text,
@@ -216,16 +216,14 @@ async def receive_trade(
                 redacted_image_url=str(redacted_image_path) if redacted_image_path else None,
             )
 
-            # dispatch 到 SMA
             result = client.dispatch(payload)
 
             if result.success:
-                # 记录到 social_posts 表（用于后续互动同步）
                 brain.store.record_social_post(
                     sma_task_id=result.sma_task_id or record_id,
                     account_id=_sma_default_account,
-                    platform="xhs",  # 默认小红书
-                    source_pick_date=None,  # trade_record 没有对应选股日期
+                    platform="xhs",
+                    source_pick_date=None,
                     source_symbols=[],
                     topic=compliance.safe_text[:100],
                     dispatched_at=received_at.isoformat(),
@@ -287,17 +285,12 @@ def list_social_posts(limit: int = 20) -> list[dict]:
         return []
 
 
-# ---------------------------------------------------------------------------
-# Stock Analysis Proxy（异步任务队列，转发到 Trading Agent Service）
-# ---------------------------------------------------------------------------
 _TRADING_AGENT_URL = os.environ.get("TRADING_AGENT_URL", "http://localhost:8010")
 
-# task_id -> {status, result, error, symbol, started_at, elapsed}
 _analysis_tasks: dict[str, dict[str, Any]] = {}
 
 
 async def _run_analysis_task(task_id: str, payload: dict) -> None:
-    """后台异步执行分析，结果写回 _analysis_tasks。"""
     import httpx
     _analysis_tasks[task_id]["status"] = "running"
     try:
@@ -320,7 +313,6 @@ async def _run_analysis_task(task_id: str, payload: dict) -> None:
 
 @app.post("/api/stock/analyze")
 async def proxy_analyze(request: dict):
-    """提交个股分析任务，立即返回 task_id，前端轮询 /api/stock/task/{task_id}。"""
     task_id = str(uuid.uuid4())
     symbol = request.get("symbol", "unknown")
     _analysis_tasks[task_id] = {
@@ -338,14 +330,6 @@ async def proxy_analyze(request: dict):
 
 @app.get("/api/stock/task/{task_id}")
 async def get_task_status(task_id: str):
-    """查询分析任务状态。
-
-    status 取值：
-      - pending  — 任务已提交，排队中
-      - running  — 正在分析
-      - done     — 完成，result 字段包含报告
-      - error    — 出错，error 字段包含原因
-    """
     task = _analysis_tasks.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
@@ -355,7 +339,6 @@ async def get_task_status(task_id: str):
 
 @app.get("/api/stock/report/{symbol}")
 async def proxy_report(symbol: str):
-    """代理获取缓存报告（不触发新分析）。"""
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -368,182 +351,10 @@ async def proxy_report(symbol: str):
         raise HTTPException(status_code=502, detail=f"无法连接 Trading Agent: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Agent Daily Report
-# ---------------------------------------------------------------------------
-
-@app.get("/api/agent-report/dates")
-def list_report_dates() -> list[str]:
-    """列出有选股数据的日期（降序）。"""
-    dates: set[str] = set()
-    # 1) 从 daily_picks JSON 文件
-    for f in glob.glob("data/daily_picks/*.json"):
-        dates.add(Path(f).stem)
-    # 2) 从数据库 daily_picks_archive
-    try:
-        brain = _get_central_brain()
-        conn = brain.store._conn()
-        rows = conn.execute(
-            "SELECT pick_date FROM daily_picks_archive ORDER BY pick_date DESC"
-        ).fetchall()
-        for row in rows:
-            dates.add(row[0])
-    except Exception as e:
-        logger.warning("Failed to query daily_picks_archive: %s", e)
-    return sorted(dates, reverse=True)
-
-
-@app.get("/api/agent-report/{date}")
-def get_agent_report(date: str) -> dict:
-    """获取某天的完整 Agent 报告。"""
-    result: dict[str, Any] = {
-        "date": date,
-        "market_regime": None,
-        "picks": None,
-        "signals": [],
-        "risk_decisions": [],
-        "orders": [],
-        "cost": {"total_llm_cost_usd": 0.0, "total_calls": 0, "total_tokens": 0},
-    }
-
-    # 1) daily_picks JSON
-    pick_file = Path(f"data/daily_picks/{date}.json")
-    if pick_file.exists():
-        try:
-            with pick_file.open("r", encoding="utf-8") as f:
-                picks = json.load(f)
-            result["picks"] = {
-                "hot_sectors": picks.get("hot_sectors", []),
-                "aggressive": picks.get("aggressive", []),
-                "stable": picks.get("stable", []),
-                "candidates": picks.get("candidates", []),
-                "candidates_count": len(picks.get("candidates", [])),
-                "agent_calls_count": sum(
-                    1
-                    for bucket in ["aggressive", "stable", "candidates"]
-                    for s in picks.get(bucket, [])
-                    if s.get("agent_decision")
-                ),
-                "elapsed_seconds": 0,
-                "is_mock_data": picks.get("is_mock_data", False),
-            }
-        except Exception as e:
-            logger.warning("Failed to read picks file: %s", e)
-
-    # 2) 数据库查询
-    try:
-        brain = _get_central_brain()
-        conn = brain.store._conn()
-        conn.row_factory = sqlite3.Row
-
-        # market_regime
-        row = conn.execute(
-            "SELECT * FROM market_regime_snapshots WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
-            (date,),
-        ).fetchone()
-        if row:
-            r = dict(row)
-            result["market_regime"] = {
-                "regime": r.get("regime", ""),
-                "risk_appetite": r.get("risk_appetite", ""),
-                "recommended_posture": r.get("recommended_posture", ""),
-                "max_total_position_pct": r.get("max_total_position_pct", 0),
-                "hot_sectors": json.loads(r.get("hot_sectors_json", "[]")),
-                "dominant_styles": json.loads(r.get("dominant_styles_json", "[]")),
-                "avoid_styles": json.loads(r.get("avoid_styles_json", "[]")),
-                "strategy_bias": json.loads(r.get("strategy_bias_json", "{}")),
-                "daily_questions": json.loads(r.get("daily_questions_json", "[]")),
-                "summary": r.get("summary", ""),
-                "evidence": json.loads(r.get("evidence_json", "{}")),
-            }
-
-        # trade_signals
-        rows = conn.execute(
-            "SELECT * FROM trade_signals WHERE date(timestamp) = ?",
-            (date,),
-        ).fetchall()
-        for row in rows:
-            r = dict(row)
-            result["signals"].append({
-                "signal_id": r.get("signal_id", ""),
-                "symbol": r.get("symbol", ""),
-                "action": r.get("action", ""),
-                "entry_price": r.get("entry_price", 0),
-                "target_price": r.get("target_price", 0),
-                "stop_loss": r.get("stop_loss", 0),
-                "position_pct": r.get("position_pct", 0),
-                "strategy": r.get("strategy", ""),
-                "rationale": r.get("rationale", ""),
-                "timestamp": r.get("timestamp", ""),
-            })
-
-        # risk_decisions
-        rows = conn.execute(
-            "SELECT * FROM risk_decisions WHERE date(created_at) = ?",
-            (date,),
-        ).fetchall()
-        for row in rows:
-            r = dict(row)
-            result["risk_decisions"].append({
-                "signal_id": r.get("signal_id", ""),
-                "symbol": r.get("symbol", ""),
-                "decision": r.get("decision", ""),
-                "original_position_pct": r.get("original_position_pct", 0),
-                "approved_position_pct": r.get("approved_position_pct", 0),
-                "reason": r.get("reason", ""),
-                "risk_flags": json.loads(r.get("risk_flags_json", "[]")),
-            })
-
-        # orders + fills
-        rows = conn.execute(
-            """SELECT o.*, f.avg_price, f.fees, f.filled_at
-               FROM orders o
-               LEFT JOIN fills f ON o.order_id = f.order_id
-               WHERE date(o.submitted_at) = ?""",
-            (date,),
-        ).fetchall()
-        for row in rows:
-            r = dict(row)
-            result["orders"].append({
-                "order_id": r.get("order_id", ""),
-                "signal_id": r.get("signal_id", ""),
-                "symbol": r.get("symbol", ""),
-                "side": r.get("side", ""),
-                "quantity": r.get("quantity", 0),
-                "order_type": r.get("order_type", ""),
-                "limit_price": r.get("limit_price"),
-                "status": r.get("status", ""),
-                "submitted_at": r.get("submitted_at", ""),
-                "avg_price": r.get("avg_price"),
-                "fees": r.get("fees"),
-                "filled_at": r.get("filled_at"),
-            })
-
-        # llm cost
-        row = conn.execute(
-            """SELECT COUNT(*) as calls, SUM(total_tokens) as tokens, SUM(cost_usd) as cost
-               FROM llm_calls WHERE date(ts) = ?""",
-            (date,),
-        ).fetchone()
-        if row:
-            result["cost"] = {
-                "total_llm_cost_usd": row["cost"] or 0,
-                "total_calls": row["calls"] or 0,
-                "total_tokens": row["tokens"] or 0,
-            }
-    except Exception as e:
-        logger.warning("Failed to query agent report db: %s", e)
-
-    return result
-
-
-# 挂载静态文件
-# 优先级: React 构建产物 (frontend/dist) > 旧 vanilla UI (/ui)
 _react_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _static_dir = Path(__file__).resolve().parent / "static"
 
 if _react_dist.exists():
-    # React SPA: 所有非 API 路径回落到 index.html
     from fastapi.responses import FileResponse
 
     @app.get("/")
@@ -552,7 +363,6 @@ if _react_dist.exists():
 
     app.mount("/assets", StaticFiles(directory=str(_react_dist / "assets")), name="react-assets")
 
-    # SPA fallback: 任何非 /api、/webhook、/health 路径都返回 index.html
     @app.get("/{path:path}")
     def serve_spa(path: str):
         file_path = _react_dist / path
@@ -565,6 +375,5 @@ elif _static_dir.exists():
 
     @app.get("/")
     def root_redirect():
-        """根路径重定向到管理页面。"""
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/ui/")
