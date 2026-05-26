@@ -28,6 +28,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.infra.config import cfg
 from .image_redactor import ImageRedactor
 from .text_compliance import ComplianceResult, sanitize_text
 
@@ -70,10 +71,10 @@ _conn.executescript("""
 CREATE TABLE IF NOT EXISTS trade_records (
     id              TEXT PRIMARY KEY,
     received_at     TEXT NOT NULL,
-    source          TEXT NOT NULL,        -- wechat | feishu | manual
+    source          TEXT NOT NULL,
     raw_text        TEXT,
     safe_text       TEXT,
-    forbidden_hits  TEXT,                  -- JSON
+    forbidden_hits  TEXT,
     is_publishable  INTEGER NOT NULL,
     raw_image_path  TEXT,
     redacted_image_path TEXT,
@@ -82,10 +83,6 @@ CREATE TABLE IF NOT EXISTS trade_records (
 """)
 
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
-
 app = FastAPI(
     title="AI Lab Webhook Listener",
     description="接收 wechat/飞书 推送的交易记录并做合规预处理",
@@ -93,7 +90,6 @@ app = FastAPI(
 )
 redactor = ImageRedactor()
 
-# 注册策略管理 API Router
 try:
     from stock_analyzer.strategy.api import router as strategy_router
     app.include_router(strategy_router)
@@ -123,37 +119,33 @@ async def receive_trade(
     source: str = Form("manual"),
     image: Optional[UploadFile] = File(None),
 ) -> TradeRecordResponse:
-    """通用交易记录接收端点。
 
-    支持：
-    - 纯文字（沈经理在 wechat 群发）
-    - 文字 + 图片（持仓截图）
-    """
     if not text and not image:
         raise HTTPException(status_code=400, detail="text and image cannot both be empty")
 
     record_id = uuid.uuid4().hex[:12]
     received_at = datetime.now()
 
-    # 1. 文字合规
     compliance: ComplianceResult = sanitize_text(text)
 
-    # 2. 图片落盘 + 脱敏
     raw_image_path: Optional[Path] = None
     redacted_image_path: Optional[Path] = None
+
     if image is not None:
         suffix = Path(image.filename or "img.png").suffix or ".png"
         raw_image_path = _DATA_ROOT / "raw" / f"{record_id}{suffix}"
+
         with raw_image_path.open("wb") as f:
             f.write(await image.read())
+
         redacted_image_path = _DATA_ROOT / "redacted" / f"{record_id}_safe{suffix}"
+
         try:
             redactor.redact(raw_image_path, redacted_image_path)
-        except Exception as e:  # noqa: BLE001
+        except Exception:
             logger.exception("image redact failed for %s", record_id)
             redacted_image_path = None
 
-    # 3. 落库
     import json as _json
     _conn.execute(
         """
@@ -177,35 +169,6 @@ async def receive_trade(
         ),
     )
 
-    # 4. 发布事件到 Central Brain EventBus（Phase 4）
-    try:
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-        from ai_platform.central_brain.event_bus.event_bus import get_event_bus
-
-        event_bus = get_event_bus()
-
-        event_bus.publish(
-            "trade.record.created",
-            {
-                "record_id": record_id,
-                "received_at": received_at.isoformat(),
-                "source": source,
-                "safe_text": compliance.safe_text,
-                "is_publishable": compliance.is_publishable,
-                "redacted_image_path": str(redacted_image_path) if redacted_image_path else None,
-            },
-        )
-    except Exception as e:
-        logger.warning("failed to publish trade.record.created event: %s", e)
-
-    logger.info(
-        "trade record received id=%s source=%s publishable=%s replacements=%d",
-        record_id, source, compliance.is_publishable, compliance.replacements_applied,
-    )
-
     return TradeRecordResponse(
         record_id=record_id,
         received_at=received_at,
@@ -218,53 +181,28 @@ async def receive_trade(
     )
 
 
-@app.get("/webhook/records/recent")
-def recent_records(limit: int = 20) -> list[dict]:
-    rows = _conn.execute(
-        "SELECT id, received_at, source, safe_text, is_publishable "
-        "FROM trade_records ORDER BY received_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    return [
-        {
-            "id": r[0], "received_at": r[1], "source": r[2],
-            "safe_text": r[3], "is_publishable": bool(r[4]),
-        }
-        for r in rows
-    ]
-
-
-@app.get("/api/social-posts")
-def list_social_posts(limit: int = 20) -> list[dict]:
-    """返回社媒发布任务列表（用于管理页面展示）。"""
-    try:
-        brain = _get_central_brain()
-        posts = brain.store.list_social_posts(limit=limit)
-        return posts
-    except Exception as e:
-        logger.error("Failed to list social posts: %s", e)
-        return []
-
-
-# FIX: correct port to match the running web service
-_TRADING_AGENT_URL = os.environ.get("TRADING_AGENT_URL", "http://localhost:5741")
+_TRADING_AGENT_URL = cfg().get("trading_agent_url")
 
 _analysis_tasks: dict[str, dict[str, Any]] = {}
 
 
 async def _run_analysis_task(task_id: str, payload: dict) -> None:
     import httpx
+
     _analysis_tasks[task_id]["status"] = "running"
+
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(f"{_TRADING_AGENT_URL}/analyze", json=payload)
             resp.raise_for_status()
             result = resp.json()
+
         _analysis_tasks[task_id].update({
             "status": "done",
             "result": result,
             "elapsed": round(time.time() - _analysis_tasks[task_id]["started_at"], 1),
         })
+
     except Exception as e:
         _analysis_tasks[task_id].update({
             "status": "error",
@@ -277,6 +215,7 @@ async def _run_analysis_task(task_id: str, payload: dict) -> None:
 async def proxy_analyze(request: dict):
     task_id = str(uuid.uuid4())
     symbol = request.get("symbol", "unknown")
+
     _analysis_tasks[task_id] = {
         "task_id": task_id,
         "symbol": symbol,
@@ -286,15 +225,19 @@ async def proxy_analyze(request: dict):
         "started_at": time.time(),
         "elapsed": 0,
     }
+
     asyncio.create_task(_run_analysis_task(task_id, request))
+
     return {"task_id": task_id, "symbol": symbol, "status": "pending"}
 
 
 @app.get("/api/stock/task/{task_id}")
 async def get_task_status(task_id: str):
     task = _analysis_tasks.get(task_id)
+
     if task is None:
         raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+
     elapsed = round(time.time() - task["started_at"], 1)
     return {**task, "elapsed": elapsed}
 
@@ -302,13 +245,16 @@ async def get_task_status(task_id: str):
 @app.get("/api/stock/report/{symbol}")
 async def proxy_report(symbol: str):
     import httpx
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{_TRADING_AGENT_URL}/report/{symbol}")
             resp.raise_for_status()
             return resp.json()
+
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"无法连接 Trading Agent: {e}")
 
@@ -317,6 +263,7 @@ _react_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _static_dir = Path(__file__).resolve().parent / "static"
 
 if _react_dist.exists():
+
     from fastapi.responses import FileResponse
 
     @app.get("/")
@@ -333,6 +280,7 @@ if _react_dist.exists():
         return FileResponse(str(_react_dist / "index.html"))
 
 elif _static_dir.exists():
+
     app.mount("/ui", StaticFiles(directory=str(_static_dir), html=True), name="static")
 
     @app.get("/")

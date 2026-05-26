@@ -41,8 +41,10 @@ class Config:
             "default_llm_provider": os.getenv("DEFAULT_LLM_PROVIDER", "openai"),
             "deep_think_model": os.getenv("DEEP_THINK_MODEL", "gpt-4o"),
             "quick_think_model": os.getenv("QUICK_THINK_MODEL", "gpt-4o-mini"),
+
             # --- Trading ---
             "trading_mode": os.getenv("TRADING_MODE", "mock"),
+            "trading_agent_url": os.getenv("TRADING_AGENT_URL", "http://localhost:5741"),
             "broker_api_url": os.getenv("BROKER_API_URL"),
             "broker_api_key": os.getenv("BROKER_API_KEY"),
             "broker_secret": os.getenv("BROKER_SECRET"),
@@ -50,11 +52,14 @@ class Config:
             "initial_capital": float(os.getenv("INITIAL_CAPITAL", "300000")),
             "max_position_pct": float(os.getenv("MAX_POSITION_PCT", "0.10")),
             "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.05")),
+
             # --- Market Data ---
             "tushare_token": os.getenv("TUSHARE_TOKEN"),
             "eastmoney_token": os.getenv("EASTMONEY_TOKEN"),
+
             # --- Social Media ---
             "xhs_skills_dir": os.getenv("XHS_SKILLS_DIR", "vendor/xiaohongshu-skills"),
+
             # --- Storage ---
             "db_path": os.getenv("DB_PATH", str(_PROJECT_ROOT / "data" / "central_brain.db")),
             "vector_db_path": os.getenv(
@@ -62,6 +67,7 @@ class Config:
             ),
             "data_dir": os.getenv("DATA_DIR", str(_PROJECT_ROOT / "data")),
             "results_dir": os.getenv("RESULTS_DIR", str(_PROJECT_ROOT / "reports")),
+
             # --- System ---
             "log_level": os.getenv("LOG_LEVEL", "INFO"),
             "timezone": os.getenv("TIMEZONE", "Asia/Shanghai"),
