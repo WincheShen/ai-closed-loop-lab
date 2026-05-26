@@ -201,45 +201,6 @@ async def receive_trade(
     except Exception as e:
         logger.warning("failed to publish trade.record.created event: %s", e)
 
-    # 5. Phase 3: 自动触发 SMA dispatch（如果启用且可发布）
-    if _auto_dispatch_enabled and compliance.is_publishable:
-        try:
-            router = _get_topic_router()
-            client = _get_sma_client()
-            brain = _get_central_brain()
-
-            payload = router.from_trade_record(
-                record_id=record_id,
-                safe_text=compliance.safe_text,
-                received_at=received_at,
-                account_id=_sma_default_account,
-                redacted_image_url=str(redacted_image_path) if redacted_image_path else None,
-            )
-
-            result = client.dispatch(payload)
-
-            if result.success:
-                brain.store.record_social_post(
-                    sma_task_id=result.sma_task_id or record_id,
-                    account_id=_sma_default_account,
-                    platform="xhs",
-                    source_pick_date=None,
-                    source_symbols=[],
-                    topic=compliance.safe_text[:100],
-                    dispatched_at=received_at.isoformat(),
-                )
-                logger.info(
-                    "Auto-dispatched to SMA: record_id=%s sma_task_id=%s",
-                    record_id, result.sma_task_id
-                )
-            else:
-                logger.warning(
-                    "Auto-dispatch to SMA failed: record_id=%s error=%s",
-                    record_id, result.error
-                )
-        except Exception as e:
-            logger.exception("Auto-dispatch to SMA failed for record %s: %s", record_id, e)
-
     logger.info(
         "trade record received id=%s source=%s publishable=%s replacements=%d",
         record_id, source, compliance.is_publishable, compliance.replacements_applied,
@@ -285,7 +246,8 @@ def list_social_posts(limit: int = 20) -> list[dict]:
         return []
 
 
-_TRADING_AGENT_URL = os.environ.get("TRADING_AGENT_URL", "http://localhost:8010")
+# FIX: correct port to match the running web service
+_TRADING_AGENT_URL = os.environ.get("TRADING_AGENT_URL", "http://localhost:5741")
 
 _analysis_tasks: dict[str, dict[str, Any]] = {}
 
