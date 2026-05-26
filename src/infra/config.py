@@ -44,7 +44,11 @@ class Config:
 
             # --- Trading ---
             "trading_mode": os.getenv("TRADING_MODE", "mock"),
-            "trading_agent_url": os.getenv("TRADING_AGENT_URL", "http://localhost:5741"),
+            "trading_agent_url": os.getenv(
+                "TRADING_AGENT_URL",
+                # 本地开发默认 localhost:8001，Docker 环境由 docker-compose 覆盖
+                "http://localhost:8001"
+            ),
             "broker_api_url": os.getenv("BROKER_API_URL"),
             "broker_api_key": os.getenv("BROKER_API_KEY"),
             "broker_secret": os.getenv("BROKER_SECRET"),

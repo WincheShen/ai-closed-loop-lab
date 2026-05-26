@@ -48,6 +48,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
+      - TRADING_AGENT_URL=http://ai-lab-web:8002
     restart: unless-stopped
     command: ["python", "scripts/scheduler.py"]
     profiles:
