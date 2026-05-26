@@ -21,9 +21,16 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Literal, Optional
+
+# 添加 src 到路径，以便导入 stock_analyzer
+_src_path = Path(__file__).resolve().parents[3]  # src/trading_agent_service/analysis/ → src
+if str(_src_path) not in sys.path:
+    sys.path.insert(0, str(_src_path))
 
 from ..api.schemas import (
     FundamentalAnalysis,

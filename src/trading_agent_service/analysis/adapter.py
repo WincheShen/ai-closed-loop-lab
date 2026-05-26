@@ -109,6 +109,10 @@ def get_analyzer(prefer: str = "auto") -> AnalyzerAdapter:
         - "mock"           强制 mock
         - "tradingagents"  强制真实分析器（不可用则抛错）
     """
+    # 临时强制 mock，等网络代理问题解决后再改回正常逻辑
+    logger.info("临时强制使用 MockAnalyzer（网络代理问题）")
+    return MockAnalyzer()
+
     if prefer == "mock":
         return MockAnalyzer()
 
