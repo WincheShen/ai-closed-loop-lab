@@ -27,6 +27,10 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+# 禁用代理，避免 Edge 浏览器代理扩展干扰
+os.environ['NO_PROXY'] = '*'
+os.environ['no_proxy'] = '*'
+
 # 添加 src 到路径，以便导入 stock_analyzer
 _src_path = Path(__file__).resolve().parents[3]  # src/trading_agent_service/analysis/ → src
 if str(_src_path) not in sys.path:

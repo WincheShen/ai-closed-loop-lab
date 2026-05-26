@@ -42,8 +42,7 @@ _state = _State()
 
 # 数据根目录可通过环境变量覆盖
 _DATA_ROOT = Path(os.environ.get("TAS_DATA_ROOT", "data/trading_agent_service"))
-# 临时默认 mock，等网络代理问题解决后再改回 auto
-_ANALYZER_PREFER = os.environ.get("TAS_ANALYZER", "mock")  # auto | mock | tradingagents
+_ANALYZER_PREFER = os.environ.get("TAS_ANALYZER", "auto")  # auto | mock | tradingagents
 
 cache = CacheManager(_DATA_ROOT)
 analyzer = get_analyzer(_ANALYZER_PREFER)

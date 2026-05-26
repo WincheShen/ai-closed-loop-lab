@@ -8,10 +8,15 @@ Phase 1 目标：
 from __future__ import annotations
 
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
+
+# 禁用代理，避免 Edge 浏览器代理扩展干扰
+os.environ['NO_PROXY'] = '*'
+os.environ['no_proxy'] = '*'
 
 logger = logging.getLogger(__name__)
 

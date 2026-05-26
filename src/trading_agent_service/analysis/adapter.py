@@ -8,10 +8,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 from datetime import date, timedelta
 from typing import Literal
+
+# 禁用代理，避免 Edge 浏览器代理扩展干扰
+os.environ['NO_PROXY'] = '*'
+os.environ['no_proxy'] = '*'
 
 from ..api.schemas import (
     FundamentalAnalysis,
@@ -109,10 +114,6 @@ def get_analyzer(prefer: str = "auto") -> AnalyzerAdapter:
         - "mock"           强制 mock
         - "tradingagents"  强制真实分析器（不可用则抛错）
     """
-    # 临时强制 mock，等网络代理问题解决后再改回正常逻辑
-    logger.info("临时强制使用 MockAnalyzer（网络代理问题）")
-    return MockAnalyzer()
-
     if prefer == "mock":
         return MockAnalyzer()
 
