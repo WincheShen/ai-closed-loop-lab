@@ -20,10 +20,14 @@ cd "$PROJECT_ROOT"
 
 export PYTHONPATH="$PROJECT_ROOT/src"
 
-# 加载 .env 文件
+# 安全加载 .env 文件（只读取合法 KEY=value 行，避免 YAML/注释导致 bash 报错）
 if [ -f ".env" ]; then
     set -a
-    source .env
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            export "$line"
+        fi
+    done < .env
     set +a
 fi
 
