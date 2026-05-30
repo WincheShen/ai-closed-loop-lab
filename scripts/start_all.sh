@@ -20,6 +20,13 @@ cd "$PROJECT_ROOT"
 
 export PYTHONPATH="$PROJECT_ROOT/src"
 
+# 加载 .env 文件
+if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+fi
+
 BACKEND_ONLY=false
 [[ "$1" == "--backend-only" ]] && BACKEND_ONLY=true
 
@@ -49,7 +56,11 @@ sleep 1
 
 # ---- TradingAgent Service ----
 echo "[2/3] TradingAgent Service    →  :8001"
-TAS_ANALYZER=${TAS_ANALYZER:-mock} python scripts/run_trading_agent_service.py &
+# 使用 .env 中的 TAS_ANALYZER，如果未设置则默认 mock
+if [ -z "$TAS_ANALYZER" ]; then
+    TAS_ANALYZER=tradingagents
+fi
+TAS_ANALYZER=$TAS_ANALYZER python scripts/run_trading_agent_service.py &
 PIDS+=($!)
 sleep 1
 
