@@ -44,6 +44,10 @@ class TopicContext(BaseModel):
     hot_sectors: list[str] = Field(default_factory=list)
     recommendations: list[StockBriefForSMA] = Field(default_factory=list)
     trade_record: Optional[TradeRecordBrief] = None
+    images: list[str] = Field(
+        default_factory=list,
+        description="配图路径/URL列表 (K线/盈亏曲线/板块热度等)，SMA 端贴图用",
+    )
     extra: dict = Field(default_factory=dict)
 
 

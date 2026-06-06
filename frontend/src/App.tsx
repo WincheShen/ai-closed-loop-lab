@@ -8,6 +8,8 @@ import ContentPipeline from '@/pages/ContentPipeline'
 import Strategy from '@/pages/Strategy'
 import Analyze from '@/pages/Analyze'
 import Records from '@/pages/Records'
+import Portfolio from '@/pages/Portfolio'
+import StrategyEvolution from '@/pages/StrategyEvolution'
 import NotFound from '@/pages/NotFound'
 
 function App() {
@@ -21,6 +23,8 @@ function App() {
       <Route path="/strategy" element={<Layout><Strategy /></Layout>} />
       <Route path="/analyze" element={<Layout><Analyze /></Layout>} />
       <Route path="/records" element={<Layout><Records /></Layout>} />
+      <Route path="/portfolio" element={<Layout><Portfolio /></Layout>} />
+      <Route path="/strategy-evolution" element={<Layout><StrategyEvolution /></Layout>} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   )

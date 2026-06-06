@@ -126,6 +126,10 @@ async def run_closing_analysis(
         logger.error("收盘分析 LLM 调用失败: %s", e)
         post_data = _fallback_post(all_positions, reviews_today)
 
+    # 4b. 生成配图 (板块热度 + 盈亏曲线)
+    chart_images = _generate_closing_charts(brain, all_positions, today)
+    post_data["images"] = chart_images
+
     # 5. Persist & optionally dispatch
     post_id = f"CLOSE-{today}-{uuid.uuid4().hex[:6].upper()}"
     post_data["post_id"] = post_id
@@ -270,18 +274,64 @@ def _fallback_post(positions: list[dict], reviews: list[dict]) -> dict:
 # SMA dispatch
 # ------------------------------------------------------------------
 
+def _generate_closing_charts(brain, positions: list[dict], today: str) -> list[str]:
+    """生成收盘分析配图（板块热度 + 持仓盈亏），失败不阻塞。"""
+    images: list[str] = []
+    try:
+        from src.agents.influencer.chart_renderer import ChartRenderer
+        renderer = ChartRenderer()
+
+        # 1. 板块热度图 — 从今日 regime snapshot 获取 hot_sectors + 全板块数据
+        conn = brain.store._conn()
+        row = conn.execute(
+            "SELECT hot_sectors_json, evidence_json FROM market_regime_snapshots "
+            "WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+        if row:
+            import json as _j
+            evidence = _j.loads(row["evidence_json"] or "{}")
+            sector_data = evidence.get("sector_changes", {})
+            if sector_data:
+                sector_items = [(k, v) for k, v in sector_data.items()]
+                path = renderer.render_sector_heatmap(sector_items, title=f"{today} 板块热度")
+                if path:
+                    images.append(path)
+
+        # 2. 持仓盈亏曲线 — 用各持仓 pnl_pct
+        if positions:
+            pnl_points = []
+            for p in positions:
+                ep = p.get("entry_price") or 0
+                cp = p.get("close_price") or p.get("current_price") or ep
+                if ep > 0:
+                    pct = (cp - ep) / ep * 100
+                else:
+                    pct = p.get("realized_pnl") or 0
+                label = p.get("name", p.get("symbol", "?"))[:4]
+                pnl_points.append((label, round(pct, 2)))
+            if len(pnl_points) >= 2:
+                path = renderer.render_pnl_curve(pnl_points, title="今日持仓盈亏 (%)")
+                if path:
+                    images.append(path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("收盘配图生成失败: %s", e)
+    return images
+
+
 def _dispatch_to_sma(brain, post_data: dict, today: str) -> bool:
     """尝试通过现有 SMA dispatcher 发布。"""
     try:
         from src.social_media_dispatcher.client import SmaClient
-        from src.social_media_dispatcher.topic_router import TopicPayload
+        from src.social_media_dispatcher.schemas import TopicContext, TopicPayload
 
         client = SmaClient()
+        context = TopicContext(images=post_data.get("images", []))
         payload = TopicPayload(
             account_id="XHS_01",
-            topic=post_data.get("title", "AI交易日记"),
-            body=post_data.get("content", ""),
-            images=[],
+            kind="daily_picks",
+            description=post_data.get("content", ""),
+            context=context,
         )
         result = client.dispatch(payload)
         if result and getattr(result, "success", False):

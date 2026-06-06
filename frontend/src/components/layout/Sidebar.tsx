@@ -13,6 +13,8 @@ import {
   Search,
   ClipboardList,
   FileText,
+  Briefcase,
+  BrainCircuit,
 } from 'lucide-react'
 
 const navItems = [
@@ -40,12 +42,19 @@ const navItems = [
     children: [
       { path: '/agents', label: '工作流监控', icon: Bot },
       { path: '/agent-report', label: 'Agent 日报', icon: FileText },
+      { path: '/strategy-evolution', label: 'AI 策略进化', icon: BrainCircuit },
     ],
   },
   {
     path: '/content',
     label: '社交媒体管线',
     icon: PenTool,
+    badge: null,
+  },
+  {
+    path: '/portfolio',
+    label: '交易总览',
+    icon: Briefcase,
     badge: null,
   },
   {

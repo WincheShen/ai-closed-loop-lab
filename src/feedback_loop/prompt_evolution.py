@@ -123,6 +123,64 @@ class PromptEvolution:
         )
         return weights
 
+    def update_from_attribution(self, attribution: dict) -> list[PromptWeight]:
+        """根据单笔归因记录增量更新策略权重。
+
+        每次平仓时调用，不必等到周复盘。
+        如果 strategy_id 不在已有权重列表中，自动新增。
+        """
+        strategy_id = attribution.get("strategy_id", "")
+        outcome = attribution.get("outcome", "")
+
+        if not strategy_id:
+            self.logger.debug("归因无 strategy_id，跳过权重更新")
+            return self.load_weights()
+
+        weights = self.load_weights()
+        weight_map = {w["strategy_name"]: w for w in weights}
+
+        # 自动新增策略
+        if strategy_id not in weight_map:
+            new_w = {
+                "strategy_name": strategy_id,
+                "current_weight": 0.5,
+                "win_count": 0,
+                "loss_count": 0,
+                "last_updated": datetime.now().isoformat(),
+            }
+            weights.append(new_w)
+            weight_map[strategy_id] = new_w
+
+        w = weight_map[strategy_id]
+        if outcome == "win":
+            w["win_count"] += 1
+        elif outcome == "loss":
+            w["loss_count"] += 1
+        w["last_updated"] = datetime.now().isoformat()
+
+        # 重新归一化
+        total_score = 0.0
+        for w in weights:
+            total = w["win_count"] + w["loss_count"]
+            if total > 0:
+                w["current_weight"] = w["win_count"] / total
+            else:
+                w["current_weight"] = 0.5
+            total_score += w["current_weight"]
+
+        if total_score > 0:
+            for w in weights:
+                w["current_weight"] = round(w["current_weight"] / total_score, 4)
+
+        self.save_weights(weights)
+
+        self.logger.info(
+            "策略权重增量更新（%s → %s） — %s",
+            strategy_id, outcome,
+            ", ".join(f"{w['strategy_name']}:{w['current_weight']:.3f}" for w in weights),
+        )
+        return weights
+
     def generate_evolution_prompt(self, weights: list[PromptWeight]) -> str:
         """生成给 Strategist 的进化后 Prompt 片段。
 

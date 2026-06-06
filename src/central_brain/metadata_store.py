@@ -326,6 +326,34 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_lessons_strategy ON lessons(strategy_id);
             CREATE INDEX IF NOT EXISTS idx_lessons_regime ON lessons(regime);
             CREATE INDEX IF NOT EXISTS idx_lessons_outcome ON lessons(outcome);
+            -- ---------------------------------------------------------------
+            -- Phase 2: 自选股池 (Watchlist)
+            -- ---------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS watchlist (
+                watch_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                name TEXT,
+                sector TEXT,
+                status TEXT DEFAULT 'watching',
+                thesis TEXT,
+                entry_condition TEXT,
+                target_price REAL,
+                stop_loss REAL,
+                strategy_id TEXT,
+                source TEXT,
+                added_at TEXT NOT NULL,
+                last_check_at TEXT,
+                last_price REAL,
+                last_change_pct REAL,
+                days_watched INTEGER DEFAULT 0,
+                triggered INTEGER DEFAULT 0,
+                triggered_at TEXT,
+                removed_at TEXT,
+                remove_reason TEXT,
+                notes TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol);
+            CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status);
             """
         )
         conn.commit()
@@ -1047,6 +1075,100 @@ class MemoryStore:
         conn.execute(
             "UPDATE lessons SET cited_count = cited_count + 1 WHERE lesson_id = ?",
             (lesson_id,),
+        )
+        conn.commit()
+
+    # ------------------------------------------------------------------
+    # Watchlist (自选股池)
+    # ------------------------------------------------------------------
+
+    def add_to_watchlist(self, item: dict) -> None:
+        """新增自选股到 watchlist。"""
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO watchlist
+            (watch_id, symbol, name, sector, status, thesis,
+             entry_condition, target_price, stop_loss, strategy_id,
+             source, added_at, last_check_at, last_price, last_change_pct,
+             days_watched, triggered, triggered_at, removed_at, remove_reason, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                item["watch_id"],
+                item["symbol"],
+                item.get("name", ""),
+                item.get("sector", ""),
+                item.get("status", "watching"),
+                item.get("thesis", ""),
+                item.get("entry_condition", ""),
+                item.get("target_price"),
+                item.get("stop_loss"),
+                item.get("strategy_id", ""),
+                item.get("source", ""),
+                item.get("added_at") or datetime.now().isoformat(),
+                item.get("last_check_at"),
+                item.get("last_price"),
+                item.get("last_change_pct"),
+                item.get("days_watched", 0),
+                1 if item.get("triggered") else 0,
+                item.get("triggered_at"),
+                item.get("removed_at"),
+                item.get("remove_reason"),
+                item.get("notes", ""),
+            ),
+        )
+        conn.commit()
+
+    def get_watchlist(self, status: str = "watching") -> list[dict]:
+        """获取指定状态的自选股列表。"""
+        conn = self._conn()
+        if status == "all":
+            rows = conn.execute(
+                "SELECT * FROM watchlist ORDER BY added_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM watchlist WHERE status = ? ORDER BY added_at DESC",
+                (status,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_watchlist_symbols(self) -> list[str]:
+        """仅获取当前 watching 状态的 symbol 列表。"""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT symbol FROM watchlist WHERE status = 'watching'"
+        ).fetchall()
+        return [r["symbol"] for r in rows]
+
+    def update_watchlist_check(self, watch_id: str, price: float, change_pct: float) -> None:
+        """更新每日检查结果。"""
+        conn = self._conn()
+        conn.execute(
+            """UPDATE watchlist SET
+               last_check_at = ?, last_price = ?, last_change_pct = ?,
+               days_watched = days_watched + 1
+            WHERE watch_id = ?""",
+            (datetime.now().isoformat(), price, change_pct, watch_id),
+        )
+        conn.commit()
+
+    def trigger_watchlist_item(self, watch_id: str) -> None:
+        """标记自选股触发入场条件。"""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE watchlist SET triggered = 1, triggered_at = ?, status = 'triggered' "
+            "WHERE watch_id = ?",
+            (datetime.now().isoformat(), watch_id),
+        )
+        conn.commit()
+
+    def remove_from_watchlist(self, watch_id: str, reason: str = "") -> None:
+        """从自选股池移除（标记为 removed）。"""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE watchlist SET status = 'removed', removed_at = ?, remove_reason = ? "
+            "WHERE watch_id = ?",
+            (datetime.now().isoformat(), reason, watch_id),
         )
         conn.commit()
 

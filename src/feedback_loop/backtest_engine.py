@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from src.central_brain import get_central_brain
 from src.graph.state import PerformanceRecord, TradingState
 from src.infra.config import cfg
 from src.infra.logger import get_agent_logger
+from src.stock_analyzer.data_source.akshare_client import AkshareClient, KlineBar
 
 logger = get_agent_logger("feedback_loop", "init")
 
@@ -28,6 +29,7 @@ class BacktestEngine:
         self.session_id = session_id
         self.logger = get_agent_logger("feedback_loop", session_id)
         self.brain = get_central_brain()
+        self.akshare = AkshareClient()
 
     def run_backtest(
         self,
@@ -73,30 +75,25 @@ class BacktestEngine:
         return records
 
     def _analyze_single_signal(self, signal: dict, week: str) -> PerformanceRecord:
-        """分析单条信号的实际表现。"""
+        """分析单条信号的实际表现 — 使用真实 K 线数据。"""
         symbol = signal["symbol"]
         entry = signal.get("entry_price", 0)
         target = signal.get("target_price", 0)
         stop = signal.get("stop_loss", 0)
         strategy = signal.get("strategy", "unknown")
-
-        # TODO: 接入真实行情数据，计算 signal 发出后的实际走势
-        # 占位：基于随机模拟
-        import random
+        signal_date = signal.get("timestamp", "")[:10]
 
         predicted_return = (target - entry) / entry if entry > 0 else 0
-        # 模拟实际收益：有 40% 概率触及止损，30% 概率达到目标，30% 介于之间
-        rand = random.random()
-        if rand < 0.4:
-            actual_return = (stop - entry) / entry  # 止损
-        elif rand < 0.7:
-            actual_return = predicted_return  # 达到目标
-        else:
-            actual_return = random.uniform(-0.02, predicted_return)
+
+        # 拉取信号发出后的真实 K 线
+        actual_return, holding_days = self._compute_actual_return(
+            symbol, entry, target, stop, signal_date,
+        )
 
         # 归因分析
+        error_source: str | None
         if actual_return < -0.03:
-            error_source: Literal["stock_selection", "trading_rule", "market_unexpected", "execution_slippage"] | None = "trading_rule"
+            error_source = "trading_rule"
             analysis = f"策略 {strategy} 触发后股价下行，触及止损 {stop:.2f}。需检查该策略近期胜率。"
         elif actual_return < 0:
             error_source = "market_unexpected"
@@ -111,12 +108,85 @@ class BacktestEngine:
             "symbol": symbol,
             "predicted_return": round(predicted_return, 4),
             "actual_return": round(actual_return, 4),
-            "holding_days": random.randint(1, 5),
+            "holding_days": holding_days,
             "error_source": error_source,
             "analysis": analysis,
             "week_ending": week,
         }
         return record
+
+    def _compute_actual_return(
+        self,
+        symbol: str,
+        entry_price: float,
+        target_price: float,
+        stop_loss: float,
+        signal_date: str,
+    ) -> tuple[float, int]:
+        """用真实 K 线计算信号发出后的实际收益和持仓天数。
+
+        逻辑：从 signal_date 后第一天开始逐日扫描，
+        - 若盘中低点 <= stop_loss → 止损出局
+        - 若盘中高点 >= target_price → 止盈出局
+        - 最多持仓 5 天后按收盘价结算
+
+        Returns:
+            (actual_return, holding_days)
+        """
+        if entry_price <= 0:
+            return 0.0, 1
+
+        try:
+            bars = self.akshare.fetch_kline(symbol, days=30)
+        except Exception as e:
+            self.logger.warning("K线拉取失败 %s: %s，降级随机", symbol, e)
+            return self._fallback_random_return(entry_price, target_price, stop_loss), 3
+
+        # 找到 signal_date 之后的 bars
+        after_bars = [
+            b for b in bars
+            if b.date.isoformat() > signal_date
+        ]
+
+        if not after_bars:
+            # 没有信号后的数据（可能是最近的信号），用最后收盘价
+            if bars:
+                last_close = bars[-1].close
+                ret = (last_close - entry_price) / entry_price
+                return ret, 1
+            return 0.0, 1
+
+        # 逐日扫描，模拟止盈止损
+        max_hold = min(5, len(after_bars))
+        for i, bar in enumerate(after_bars[:max_hold]):
+            # 止损：盘中低点触及
+            if stop_loss > 0 and bar.low <= stop_loss:
+                ret = (stop_loss - entry_price) / entry_price
+                return ret, i + 1
+            # 止盈：盘中高点触及
+            if target_price > 0 and bar.high >= target_price:
+                ret = (target_price - entry_price) / entry_price
+                return ret, i + 1
+
+        # 持仓到期，按最后一天收盘价结算
+        exit_price = after_bars[max_hold - 1].close
+        ret = (exit_price - entry_price) / entry_price
+        return ret, max_hold
+
+    @staticmethod
+    def _fallback_random_return(
+        entry: float, target: float, stop: float,
+    ) -> float:
+        """K线不可用时的降级：基于价格区间的合理随机。"""
+        import random
+        predicted = (target - entry) / entry if entry > 0 else 0
+        rand = random.random()
+        if rand < 0.4:
+            return (stop - entry) / entry if entry > 0 else -0.03
+        elif rand < 0.7:
+            return predicted
+        else:
+            return random.uniform(-0.02, predicted)
 
     def error_breakdown(self, records: list[PerformanceRecord]) -> dict[str, Any]:
         """错误归因统计。"""
@@ -131,8 +201,17 @@ class BacktestEngine:
             src = r["error_source"] or "unknown"
             breakdown["by_source"][src] = breakdown["by_source"].get(src, 0) + 1
 
-        # 按策略统计
-        # TODO: 关联 signal.strategy
+        # 按策略统计错误率
+        all_signals = self.brain.store.list_active_signals() if records else []
+        sig_map = {s["signal_id"]: s.get("strategy", "unknown") for s in all_signals}
+        for r in records:
+            strat = sig_map.get(r["signal_id"], "unknown")
+            if strat not in breakdown["by_strategy"]:
+                breakdown["by_strategy"][strat] = {"total": 0, "errors": 0}
+            breakdown["by_strategy"][strat]["total"] += 1
+            if r["error_source"]:
+                breakdown["by_strategy"][strat]["errors"] += 1
+
         return breakdown
 
 

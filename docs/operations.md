@@ -231,6 +231,28 @@ kill -9 <PID>
 - 原因：网络 / 代理 / 接口变更
 - 处理：Phase 1 mock 数据可继续跑通流水线，不影响功能验证
 
+### TradingAgents 网络代理问题
+- **现象**：使用 `TAS_ANALYZER=tradingagents` 时，TradingAgents 内部的 akshare 调用失败，报错 `Connection aborted` 或 `RemoteDisconnected`
+- **原因**：Edge 浏览器代理扩展（如 `verge-mih`）在本地开启了代理（如端口 7897），Python 的 urllib3 会自动检测并使用该代理，但代理服务器无法连接到 eastmoney 等数据源
+- **排查**：
+  ```bash
+  # 检查系统代理设置
+  scutil --proxy
+  # 检查环境变量
+  echo $http_proxy $https_proxy $HTTP_PROXY $HTTPS_PROXY
+  ```
+- **解决方案**：
+  1. **推荐方案**：关闭 ClashX 或其他代理软件，或者在 ClashX 配置中添加绕过规则：
+     ```yaml
+     rules:
+       - DOMAIN-KEYWORD,eastmoney,DIRECT
+       - DOMAIN-KEYWORD,sina,DIRECT
+     ```
+  2. **代码方案**：已在 `tradingagents_adapter.py` 和 `akshare_client.py` 中清除所有代理环境变量并设置 `NO_PROXY='*'`
+  3. **降级方案**：使用 `TAS_ANALYZER=mock` 继续使用 MockAnalyzer，不影响功能验证
+- **注意**：我们的 `AkshareClient` 已实现 akshare→sina→mock 的三级降级，但 TradingAgents 库内部直接使用 akshare，没有这个降级机制
+- **当前状态**：代理问题已通过清除环境变量解决，TradingAgents 可以正常工作
+
 ### Cache 命中率异常低
 ```bash
 curl http://127.0.0.1:8001/stats

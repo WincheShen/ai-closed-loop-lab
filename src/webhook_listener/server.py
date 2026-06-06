@@ -181,6 +181,44 @@ async def receive_trade(
     )
 
 
+@app.get("/webhook/records/recent")
+async def recent_records(limit: int = 10):
+    """返回最近的交易记录（供前端展示）。"""
+    rows = _conn.execute(
+        "SELECT id, received_at, source, safe_text, is_publishable "
+        "FROM trade_records ORDER BY received_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "received_at": r[1],
+            "source": r[2],
+            "safe_text": r[3],
+            "is_publishable": bool(r[4]),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/social-posts")
+async def social_posts(limit: int = 20):
+    """返回社媒发布任务列表。"""
+    try:
+        from src.central_brain import get_central_brain
+        brain = get_central_brain()
+        conn = brain.store._conn()
+        rows = conn.execute(
+            "SELECT sma_task_id, sma_status, topic, dispatched_at "
+            "FROM social_posts ORDER BY dispatched_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        # social_posts 表可能不存在或为空
+        return []
+
+
 _TRADING_AGENT_URL = cfg().get("trading_agent_url")
 
 _analysis_tasks: dict[str, dict[str, Any]] = {}
@@ -355,6 +393,383 @@ async def dashboard_stats():
     except Exception as e:
         logger.error("Dashboard stats error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ---------------------------------------------------------------------------
+# Agent Report API  (S1.6 — Sprint 1)
+# ---------------------------------------------------------------------------
+
+def _get_brain():
+    """获取 CentralBrain（使用正确的 import 路径）。"""
+    from src.central_brain import get_central_brain
+    return get_central_brain()
+
+
+@app.get("/api/agent-report/dates")
+async def agent_report_dates():
+    """返回有市场判断记录的日期列表（最近 30 天）。"""
+    try:
+        brain = _get_brain()
+        conn = brain.store._conn()
+        rows = conn.execute(
+            "SELECT DISTINCT trade_date FROM market_regime_snapshots "
+            "ORDER BY trade_date DESC LIMIT 30"
+        ).fetchall()
+        return [r["trade_date"] for r in rows]
+    except Exception as e:
+        logger.error("agent_report_dates error: %s", e)
+        return []
+
+
+@app.get("/api/agent-report/{date}")
+async def agent_report(date: str):
+    """返回某日完整 Agent 报告（regime + picks + signals + risk + orders + attributions）。"""
+    try:
+        brain = _get_brain()
+        store = brain.store
+        conn = store._conn()
+
+        # ── 市场判断 ──
+        row = conn.execute(
+            "SELECT * FROM market_regime_snapshots "
+            "WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
+            (date,),
+        ).fetchone()
+        market_regime = None
+        if row:
+            r = dict(row)
+            r["hot_sectors"] = json.loads(r.get("hot_sectors_json") or "[]")
+            r["dominant_styles"] = json.loads(r.get("dominant_styles_json") or "[]")
+            r["avoid_styles"] = json.loads(r.get("avoid_styles_json") or "[]")
+            r["strategy_bias"] = json.loads(r.get("strategy_bias_json") or "{}")
+            r["daily_questions"] = json.loads(r.get("daily_questions_json") or "[]")
+            r["evidence"] = json.loads(r.get("evidence_json") or "{}")
+            market_regime = r
+
+        # ── 选股归档 ──
+        picks = store.get_daily_pick(date)
+        if picks:
+            picks["hot_sectors"] = json.loads(picks.get("hot_sectors_json") or "[]")
+            picks["aggressive"] = json.loads(picks.get("aggressive_json") or "[]")
+            picks["stable"] = json.loads(picks.get("stable_json") or "[]")
+            picks.setdefault("candidates", [])
+            picks.setdefault("candidates_count", 0)
+            picks.setdefault("agent_calls_count", 0)
+            picks.setdefault("elapsed_seconds", 0)
+
+        # ── 交易信号 ──
+        rows = conn.execute(
+            "SELECT * FROM trade_signals WHERE timestamp LIKE ? ORDER BY timestamp",
+            (f"{date}%",),
+        ).fetchall()
+        signals = [dict(r) for r in rows]
+
+        # ── 风控裁决 ──
+        rows = conn.execute(
+            "SELECT * FROM risk_decisions WHERE created_at LIKE ? ORDER BY created_at",
+            (f"{date}%",),
+        ).fetchall()
+        risk_decisions = []
+        for r in rows:
+            d = dict(r)
+            d["risk_flags"] = json.loads(d.get("risk_flags_json") or "[]")
+            risk_decisions.append(d)
+
+        # ── 订单 + 成交 ──
+        rows = conn.execute(
+            """SELECT o.*, f.avg_price, f.fees, f.filled_at
+               FROM orders o
+               LEFT JOIN fills f ON o.order_id = f.order_id
+               WHERE o.submitted_at LIKE ? ORDER BY o.submitted_at""",
+            (f"{date}%",),
+        ).fetchall()
+        orders = [dict(r) for r in rows]
+
+        # ── LLM 成本 ──
+        row = conn.execute(
+            "SELECT COUNT(*) as n, "
+            "COALESCE(SUM(total_tokens), 0) as tokens, "
+            "COALESCE(SUM(cost_usd), 0.0) as cost "
+            "FROM llm_calls WHERE ts LIKE ?",
+            (f"{date}%",),
+        ).fetchone()
+        cost = {
+            "total_llm_cost_usd": round(float(row["cost"] or 0), 4),
+            "total_calls": int(row["n"] or 0),
+            "total_tokens": int(row["tokens"] or 0),
+        }
+
+        # ── 交易归因 (S1.6) ──
+        rows = conn.execute(
+            "SELECT * FROM trade_attributions WHERE created_at LIKE ? ORDER BY created_at DESC",
+            (f"{date}%",),
+        ).fetchall()
+        attributions = []
+        for r in rows:
+            d = dict(r)
+            d["secondary_causes"] = json.loads(d.get("secondary_causes_json") or "[]")
+            d["tags"] = json.loads(d.get("tags_json") or "[]")
+            attributions.append(d)
+
+        return {
+            "date": date,
+            "market_regime": market_regime,
+            "picks": picks,
+            "signals": signals,
+            "risk_decisions": risk_decisions,
+            "orders": orders,
+            "cost": cost,
+            "attributions": attributions,
+        }
+
+    except Exception as e:
+        logger.error("agent_report error for %s: %s", date, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/lessons")
+async def get_lessons(
+    strategy_id: Optional[str] = None,
+    regime: Optional[str] = None,
+    limit: int = 10,
+):
+    """检索最近 lesson 列表，支持按策略和 regime 过滤。"""
+    try:
+        brain = _get_brain()
+        lessons = brain.store.get_recent_lessons(
+            strategy_id=strategy_id,
+            regime=regime,
+            limit=limit,
+        )
+        for lesson in lessons:
+            lesson["tags"] = json.loads(lesson.get("tags_json") or "[]")
+        return lessons
+    except Exception as e:
+        logger.error("get_lessons error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/positions")
+async def get_positions(status: str = "open"):
+    """返回持仓列表。status=open|closed|all"""
+    try:
+        brain = _get_brain()
+        conn = brain.store._conn()
+        if status == "all":
+            rows = conn.execute(
+                "SELECT * FROM positions ORDER BY entry_date DESC LIMIT 100"
+            ).fetchall()
+        elif status == "closed":
+            rows = conn.execute(
+                "SELECT * FROM positions WHERE status = 'closed' "
+                "ORDER BY closed_at DESC LIMIT 50"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_date"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error("get_positions error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/fills")
+async def get_fills(limit: int = 50):
+    """返回成交记录列表。"""
+    try:
+        brain = _get_brain()
+        conn = brain.store._conn()
+        rows = conn.execute(
+            "SELECT * FROM fills ORDER BY filled_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error("get_fills error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/orders")
+async def get_orders(limit: int = 50):
+    """返回订单列表。"""
+    try:
+        brain = _get_brain()
+        conn = brain.store._conn()
+        rows = conn.execute(
+            "SELECT * FROM orders ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error("get_orders error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/portfolio-summary")
+async def portfolio_summary():
+    """返回投资组合汇总统计。"""
+    try:
+        brain = _get_brain()
+        conn = brain.store._conn()
+
+        # 当前持仓统计
+        open_rows = conn.execute(
+            "SELECT * FROM positions WHERE status = 'open'"
+        ).fetchall()
+        open_positions = [dict(r) for r in open_rows]
+
+        total_market_value = 0.0
+        total_cost = 0.0
+        total_unrealized_pnl = 0.0
+        for p in open_positions:
+            qty = p.get("current_qty") or 0
+            entry = p.get("entry_price") or 0
+            current = p.get("current_price") or entry
+            mv = qty * current
+            cost = qty * entry
+            total_market_value += mv
+            total_cost += cost
+            total_unrealized_pnl += (mv - cost)
+
+        # 已平仓统计
+        closed_rows = conn.execute(
+            "SELECT realized_pnl, closed_at FROM positions WHERE status = 'closed' "
+            "ORDER BY closed_at"
+        ).fetchall()
+        total_realized_pnl = sum(r["realized_pnl"] or 0 for r in closed_rows)
+        win_count = sum(1 for r in closed_rows if (r["realized_pnl"] or 0) > 0)
+        loss_count = sum(1 for r in closed_rows if (r["realized_pnl"] or 0) < 0)
+        total_closed = len(closed_rows)
+        win_rate = round(win_count / total_closed * 100, 1) if total_closed > 0 else 0
+
+        # 累计收益曲线数据点 (按平仓日期)
+        cumulative = 0.0
+        pnl_curve = []
+        for r in closed_rows:
+            cumulative += r["realized_pnl"] or 0
+            pnl_curve.append({
+                "date": (r["closed_at"] or "")[:10],
+                "cumulative_pnl": round(cumulative, 2),
+            })
+
+        return {
+            "open_count": len(open_positions),
+            "closed_count": total_closed,
+            "total_market_value": round(total_market_value, 2),
+            "total_cost": round(total_cost, 2),
+            "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+            "total_realized_pnl": round(total_realized_pnl, 2),
+            "win_count": win_count,
+            "loss_count": loss_count,
+            "win_rate": win_rate,
+            "pnl_curve": pnl_curve,
+        }
+    except Exception as e:
+        logger.error("portfolio_summary error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/watchlist")
+async def get_watchlist(status: str = "watching"):
+    """获取自选股池列表。status: watching / triggered / removed / all"""
+    try:
+        brain = _get_brain()
+        items = brain.store.get_watchlist(status=status)
+        return items
+    except Exception as e:
+        logger.error("get_watchlist error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Strategy Evolution API  (AI 策略进化可视化)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/strategy-weights")
+async def strategy_weights():
+    """返回当前策略权重 + 权重历史。"""
+    try:
+        weights_path = _DATA_ROOT / "prompt_weights.json"
+        weights: list[dict] = []
+        if weights_path.exists():
+            with open(weights_path, "r", encoding="utf-8") as f:
+                weights = json.load(f)
+
+        # 从 git 或文件时间推断历史（简化：直接返回当前快照）
+        return {"weights": weights}
+    except Exception as e:
+        logger.error("strategy_weights error: %s", e)
+        return {"weights": []}
+
+
+@app.get("/api/persona")
+async def get_persona():
+    """返回 trading_persona.yaml 配置。"""
+    import yaml
+    try:
+        persona_path = Path(__file__).resolve().parents[2] / "config" / "trading_persona.yaml"
+        if persona_path.exists():
+            with open(persona_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            return data.get("persona", data)
+        return {"error": "persona config not found"}
+    except Exception as e:
+        logger.error("get_persona error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/lessons-timeline")
+async def lessons_timeline(limit: int = 50):
+    """返回 Lessons 时间线（最近 N 条）。"""
+    try:
+        brain = _get_brain()
+        lessons = brain.store.get_recent_lessons(limit=limit)
+        for lesson in lessons:
+            lesson["tags"] = json.loads(lesson.get("tags_json") or "[]")
+        return lessons
+    except Exception as e:
+        logger.error("lessons_timeline error: %s", e)
+        return []
+
+
+@app.get("/api/attribution-stats")
+async def attribution_stats(days: int = 30):
+    """返回归因统计。"""
+    try:
+        brain = _get_brain()
+        attrs = brain.store.get_attributions_since(days=days)
+
+        # 按 strategy_id 分组统计
+        strategy_stats: dict[str, dict] = {}
+        for a in attrs:
+            sid = a.get("strategy_id") or "unknown"
+            if sid not in strategy_stats:
+                strategy_stats[sid] = {"strategy": sid, "win": 0, "loss": 0, "even": 0, "total_pnl": 0.0}
+            pnl = a.get("realized_pnl") or 0
+            strategy_stats[sid]["total_pnl"] += pnl
+            if pnl > 0:
+                strategy_stats[sid]["win"] += 1
+            elif pnl < 0:
+                strategy_stats[sid]["loss"] += 1
+            else:
+                strategy_stats[sid]["even"] += 1
+
+        # 按 exit_reason 分组
+        exit_reasons: dict[str, int] = {}
+        for a in attrs:
+            reason = a.get("exit_reason") or "unknown"
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+
+        return {
+            "attributions": attrs,
+            "by_strategy": list(strategy_stats.values()),
+            "by_exit_reason": [{"reason": k, "count": v} for k, v in exit_reasons.items()],
+        }
+    except Exception as e:
+        logger.error("attribution_stats error: %s", e)
+        return {"attributions": [], "by_strategy": [], "by_exit_reason": []}
 
 
 _react_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

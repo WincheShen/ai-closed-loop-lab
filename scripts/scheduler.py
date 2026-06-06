@@ -139,6 +139,17 @@ def job_weekly_feedback() -> None:
     asyncio.run(run_weekly_feedback())
 
 
+def job_watchlist_check() -> None:
+    """每日 15:40 自选股池检查 — 检查入场条件 + 剔除过期标的。"""
+    logger.info("⏰ 定时任务触发: 自选股池检查")
+    try:
+        from src.agents.explorer.watchlist import run_watchlist_check
+        result = run_watchlist_check()
+        logger.info("Watchlist 检查完成: %s", result)
+    except Exception as e:
+        logger.warning("Watchlist 检查失败: %s", e)
+
+
 def job_backfill_attributions() -> None:
     """每日 15:15 补跑缺失归因 — 保底机制。
 
@@ -199,6 +210,7 @@ def setup_schedule() -> None:
     schedule.every().day.at("15:05").do(job_closing_analysis)
     schedule.every().day.at("15:15").do(job_backfill_attributions)
     schedule.every().day.at("15:35").do(job_daily_pipeline)
+    schedule.every().day.at("15:40").do(job_watchlist_check)
     schedule.every().day.at("16:00").do(job_health_check)
 
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)

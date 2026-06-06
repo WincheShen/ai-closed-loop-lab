@@ -15,6 +15,12 @@ import {
   Lightbulb,
   Clock,
   DollarSign,
+  BookOpen,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react'
 
 // ── 类型定义 ──
@@ -79,6 +85,31 @@ interface RiskDecision {
   risk_flags: string[]
 }
 
+interface TradeAttribution {
+  attribution_id: string
+  position_id: string
+  symbol: string
+  name: string
+  entry_price: number
+  close_price: number
+  realized_pnl: number
+  pnl_pct: number
+  holding_days: number
+  outcome: string          // win | loss | breakeven
+  primary_cause: string
+  secondary_causes: string[]
+  entry_regime: string
+  close_regime: string
+  regime_changed: boolean
+  strategy_id: string
+  original_thesis: string
+  actual_narrative: string
+  lesson: string
+  should_have: string
+  tags: string[]
+  created_at: string
+}
+
 interface OrderWithFill {
   order_id: string
   signal_id: string
@@ -115,6 +146,7 @@ interface AgentReport {
     total_calls: number
     total_tokens: number
   }
+  attributions: TradeAttribution[]
 }
 
 // regime 配色映射
@@ -595,6 +627,186 @@ function OrdersSection({ orders }: { orders: OrderWithFill[] }) {
   )
 }
 
+// ── 归因主因中文映射 ──
+const causeLabels: Record<string, { label: string; color: string }> = {
+  thesis_correct:        { label: '逻辑正确', color: 'text-bullish' },
+  thesis_wrong:          { label: '选股错误', color: 'text-bearish' },
+  timing_early:          { label: '时机太早', color: 'text-warning' },
+  timing_late:           { label: '追高', color: 'text-warning' },
+  regime_shift:          { label: 'Regime突变', color: 'text-purple-400' },
+  stop_loss_triggered:   { label: '正常止损', color: 'text-muted-foreground' },
+  take_profit_triggered: { label: '正常止盈', color: 'text-bullish' },
+  position_too_large:    { label: '仓位过重', color: 'text-bearish' },
+  held_too_long:         { label: '持仓太久', color: 'text-warning' },
+  external_shock:        { label: '外部冲击', color: 'text-purple-400' },
+}
+
+// ── 子组件：交易归因 ──
+function AttributionSection({ attributions }: { attributions: TradeAttribution[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  if (attributions.length === 0) {
+    return (
+      <div className="data-card">
+        <h2 className="text-sm font-semibold text-muted-foreground mb-3 uppercase tracking-wider flex items-center gap-2">
+          <BookOpen className="w-4 h-4 text-accent" />
+          交易归因
+        </h2>
+        <p className="text-sm text-muted-foreground text-center py-4">今日暂无平仓归因记录</p>
+      </div>
+    )
+  }
+
+  const wins = attributions.filter((a) => a.outcome === 'win').length
+  const losses = attributions.filter((a) => a.outcome === 'loss').length
+
+  return (
+    <div className="data-card">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+          <BookOpen className="w-4 h-4 text-accent" />
+          交易归因
+          <span className="text-xs font-normal normal-case">({attributions.length} 笔平仓)</span>
+        </h2>
+        <div className="flex items-center gap-3 text-xs">
+          <span className="flex items-center gap-1 text-bullish">
+            <TrendingUp className="w-3 h-3" />{wins} 盈
+          </span>
+          <span className="flex items-center gap-1 text-bearish">
+            <TrendingDown className="w-3 h-3" />{losses} 亏
+          </span>
+          {attributions.length - wins - losses > 0 && (
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <Minus className="w-3 h-3" />{attributions.length - wins - losses} 平
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {attributions.map((attr) => {
+          const isWin = attr.outcome === 'win'
+          const isLoss = attr.outcome === 'loss'
+          const cause = causeLabels[attr.primary_cause] || { label: attr.primary_cause, color: 'text-muted-foreground' }
+          const expanded = expandedId === attr.attribution_id
+
+          return (
+            <div
+              key={attr.attribution_id}
+              className={cn(
+                'rounded-lg border transition-all',
+                isWin ? 'border-bullish/20' : isLoss ? 'border-bearish/20' : 'border-panel-border'
+              )}
+            >
+              {/* 摘要行（点击展开）*/}
+              <button
+                className="w-full text-left p-3 hover:bg-panel-hover transition-colors rounded-lg"
+                onClick={() => setExpandedId(expanded ? null : attr.attribution_id)}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {isWin ? <TrendingUp className="w-4 h-4 text-bullish shrink-0" />
+                           : isLoss ? <TrendingDown className="w-4 h-4 text-bearish shrink-0" />
+                           : <Minus className="w-4 h-4 text-muted-foreground shrink-0" />}
+                    <span className="text-xs font-mono text-muted-foreground">{attr.symbol}</span>
+                    <span className="text-xs text-foreground">{attr.name}</span>
+                    <span className={cn('text-xs font-bold px-1.5 py-0.5 rounded', cause.color,
+                      isWin ? 'bg-bullish/10' : isLoss ? 'bg-bearish/10' : 'bg-panel-hover'
+                    )}>
+                      {cause.label}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={cn(
+                      'text-sm font-mono font-bold',
+                      isWin ? 'text-bullish' : isLoss ? 'text-bearish' : 'text-muted-foreground'
+                    )}>
+                      {attr.pnl_pct > 0 ? '+' : ''}{attr.pnl_pct.toFixed(2)}%
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">{attr.holding_days}天</span>
+                    {expanded
+                      ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+                      : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
+                  </div>
+                </div>
+
+                {/* regime 变化 */}
+                {attr.entry_regime && (
+                  <div className="flex items-center gap-1 mt-1.5">
+                    <span className="text-[10px] text-muted-foreground">入场 regime:</span>
+                    <span className="text-[10px] font-mono">{attr.entry_regime}</span>
+                    {attr.regime_changed && (
+                      <>
+                        <ArrowRight className="w-2.5 h-2.5 text-warning" />
+                        <span className="text-[10px] font-mono text-warning">{attr.close_regime}</span>
+                        <span className="text-[10px] text-warning">(已变化)</span>
+                      </>
+                    )}
+                  </div>
+                )}
+              </button>
+
+              {/* 展开详情 */}
+              {expanded && (
+                <div className="px-3 pb-3 border-t border-panel-border/50 space-y-3 pt-3">
+                  {/* 买入逻辑 vs 实际走势 */}
+                  {(attr.original_thesis || attr.actual_narrative) && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {attr.original_thesis && (
+                        <div className="p-2 rounded bg-panel-hover border border-panel-border">
+                          <div className="text-[10px] text-muted-foreground uppercase mb-1">买入逻辑</div>
+                          <p className="text-xs text-foreground leading-relaxed">{attr.original_thesis}</p>
+                        </div>
+                      )}
+                      {attr.actual_narrative && (
+                        <div className="p-2 rounded bg-panel-hover border border-panel-border">
+                          <div className="text-[10px] text-muted-foreground uppercase mb-1">实际走势</div>
+                          <p className="text-xs text-foreground leading-relaxed">{attr.actual_narrative}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Lesson */}
+                  {attr.lesson && (
+                    <div className="flex items-start gap-2 p-2.5 rounded-lg bg-accent/5 border border-accent/20">
+                      <Lightbulb className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs text-foreground font-medium">{attr.lesson}</p>
+                        {attr.should_have && (
+                          <p className="text-[11px] text-muted-foreground mt-1">{attr.should_have}</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 价格 + 标签 */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                      <span>入场 <span className="font-mono text-foreground">{attr.entry_price.toFixed(2)}</span></span>
+                      <ArrowRight className="w-3 h-3" />
+                      <span>平仓 <span className="font-mono text-foreground">{attr.close_price.toFixed(2)}</span></span>
+                    </div>
+                    {attr.tags.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {attr.tags.map((t) => (
+                          <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-panel-hover border border-panel-border text-muted-foreground">
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ── 主页面 ──
 export default function AgentDailyReport() {
   const [dates, setDates] = useState<string[]>([])
@@ -747,6 +959,9 @@ export default function AgentDailyReport() {
 
           {/* 执行记录 */}
           <OrdersSection orders={report.orders} />
+
+          {/* 交易归因 */}
+          <AttributionSection attributions={report.attributions || []} />
         </div>
       ) : (
         <div className="data-card flex items-center justify-center py-12">

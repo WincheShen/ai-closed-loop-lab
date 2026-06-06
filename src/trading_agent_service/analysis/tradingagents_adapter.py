@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 # 禁用代理，避免 Edge 浏览器代理扩展干扰
+# 清除所有可能的代理设置
+for var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
+    if var in os.environ:
+        del os.environ[var]
 os.environ['NO_PROXY'] = '*'
 os.environ['no_proxy'] = '*'
 
@@ -139,24 +143,15 @@ def reset_graph() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stock metadata loader（拉数值字段，不走 LLM）
+# Stock metadata loader（返回默认值，TradingAgents 内部会自己拉数据）
 # ---------------------------------------------------------------------------
 
-def _is_us_symbol(symbol: str) -> bool:
-    """判断是否为美股代码（如 AAPL, TSLA, NVDA.US）。"""
-    s = symbol.upper().strip()
-    if s.endswith(".US"):
-        return True
-    # 纯大写字母，1-5字符，常见美股格式
-    return s.isalpha() and s.isupper() and 1 <= len(s) <= 5
-
-
 def _load_stock_meta(symbol: str) -> dict:
-    """从 akshare 拉行情 + 基本面，组装数值字段。
+    """返回默认的股票元数据。
 
-    支持 A 股和美股。失败不抛异常，返回带默认值的字典。
+    TradingAgents 内部会自己拉取数据，这里只提供默认值。
     """
-    out = {
+    return {
         "name": f"代码{symbol}",
         "current_price": 0.0,
         "industry": "",
@@ -165,53 +160,6 @@ def _load_stock_meta(symbol: str) -> dict:
         "pb": None,
         "roe": None,
     }
-    try:
-        from stock_analyzer.data_source import AkshareClient
-    except ImportError:
-        logger.warning("stock_analyzer not on path; cannot load stock meta")
-        return out
-
-    client = AkshareClient(allow_mock_fallback=True)
-
-    # 美股分支
-    if _is_us_symbol(symbol):
-        try:
-            match = client.fetch_us_stock(symbol)
-            if match is not None:
-                out.update({
-                    "name": match.name,
-                    "current_price": match.price,
-                    "industry": match.industry or "美股",
-                    "market_cap_yi": match.market_cap_yi,
-                    "pe_ttm": match.pe_ttm,
-                    "pb": match.pb,
-                })
-                logger.info("US stock meta loaded: %s @ %.2f", symbol, match.price)
-            else:
-                logger.warning("US stock %s not found in akshare", symbol)
-        except Exception as e:
-            logger.warning("US stock meta load failed for %s: %s", symbol, e)
-        return out
-
-    # A 股分支
-    try:
-        snap = client.fetch_snapshot()
-        match = next(
-            (s for s in snap.stocks if s.symbol == symbol or s.symbol.endswith(symbol)),
-            None,
-        )
-        if match is not None:
-            out.update({
-                "name": match.name,
-                "current_price": match.price,
-                "industry": match.industry or "",
-                "market_cap_yi": match.market_cap_yi,
-                "pe_ttm": match.pe_ttm,
-                "pb": match.pb,
-            })
-    except Exception as e:  # noqa: BLE001
-        logger.warning("A-share meta load failed for %s: %s", symbol, e)
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +195,15 @@ class RealTradingAgentsAdapter(AnalyzerAdapter):
         trade_date = date.today().isoformat()
 
         logger.info("propagate %s @ %s ...", symbol, trade_date)
-        final_state, decision_raw = graph.propagate(symbol, trade_date)
+
+        # Phase 3.5: LLM observability — 记录 token 用量和费用
+        from .observability import llm_request_context, LLMUsageCallback
+        _cb = LLMUsageCallback()
+        with llm_request_context(symbol=symbol, stage="tradingagents_propagate"):
+            final_state, decision_raw = graph.propagate(
+                symbol, trade_date, callbacks=[_cb],
+            )
+
         logger.info("propagate done: decision_raw=%r", decision_raw)
 
         return self._to_report(

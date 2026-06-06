@@ -245,6 +245,14 @@ def run_discovery_node(state: TradingState) -> dict[str, Any]:
     # 热点板块已经在 scan_market 中从 state 获取
     hot_sectors = scanner.fetch_hot_sectors()
 
+    # 将高分候选纳入自选股池 (不阻塞主流程)
+    try:
+        from src.agents.explorer.watchlist import run_watchlist_ingest
+        ingested = run_watchlist_ingest(candidates)
+        logger.info("Watchlist 纳入 %d 只新候选", ingested)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Watchlist ingest 失败 (不影响主流程): %s", e)
+
     return {
         "target_stocks": candidates,
         "hot_sectors": hot_sectors,

@@ -62,6 +62,7 @@ class TopicRouter:
         picks: DailyPicks,
         account_id: str,
         description_override: Optional[str] = None,
+        images: Optional[list[str]] = None,
     ) -> TopicPayload:
         recs: list[StockBriefForSMA] = []
         for s in picks.aggressive:
@@ -90,6 +91,7 @@ class TopicRouter:
             pick_date=picks.pick_date,
             hot_sectors=picks.hot_sectors,
             recommendations=recs,
+            images=images or [],
         )
         return TopicPayload(
             account_id=account_id,

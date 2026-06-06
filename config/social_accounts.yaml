@@ -34,9 +34,14 @@ douyin:
     persona: "沈经理"
     review_mode: "review"
 
-# 微信公众号配置（预留）
+# 微信公众号配置
 wechat:
   WX_01:
-    enabled: false
+    enabled: true
     persona: "沈经理的投资日记"
-    review_mode: "review"
+    review_mode: "auto"        # auto=自动发布, review=人工审核草稿
+    schedule:
+      - time: "15:45"          # 收盘后
+        content_type: "daily_recap"
+      - time: "20:00"          # 晚间复盘
+        content_type: "lesson_digest"

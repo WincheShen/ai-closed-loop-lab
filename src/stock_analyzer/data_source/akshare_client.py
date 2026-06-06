@@ -15,6 +15,10 @@ from datetime import date, timedelta
 from typing import Optional
 
 # 禁用代理，避免 Edge 浏览器代理扩展干扰
+# 清除所有可能的代理设置
+for var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
+    if var in os.environ:
+        del os.environ[var]
 os.environ['NO_PROXY'] = '*'
 os.environ['no_proxy'] = '*'
 
