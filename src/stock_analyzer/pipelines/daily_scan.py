@@ -55,6 +55,7 @@ class DailyPicks:
     aggressive: list[RecommendedStock] = field(default_factory=list)
     stable: list[RecommendedStock] = field(default_factory=list)
     candidates: list[RecommendedStock] = field(default_factory=list)
+    is_agent_mock: bool = False  # True 当 agent 分析使用了 MockAnalyzer
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -137,10 +138,13 @@ class DailyScanPipeline:
 
         # 4. TradingAgent 深度分析（限量，避免 LLM 费用爆炸）
         agent_calls = 0
+        agent_mock_detected = False
         for stock in candidates[: self.max_agent_calls]:
             self._enrich_with_agent(stock)
             if stock.agent_decision is not None:
                 agent_calls += 1
+                if (stock.agent_summary or "").startswith("[MOCK]"):
+                    agent_mock_detected = True
 
         # 5. 交易员综合归类
         aggressive, stable = self._traders_recommend(candidates)
@@ -152,6 +156,7 @@ class DailyScanPipeline:
             aggressive=aggressive,
             stable=stable,
             candidates=candidates,
+            is_agent_mock=agent_mock_detected,
         )
 
         # 6. 持久化

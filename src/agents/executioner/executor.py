@@ -72,11 +72,15 @@ class ExecutionEngine:
         now = datetime.now().isoformat()
 
         # 动态计算下单数量（基于资金和仓位比例，100 股整数倍）
-        capital = cfg().get("initial_capital", 300000)
-        position_pct = signal.get("position_pct", 0.08)
-        allocation = capital * position_pct
+        # 对 sell 信号优先使用 target_qty（来自持仓实际数量）
         entry_price = signal["entry_price"]
-        quantity = max(100, int(allocation / entry_price / 100) * 100) if entry_price > 0 else 100
+        if signal.get("target_qty") and signal["action"] == "sell":
+            quantity = signal["target_qty"]
+        else:
+            capital = cfg().get("initial_capital", 300000)
+            position_pct = signal.get("position_pct", 0.08)
+            allocation = capital * position_pct
+            quantity = max(100, int(allocation / entry_price / 100) * 100) if entry_price > 0 else 100
 
         order: Order = {
             "order_id": order_id,

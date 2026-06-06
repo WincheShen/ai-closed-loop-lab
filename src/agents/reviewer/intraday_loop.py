@@ -152,7 +152,7 @@ async def _execute_review_action(
         reduce_qty = max(int(current_qty * 0.5 // 100) * 100, 100)
         if reduce_qty >= current_qty:
             reduce_qty = current_qty
-        signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审减仓"))
+        signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审减仓"), qty=reduce_qty)
         engine = ExecutionEngine(session_id)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
@@ -180,7 +180,7 @@ async def _execute_review_action(
 
     elif action == "EXIT":
         # 清仓
-        signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审清仓"))
+        signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审清仓"), qty=current_qty)
         engine = ExecutionEngine(session_id)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
@@ -207,8 +207,12 @@ async def _execute_review_action(
     return result
 
 
-def _build_signal(symbol: str, action: str, price: float, reason: str) -> dict:
-    """构建一个简化的 TradeSignal 供 Executor 执行。"""
+def _build_signal(symbol: str, action: str, price: float, reason: str, qty: int = 0) -> dict:
+    """构建一个简化的 TradeSignal 供 Executor 执行。
+
+    Args:
+        qty: 对 sell 信号，应传入实际卖出股数以避免与持仓脱钩。
+    """
     return {
         "signal_id": f"SIG-REV-{uuid.uuid4().hex[:8].upper()}",
         "symbol": symbol,
@@ -217,6 +221,7 @@ def _build_signal(symbol: str, action: str, price: float, reason: str) -> dict:
         "target_price": price * 1.05,
         "stop_loss": price * 0.95,
         "position_pct": 0.05,
+        "target_qty": qty if qty > 0 else None,
         "strategy": "position_review",
         "rationale": reason,
         "timestamp": datetime.now().isoformat(),

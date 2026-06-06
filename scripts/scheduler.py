@@ -139,6 +139,43 @@ def job_weekly_feedback() -> None:
     asyncio.run(run_weekly_feedback())
 
 
+def job_backfill_attributions() -> None:
+    """每日 15:15 补跑缺失归因 — 保底机制。
+
+    对所有 status='closed' 但无 trade_attributions 记录的 position 补跑归因。
+    """
+    logger.info("⏰ 定时任务触发: 归因补跑")
+    try:
+        from src.agents.memory.trade_attribution import TradeAttributor
+        from src.central_brain import get_central_brain
+
+        brain = get_central_brain()
+        conn = brain.store._conn()
+        rows = conn.execute(
+            """SELECT p.* FROM positions p
+            LEFT JOIN trade_attributions ta ON p.position_id = ta.position_id
+            WHERE p.status = 'closed' AND ta.attribution_id IS NULL""",
+        ).fetchall()
+
+        if not rows:
+            logger.info("所有已平仓 position 均已归因")
+            return
+
+        attributor = TradeAttributor("scheduler-backfill")
+        ok = 0
+        for row in rows:
+            position = dict(row)
+            try:
+                attributor.attribute_and_save(position, close_price=position.get("close_price"))
+                ok += 1
+            except Exception as e:
+                logger.warning("归因补跑失败 %s: %s", position.get("symbol"), e)
+
+        logger.info("归因补跑完成: %d/%d 成功", ok, len(rows))
+    except Exception as e:
+        logger.warning("归因补跑任务异常: %s", e)
+
+
 # --- 调度配置 ---
 
 def setup_schedule() -> None:
@@ -160,6 +197,7 @@ def setup_schedule() -> None:
     schedule.every().day.at("14:00").do(job_market_brain_only)
 
     schedule.every().day.at("15:05").do(job_closing_analysis)
+    schedule.every().day.at("15:15").do(job_backfill_attributions)
     schedule.every().day.at("15:35").do(job_daily_pipeline)
     schedule.every().day.at("16:00").do(job_health_check)
 
