@@ -9,8 +9,8 @@
 | Trading Agent | trading-agent | 8010 | ✅ 已部署 http://192.168.3.73:8010/stats |
 | AI Lab Web | ai-lab-webhook | 8002 | 📦 本文档部署 |
 
-两个服务共用同一个 Docker 镜像 `ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest`，
-通过不同的启动命令运行不同功能。
+AI Lab Web 使用镜像 `ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest`，
+由 GitHub Actions 自动构建并推送。
 
 ## 前提条件
 
@@ -76,8 +76,8 @@ EOF
 ### 6. 拉取镜像并启动
 
 ```bash
-sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
-sudo docker-compose -f docker-compose.nas.yml up -d webhook
+sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
+sudo docker-compose -f docker-compose.nas.yml up -d web
 ```
 
 ### 7. 验证
@@ -109,8 +109,8 @@ sudo docker logs ai-lab-webhook -f
 ```bash
 ssh kingsy_9@192.168.3.73
 cd /volume1/docker/ai-lab-web
-sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
-sudo docker-compose -f docker-compose.nas.yml up -d webhook
+sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
+sudo docker-compose -f docker-compose.nas.yml up -d web
 ```
 
 ## GitHub Actions 自动部署（可选）
@@ -191,6 +191,6 @@ NAS (192.168.3.73)
     ├── /webhook/trade    交易记录接收
     └── /health           健康检查
 
-共用镜像: ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+镜像: ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
 数据目录: /volume1/docker/ai-lab-web/data/
 ```

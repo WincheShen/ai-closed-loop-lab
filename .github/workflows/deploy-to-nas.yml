@@ -67,11 +67,11 @@ jobs:
           ssh $NAS_USER@$NAS_HOST "
             cd $NAS_PATH
             echo '🐳 拉取最新镜像...'
-            sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/trading-agent:latest
+            sudo docker pull ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
 
             echo '🚀 启动服务...'
             sudo docker-compose -f docker-compose.nas.yml down 2>/dev/null || true
-            sudo docker-compose -f docker-compose.nas.yml up -d webhook
+            sudo docker-compose -f docker-compose.nas.yml up -d web
 
             echo '🧹 清理旧镜像...'
             sudo docker image prune -f
@@ -89,7 +89,7 @@ jobs:
               sleep 3
             done
             echo '⚠️ 服务可能尚未启动，查看日志：'
-            sudo docker logs ai-lab-webhook --tail 20
+            sudo docker logs ai-lab-web --tail 20
           "
 
           echo ""

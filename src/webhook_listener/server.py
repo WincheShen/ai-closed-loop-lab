@@ -691,7 +691,7 @@ async def get_watchlist(status: str = "watching"):
 async def strategy_weights():
     """返回当前策略权重 + 权重历史。"""
     try:
-        weights_path = _DATA_ROOT / "prompt_weights.json"
+        weights_path = Path(os.environ.get("DATA_DIR", "data")) / "prompt_weights.json"
         weights: list[dict] = []
         if weights_path.exists():
             with open(weights_path, "r", encoding="utf-8") as f:
