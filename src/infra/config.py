@@ -33,6 +33,7 @@ class Config:
         data: dict[str, Any] = {
             # --- LLM ---
             "openai_api_key": os.getenv("OPENAI_API_KEY"),
+            "openai_base_url": os.getenv("OPENAI_BASE_URL"),
             "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY"),
             "google_api_key": os.getenv("GOOGLE_API_KEY"),
             "azure_endpoint": os.getenv("AZURE_OPENAI_ENDPOINT"),

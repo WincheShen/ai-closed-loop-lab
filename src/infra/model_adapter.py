@@ -145,6 +145,9 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured")
         kwargs = dict(model=model, api_key=api_key)
+        base_url = cfg().get("openai_base_url")
+        if base_url:
+            kwargs["base_url"] = base_url
         if "gpt-5" not in model:
             kwargs["temperature"] = temperature
         llm = ChatOpenAI(**kwargs)
