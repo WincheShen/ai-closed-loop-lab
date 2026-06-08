@@ -17,8 +17,18 @@ def get_keychain_password(service: str, account: str) -> str:
         )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        print(f"❌ 从 Keychain 读取失败: {e.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
+        # 如果精确匹配失败，尝试模糊匹配（处理 Keychain 截断问题）
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", service[:20], "-a", account, "-w"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            print(f"❌ 从 Keychain 读取失败: {e.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
 
 
 def ssh_nas(
@@ -76,8 +86,8 @@ def main():
 
     args = parser.parse_args()
 
-    # 从 Keychain 读取凭据
-    username = get_keychain_password("ai-lab-nas-username", "nas_username")
+    # 从 Keychain 读取凭据（使用实际存储的 service 名称）
+    username = get_keychain_password("ai-lab-nas-usernam", "nas_username")
     password = get_keychain_password("ai-lab-nas-password", "nas_password")
 
     # 执行 SSH

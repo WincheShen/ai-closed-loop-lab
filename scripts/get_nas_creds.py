@@ -17,13 +17,24 @@ def get_keychain_password(service: str, account: str) -> str:
         )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        print(f"❌ 从 Keychain 读取失败: {e.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
+        # 如果精确匹配失败，尝试模糊匹配（处理 Keychain 截断问题）
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", service[:20], "-a", account, "-w"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            print(f"❌ 从 Keychain 读取失败: {e.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
 
 
 def main():
     """读取 NAS 凭据并打印（供其他脚本调用）。"""
-    username = get_keychain_password("ai-lab-nas-username", "nas_username")
+    # Keychain 中实际存储的 service 名称（可能被截断）
+    username = get_keychain_password("ai-lab-nas-usernam", "nas_username")
     password = get_keychain_password("ai-lab-nas-password", "nas_password")
 
     # 输出格式：用户名和密码用空格分隔
