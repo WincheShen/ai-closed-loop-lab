@@ -1,229 +1,639 @@
-# AI Closed Loop Lab — System Architecture
+# AI Trading Agent System Architecture
 
-本文档描述系统整体架构以及事件驱动设计。
+This document describes the **current runtime architecture**, **scheduled automation**, and **data flow** of the AI trading system based on the codebase.
 
-> **注意（Phase 3.5 过渡状态）**：本文档描述的是 Phase 4 目标架构（事件驱动 + 五大子系统）。
-> 当前代码库中 **Phase 1-3 的业务模块（`stock_analyzer`、`trading_agent_service`、
-> `social_media_dispatcher`、`webhook_listener`）与 Phase 4 的 `ai_platform/*` 编排层并行存在**。
-> 新旧模块映射、依赖方向规则、标准启动入口请参见 [architecture.md §0](./architecture.md#0-新旧模块映射phase-35--phase-4-过渡状态)。
+The system is an **event‑driven multi‑agent trading platform** that performs market analysis, generates trade signals, executes decisions, produces reports, and feeds results into a feedback loop.
 
----
+Core ideas behind the system:
 
-# 一、总体架构
-
-系统由以下几个部分组成：
-
-Market Data
-
-→ Investment AI
-
-→ EventBus
-
-→ Agents
-
-→ Content System
-
-→ Feedback Loop
-
-
-核心思想：
-
-Event Driven Architecture
-
+- Event‑driven agents
+- Automated daily pipeline
+- Explainable trading decisions
+- Continuous feedback and optimization
 
 ---
 
-# 二、系统组件
+# 1. System Overview
 
-## Investment Layer
+The platform consists of the following major layers:
 
-负责市场分析与选股。
+1. Scheduler & Automation
+2. Market Data Layer
+3. Strategy & Analysis Engine
+4. Agent Workflow Pipeline
+5. Event Bus
+6. Storage & System Memory
+7. Strategy Feedback System
+8. API Layer
+9. Frontend Dashboard
+10. Content / Social Media Generation
 
-组件：
+High‑level runtime flow:
 
-Stock Analyzer
+Scheduler  
+→ AI Pipeline  
+→ EventBus  
+→ Trading Decisions  
+→ Databases  
+→ Daily Report API  
+→ Frontend Dashboard
 
-TradingAgent
+Parallel flow:
 
-
-输出：
-
-daily.picks.generated
-
-
----
-
-## Event Layer
-
-核心组件：
-
-EventBus
-
-
-功能：
-
-发布事件
-
-订阅事件
-
-记录事件日志
-
-
-事件日志存储：
-
-SQLite
-
-
-路径：
-
-data/event_bus/events.sqlite
-
+Trading Events  
+→ EventBus  
+→ Content Agents  
+→ Social Media Dispatcher
 
 ---
 
-## Agent Layer
+# 2. Scheduler and Automation
 
-Agent 负责消费事件并执行逻辑。
+Main entry point:
 
+scripts/scheduler.py
+
+The scheduler runs continuously using the **schedule** library.
+
+Startup:
+
+python scripts/scheduler.py
+
+Main loop behavior:
+
+- check scheduled jobs
+- execute due tasks
+- emit heartbeat every 5 minutes
+- sleep 30 seconds
+
+This process is intended to run as:
+
+- systemd service
+- Docker container
+- background daemon
+
+---
+
+# 3. Daily Task Schedule
+
+The scheduler orchestrates the entire trading lifecycle.
+
+## Morning Regime Detection
+
+09:35
+
+Task:
+
+MarketBrain snapshot
+
+Function:
+
+job_market_brain_only()
+
+Purpose:
+
+Evaluate the market environment.
+
+Outputs:
+
+- market regime
+- recommended posture
+- maximum total portfolio exposure
+- hot sectors
+
+Stored in:
+
+market_regime_snapshots
+
+---
+
+## Intraday Monitoring
+
+Every 30 minutes  
+09:30 → 14:30
+
+Task:
+
+Intraday position review
+
+Function:
+
+job_intraday_review()
+
+Calls:
+
+run_intraday_review()
+
+Purpose:
+
+Reevaluate open positions.
+
+Possible outcomes:
+
+BUY  
+SELL  
+HOLD
+
+Only actions different from HOLD are logged.
+
+---
+
+## Midday Regime Update
+
+11:35
+
+Task:
+
+MarketBrain snapshot
+
+Purpose:
+
+Detect regime drift during trading hours.
+
+---
+
+## Afternoon Regime Update
+
+14:00
+
+Task:
+
+MarketBrain snapshot
+
+Purpose:
+
+Final regime reassessment before market close.
+
+---
+
+# 4. End-of-Day Pipeline
+
+Most of the AI system runs after market close.
+
+---
+
+## 15:05 Closing Analysis
+
+Function:
+
+job_closing_analysis()
+
+Runs:
+
+run_closing_analysis()
+
+Purpose:
+
+- summarize trading activity
+- analyze positions
+- produce narrative insights
+- generate social content drafts
+
+---
+
+## 15:15 Trade Attribution Backfill
+
+Function:
+
+job_backfill_attributions()
+
+Purpose:
+
+Ensure every closed trade has attribution.
+
+Steps:
+
+1. find positions with status = closed
+2. check if attribution exists
+3. generate attribution if missing
+
+Component:
+
+TradeAttributor
+
+Output stored in:
+
+trade_attributions
+
+---
+
+## 15:35 Full AI Pipeline
+
+Function:
+
+job_daily_pipeline()
+
+Runs:
+
+run_daily_pipeline("mock")
+
+This is the **core automated trading workflow**.
+
+Pipeline stages:
+
+MarketBrain  
+Explorer  
+Strategist  
+RiskGovernor  
+Executioner  
+Influencer
+
+---
+
+# 5. Agent Workflow Pipeline
+
+## MarketBrain
+
+Determines the market regime.
+
+Outputs include:
+
+- regime classification
+- risk appetite
+- recommended posture
+- dominant styles
+- avoid styles
+- hot sectors
+
+Used by downstream agents.
+
+---
+
+## Explorer
+
+Scans the entire market.
+
+Uses:
+
+AkshareClient  
+HotSectorDetector
+
+Produces:
+
+candidate stocks
+
+These form the **initial stock universe**.
+
+---
+
+## Strategist
+
+Evaluates candidates.
+
+Produces:
+
+TradeSignal objects.
+
+Each signal contains:
+
+symbol  
+entry_price  
+target_price  
+stop_loss  
+position_pct  
+strategy  
+rationale
+
+---
+
+## RiskGovernor
+
+Evaluates risk of each signal.
+
+Possible outcomes:
+
+approve  
+reduce  
+reject
+
+Outputs:
+
+RiskDecision
+
+Fields include:
+
+approved_position_pct  
+risk_flags  
+decision_reason
+
+---
+
+## Executioner
+
+Executes approved signals.
+
+Produces:
+
+orders.
+
+Stored in database tables.
+
+Fields include:
+
+order_id  
+symbol  
+quantity  
+avg_price  
+fees  
+status
+
+---
+
+## Influencer
+
+Generates narrative insights and content.
+
+This connects the trading system with the content publishing system.
+
+---
+
+# 6. Market Data Layer
+
+Primary module:
+
+src/stock_analyzer/data_source/akshare_client.py
+
+Provides unified market data access.
+
+Core data models:
+
+StockQuote  
+SectorQuote  
+MarketSnapshot  
+KlineBar
+
+Data source priority:
+
+1 AKShare  
+2 Sina Finance API  
+3 Mock data fallback
+
+This ensures the pipeline continues working even when external APIs fail.
+
+---
+
+# 7. Hot Sector Detection
+
+Component:
+
+HotSectorDetector
+
+File:
+
+src/stock_analyzer/data_source/hot_sector_detector.py
+
+Input:
+
+MarketSnapshot
+
+Scoring formula:
+
+score =
+0.5 * change_pct  
++ 0.2 * turnover  
++ 0.3 * main_fund_net_inflow
+
+Output:
+
+Top ranked sectors.
+
+Used by:
+
+MarketBrain  
+Explorer
+
+---
+
+# 8. Event Bus System
+
+Core file:
+
+src/ai_platform/central_brain/event_bus/event_bus.py
+
+The EventBus provides system‑wide communication between agents.
+
+Features:
+
+- publish / subscribe model
+- SQLite event logging
+- optional Redis stream implementation
+
+Event structure:
+
+event_type  
+payload  
+timestamp
+
+Example events:
+
+daily.picks.generated  
+trade.record.created
+
+Subscribers include:
+
+TopicGeneratorAgent  
+StrategyFeedbackAgent
+
+---
+
+# 9. Strategy Feedback System
+
+Component:
+
+StrategyFeedbackAgent
+
+File:
+
+src/ai_platform/feedback_system/strategy_optimizer/strategy_feedback_agent.py
+
+Purpose:
+
+Collect trading events for later analysis.
+
+Stored in:
+
+data/strategy_feedback/strategy_metrics.sqlite
+
+Table:
+
+strategy_events
+
+Captured events include:
+
+daily.picks.generated  
+trade.record.created
+
+---
+
+# 10. Strategy Analyzer
+
+File:
+
+src/ai_platform/feedback_system/strategy_optimizer/strategy_analyzer.py
+
+Provides analytics on recorded strategy events.
+
+Outputs include:
+
+total_events  
+total_picks  
+total_trades
+
+Derived metric:
+
+picks_to_trades_ratio
+
+This feeds future optimization systems.
+
+---
+
+# 11. Content Generation Agent
+
+Component:
 
 TopicGeneratorAgent
 
-监听：
+File:
+
+src/ai_platform/content_ai/topic_generation/topic_generator_agent.py
+
+Purpose:
+
+Convert trading signals into social media topics.
+
+Triggered by event:
 
 daily.picks.generated
 
-生成：
+Workflow:
 
-内容选题
+DailyPicks  
+→ TopicRouter  
+→ SmaClient.dispatch()
 
+The payload is sent to:
 
-TradeContentAgent
-
-监听：
-
-trade.record.created
-
-生成：
-
-交易复盘内容
-
+social_media_dispatcher
 
 ---
 
-## Content Layer
+# 12. API Layer
 
-由 Social Media Automation 系统负责。
+Trading analysis API models are defined in:
 
+src/trading_agent_service/api/schemas.py
 
-流程：
+Main request:
 
-Topic
+AnalyzeRequest
 
-→ Research
+Main response:
 
-→ Draft
+AnalyzeResponse
 
-→ Safety
+Response includes:
 
-→ Publish
+technical analysis  
+fundamental analysis  
+bull/bear debate  
+final decision  
+confidence score
 
-
----
-
-# 三、事件流
-
-## 选股流程
-
-Daily Workflow
-
-→ daily.picks.generated
-
-→ TopicGeneratorAgent
-
-→ Content Task
-
-
-## 交易记录流程
-
-Webhook Listener
-
-→ trade.record.created
-
-→ TradeContentAgent
-
-→ Content Task
-
+These APIs power the frontend analysis tools.
 
 ---
 
-# 四、数据存储
+# 13. Frontend Dashboard
 
-主要数据：
+Primary page:
 
+frontend/src/pages/AgentDailyReport.tsx
 
-Daily Picks
+Displays the daily system report.
 
-路径：
+Data endpoints:
 
-data/daily_picks/
+GET /api/agent-report/dates  
+GET /api/agent-report/{date}
 
+Report sections:
 
-Trade Records
+Market Regime  
+Stock Picks  
+Trade Signals  
+Risk Decisions  
+Orders  
+Trade Attribution
 
-路径：
-
-data/webhook/
-
-
-Event Log
-
-路径：
-
-data/event_bus/events.sqlite
-
+This page visualizes the **entire AI decision pipeline**.
 
 ---
 
-# 五、系统监控
+# 14. End‑to‑End Data Flow
 
-Event Monitor
+Full lifecycle of a trading day:
 
-端口：
+Market Data  
+→ Market Snapshot  
+→ Hot Sector Detection  
+→ MarketBrain Regime Analysis  
+→ Explorer Market Scan  
+→ Strategist Signal Generation  
+→ RiskGovernor Risk Review  
+→ Executioner Trade Execution  
+→ Trade Attribution  
+→ Strategy Feedback Logging  
+→ Daily Report API  
+→ Frontend Dashboard
 
-8010
+Parallel event pipeline:
 
-
-API：
-
-/events/recent
-
-
-用于查看系统最近事件。
-
+Agent Pipeline  
+→ EventBus.publish()  
+→ TopicGeneratorAgent  
+→ StrategyFeedbackAgent  
+→ Social Media Dispatcher
 
 ---
 
-# 六、未来架构扩展
+# 15. System Design Principles
 
-系统未来可以扩展：
+Event‑Driven Architecture
 
-Feedback Agents
+Agents communicate via events rather than direct dependencies.
 
-Engagement Analyzer
+Fault Tolerance
 
-Strategy Optimizer
+Multiple market data fallbacks ensure reliability.
 
+Automated Workflow
 
-形成完整闭环：
+The scheduler guarantees consistent daily operation.
 
-Market
+Explainability
 
-→ Investment
+Each stage outputs structured data visible in reports.
 
-→ Content
+Continuous Learning
 
-→ Audience
+Trade attribution and feedback data support strategy evolution.
 
-→ Feedback
+---
 
-→ Strategy Optimization
+# 16. Future Extensions
+
+Planned improvements include:
+
+Redis‑based distributed event bus
+
+Broker API integration
+
+Automatic social media publishing
+
+LLM‑driven strategy optimization
+
+Engagement analytics for content
+
+Portfolio‑level reinforcement learning
+
+Real‑time intraday agent orchestration
