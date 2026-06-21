@@ -72,7 +72,7 @@ REVIEW_USER_TEMPLATE = """\
 分析: {thesis}
 看多理由: {bull_case}
 看空风险: {bear_case}
-
+{force_review_section}
 ## 历史复审记录
 {review_history}
 
@@ -82,20 +82,30 @@ REVIEW_USER_TEMPLATE = """\
 请根据以上信息给出你的复审判断。
 """
 
+FORCE_REVIEW_TEMPLATE = """\
+## ⚠️ 强制复审提醒
+{force_review_reason}
+
+注意：此持仓已超出正常持有周期，请更严格地审视继续持有的理由。
+除非有非常明确的上涨催化剂，否则应倾向于 REDUCE 或 EXIT。
+"""
+
 
 class PositionReviewAgent:
     """轻量级 LLM 持仓复审 Agent。"""
 
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(self, model_name: str | None = None, persona_id: str | None = None) -> None:
         self.brain = get_central_brain()
         self.intraday = IntradayClient(allow_mock_fallback=True)
         self.model_name = model_name
+        self.persona_id = persona_id
 
-    def review_position(self, position: dict) -> dict:
+    def review_position(self, position: dict, force_review_reason: str | None = None) -> dict:
         """复审单只持仓，返回决策结果。
 
         Args:
             position: 从 store.list_open_positions() 获取的持仓 dict
+            force_review_reason: 强制复审原因（如超期持仓），注入 prompt 使 LLM 更积极建议卖出
 
         Returns:
             {"action": str, "confidence": float, "reason": str, ...}
@@ -123,6 +133,12 @@ class PositionReviewAgent:
         review_history = self._format_review_history(reviews)
 
         # 4. Build prompt
+        force_review_section = ""
+        if force_review_reason:
+            force_review_section = FORCE_REVIEW_TEMPLATE.format(
+                force_review_reason=force_review_reason,
+            )
+
         user_msg = REVIEW_USER_TEMPLATE.format(
             symbol=symbol,
             name=name,
@@ -136,6 +152,7 @@ class PositionReviewAgent:
             thesis=position.get("original_thesis", "无"),
             bull_case=position.get("bull_case", "无"),
             bear_case=position.get("bear_case", "无"),
+            force_review_section=force_review_section,
             review_history=review_history,
             market_summary=summary,
         )
@@ -167,6 +184,9 @@ class PositionReviewAgent:
         if position.get("side") == "short":
             pnl_pct = -pnl_pct
 
+        # 6.5 Rule Override: 止盈/止损硬约束（优先于 LLM 判断）
+        result = self._apply_rule_override(result, position, current_price, pnl_pct)
+
         # 7. Persist review
         review_id = f"REV-{uuid.uuid4().hex[:8].upper()}"
         tokens = getattr(response, "usage_metadata", {}).get("total_tokens", 0) if "response" in dir() else 0
@@ -194,18 +214,24 @@ class PositionReviewAgent:
         result["pnl_pct"] = round(pnl_pct, 2)
         return result
 
-    def review_all_positions(self) -> list[dict]:
-        """复审所有持仓，返回决策列表。"""
-        positions = self.brain.store.list_open_positions()
+    def review_all_positions(self, force_review_map: dict[str, str] | None = None) -> list[dict]:
+        """复审所有持仓，返回决策列表。
+
+        Args:
+            force_review_map: 可选的 {position_id: reason} 映射，对指定持仓注入强制复审上下文。
+        """
+        positions = self.brain.store.list_open_positions(persona_id=self.persona_id)
         if not positions:
             logger.info("无持仓，跳过复审")
             return []
 
+        force_map = force_review_map or {}
         logger.info("开始复审 %d 只持仓", len(positions))
         results = []
         for pos in positions:
             try:
-                result = self.review_position(pos)
+                force_reason = force_map.get(pos["position_id"])
+                result = self.review_position(pos, force_review_reason=force_reason)
                 results.append(result)
                 logger.info(
                     "[%s %s] %s (confidence=%.2f) — %s",
@@ -259,6 +285,104 @@ class PositionReviewAgent:
             data["action"] = data["action"].upper()
 
         return data
+
+    def _apply_rule_override(
+        self, result: dict, position: dict, current_price: float, pnl_pct: float,
+    ) -> dict:
+        """规则化止盈/止损覆盖 — 优先于 LLM 判断。
+
+        规则:
+        1. 止损: 当前价 <= stop_loss → EXIT
+        2. 止盈(阶梯):
+           - 当前价 >= target_price * 0.95 → REDUCE (锁利一半)
+           - 当前价 >= target_price → EXIT (到目标全出)
+        3. 浮亏超 -8% 且 LLM 仍 HOLD → 强制 EXIT
+        4. 持仓超 5 天且浮盈 < 2% → REDUCE (避免资金占用)
+        """
+        symbol = position.get("symbol", "")
+        target_price = position.get("target_price") or 0
+        stop_loss = position.get("stop_loss") or 0
+        entry_date = position.get("entry_date", "")
+
+        # 规则 1: 硬止损
+        if stop_loss > 0 and current_price <= stop_loss:
+            if result["action"] != "EXIT":
+                logger.info(
+                    "[%s] Rule Override: 跌破止损 %.2f (当前 %.2f) → EXIT",
+                    symbol, stop_loss, current_price,
+                )
+                return {
+                    **result,
+                    "action": "EXIT",
+                    "reason": f"价格{current_price:.2f}已跌破止损价{stop_loss:.2f}，强制清仓",
+                    "risk_flag": "stop_loss_triggered",
+                    "rule_override": True,
+                }
+
+        # 规则 2a: 到达目标价 → EXIT
+        if target_price > 0 and current_price >= target_price:
+            if result["action"] in ("HOLD", "ADD"):
+                logger.info(
+                    "[%s] Rule Override: 达到目标价 %.2f (当前 %.2f) → EXIT",
+                    symbol, target_price, current_price,
+                )
+                return {
+                    **result,
+                    "action": "EXIT",
+                    "reason": f"价格{current_price:.2f}已达目标价{target_price:.2f}，止盈清仓",
+                    "risk_flag": "",
+                    "rule_override": True,
+                }
+
+        # 规则 2b: 接近目标价 (>=95%) → REDUCE
+        if target_price > 0 and current_price >= target_price * 0.95:
+            if result["action"] in ("HOLD", "ADD"):
+                logger.info(
+                    "[%s] Rule Override: 接近目标价 %.2f (当前 %.2f, 95%%线=%.2f) → REDUCE",
+                    symbol, target_price, current_price, target_price * 0.95,
+                )
+                return {
+                    **result,
+                    "action": "REDUCE",
+                    "reason": f"价格{current_price:.2f}已接近目标价{target_price:.2f}(达95%)，减仓锁利",
+                    "risk_flag": "",
+                    "rule_override": True,
+                }
+
+        # 规则 3: 浮亏超 8% 且 LLM HOLD → 强制 EXIT
+        if pnl_pct <= -8.0 and result["action"] == "HOLD":
+            logger.info(
+                "[%s] Rule Override: 浮亏 %.1f%% 超过阈值 → EXIT", symbol, pnl_pct,
+            )
+            return {
+                **result,
+                "action": "EXIT",
+                "reason": f"浮亏{pnl_pct:.1f}%超过-8%硬止损线，强制清仓",
+                "risk_flag": "max_loss_exceeded",
+                "rule_override": True,
+            }
+
+        # 规则 4: 持仓超 5 天且浮盈不足 → REDUCE (释放资金)
+        if entry_date and pnl_pct < 2.0 and pnl_pct > -3.0:
+            try:
+                from datetime import date as date_cls
+                days_held = (date_cls.today() - date_cls.fromisoformat(entry_date)).days
+                if days_held > 5 and result["action"] == "HOLD":
+                    logger.info(
+                        "[%s] Rule Override: 持仓 %d 天浮盈仅 %.1f%% → REDUCE",
+                        symbol, days_held, pnl_pct,
+                    )
+                    return {
+                        **result,
+                        "action": "REDUCE",
+                        "reason": f"持仓{days_held}天浮盈仅{pnl_pct:.1f}%，减仓释放资金",
+                        "risk_flag": "stale_position",
+                        "rule_override": True,
+                    }
+            except (ValueError, TypeError):
+                pass
+
+        return result
 
     def _format_review_history(self, reviews: list[dict]) -> str:
         if not reviews:

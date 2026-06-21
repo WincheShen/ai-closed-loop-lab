@@ -20,6 +20,7 @@ from src.agents.reviewer.position_reviewer import PositionReviewAgent
 from src.agents.memory.trade_attribution import TradeAttributor
 from src.central_brain import get_central_brain
 from src.infra.config import cfg
+from src.stock_analyzer.data_source.intraday_client import IntradayClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +39,16 @@ def is_trading_hours() -> bool:
 async def run_intraday_review(
     force: bool = False,
     model_name: str | None = None,
+    persona_id: str | None = None,
+    force_review_map: dict[str, str] | None = None,
 ) -> list[dict]:
     """执行一轮盘中复审 + 虚拟交易。
 
     Args:
         force: 忽略交易时间检查（调试用）
         model_name: 指定LLM模型
+        persona_id: 指定人格ID，为None时复审所有持仓
+        force_review_map: 可选的 {position_id: reason} 映射，对超期持仓注入强制复审上下文
 
     Returns:
         本轮所有持仓的复审结果列表
@@ -53,11 +58,11 @@ async def run_intraday_review(
         return []
 
     brain = get_central_brain()
-    reviewer = PositionReviewAgent(model_name=model_name)
-    session_id = f"intraday-{date.today().isoformat()}-{datetime.now().strftime('%H%M')}"
+    reviewer = PositionReviewAgent(model_name=model_name, persona_id=persona_id)
+    session_id = f"intraday-{date.today().isoformat()}-{datetime.now().strftime('%H%M')}-{persona_id or 'all'}"
 
-    # 1. Review all open positions
-    reviews = reviewer.review_all_positions()
+    # 1. Review all open positions (按persona过滤)
+    reviews = reviewer.review_all_positions(force_review_map=force_review_map)
     if not reviews:
         logger.info("无持仓或无复审结果")
         return reviews
@@ -107,11 +112,111 @@ async def run_intraday_review(
         },
     )
 
+    # 4. 检查并执行 pending signals（条件单监控）
+    triggered = await _check_pending_signals(brain, session_id, force=force)
+
     logger.info(
-        "盘中复审完成: %d 只持仓, %d 个动作",
-        len(reviews), len(actions_taken),
+        "盘中复审完成: %d 只持仓, %d 个动作, %d 条件单触发",
+        len(reviews), len(actions_taken), len(triggered),
     )
-    return action_results
+    return action_results + triggered
+
+
+async def _check_pending_signals(
+    brain, session_id: str, force: bool = False,
+) -> list[dict]:
+    """检查 pending 状态的条件单，价格满足条件时自动执行。
+
+    条件类型:
+    - breakout: 当前价 >= entry_price 时触发
+    - pullback: 当前价 <= entry_price 时触发
+    """
+    pending = brain.store.list_pending_signals()
+    if not pending:
+        return []
+
+    logger.info("检查 %d 个 pending 条件单", len(pending))
+    intraday = IntradayClient(allow_mock_fallback=True)
+    triggered_results = []
+
+    for sig in pending:
+        symbol = sig["symbol"]
+        entry_price = sig.get("entry_price", 0)
+        condition = sig.get("entry_condition", "breakout")
+
+        # 获取当前价
+        try:
+            snapshot = intraday.fetch_intraday_snapshot(symbol, period="1", bar_limit=1)
+            current_price = snapshot.current_price or 0
+        except Exception as e:
+            logger.warning("获取 %s 实时价格失败: %s", symbol, e)
+            continue
+
+        if current_price <= 0:
+            continue
+
+        # 判断是否触发
+        triggered = False
+        if condition == "breakout" and current_price >= entry_price:
+            triggered = True
+            logger.info(
+                "[TRIGGERED] %s 突破条件达成: 当前 %.2f >= 入场 %.2f",
+                symbol, current_price, entry_price,
+            )
+        elif condition == "pullback" and current_price <= entry_price:
+            triggered = True
+            logger.info(
+                "[TRIGGERED] %s 回调条件达成: 当前 %.2f <= 入场 %.2f",
+                symbol, current_price, entry_price,
+            )
+
+        if not triggered:
+            logger.debug(
+                "[WATCHING] %s | 条件=%s | 入场=%.2f | 当前=%.2f | 未触发",
+                symbol, condition, entry_price, current_price,
+            )
+            continue
+
+        # 触发 → 执行买入
+        # 更新 signal 中的 entry_price 为实际触发价
+        sig["entry_price"] = current_price
+        sig["entry_condition"] = "immediate"
+        engine = ExecutionEngine(session_id)
+        try:
+            orders, fills = await engine.monitor_and_execute([sig])
+            if fills:
+                brain.store.update_signal_status(sig["signal_id"], "filled")
+                triggered_results.append({
+                    "symbol": symbol,
+                    "action": "BUY",
+                    "reason": f"条件单触发({condition}): 价格 {current_price:.2f} 达到 {entry_price:.2f}",
+                    "trade_price": fills[0]["avg_price"],
+                    "signal_id": sig["signal_id"],
+                    "entry_condition": condition,
+                })
+            else:
+                logger.warning("条件单触发但执行失败: %s", symbol)
+        except Exception as e:
+            logger.error("条件单执行异常 %s: %s", symbol, e)
+
+    # 清理过期的 pending signals
+    _expire_stale_pending_signals(brain)
+
+    return triggered_results
+
+
+def _expire_stale_pending_signals(brain) -> None:
+    """将超过有效期的 pending signal 标记为 expired。"""
+    conn = brain.store._conn()
+    expired = conn.execute(
+        """SELECT signal_id, symbol FROM trade_signals
+        WHERE status = 'pending'
+          AND timestamp IS NOT NULL
+          AND datetime(timestamp, '+5 days') < datetime('now')""",
+    ).fetchall()
+    for row in expired:
+        brain.store.update_signal_status(row["signal_id"], "expired")
+        logger.info("[EXPIRED] %s 条件单超过5天有效期，已过期", row["symbol"])
 
 
 async def _execute_review_action(
@@ -119,12 +224,24 @@ async def _execute_review_action(
     session_id: str,
     position: dict,
     review: dict,
+    persona_id: str | None = None,
 ) -> dict:
     """根据复审结果执行虚拟交易。"""
     action = review["action"]
     symbol = position["symbol"]
+    position_id = position["position_id"]
     current_price = review.get("current_price", position["entry_price"])
-    current_qty = position.get("current_qty", 0)
+    effective_persona_id = persona_id or position.get("persona_id")
+
+    # 强制从数据库读取最新持仓（防止使用过期的 position 对象）
+    fresh_position = brain.store.get_position(position_id)
+    if fresh_position:
+        current_qty = fresh_position.get("current_qty", 0)
+        logger.info("[%s] 实时持仓刷新: position_id=%s, current_qty=%d", symbol, position_id, current_qty)
+    else:
+        current_qty = position.get("current_qty", 0)
+        logger.warning("[%s] 无法获取实时持仓，使用传入值: %d", symbol, current_qty)
+
     mode = cfg().get("trading_mode", "mock")
 
     result: dict = {"executed": False}
@@ -133,11 +250,11 @@ async def _execute_review_action(
         # 加仓：固定加 50% 当前持仓（最少100股）
         add_qty = max(int(current_qty * 0.5 // 100) * 100, 100)
         signal = _build_signal(symbol, "buy", current_price, review.get("reason", "复审加仓"))
-        engine = ExecutionEngine(session_id)
+        engine = ExecutionEngine(session_id, persona_id=effective_persona_id)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
             new_qty = current_qty + add_qty
-            brain.store.update_position_qty(position["position_id"], new_qty)
+            brain.store.update_position_qty(position_id, new_qty)
             result = {
                 "executed": True,
                 "trade_side": "buy",
@@ -148,19 +265,33 @@ async def _execute_review_action(
             logger.info("[%s] 加仓 %d 股 @ %.2f", symbol, add_qty, fills[0]["avg_price"])
 
     elif action == "REDUCE":
-        # 减仓：卖出 50% 当前持仓
+        # 减仓：卖出 50% 当前持仓（向下取整到100股整数倍）
         reduce_qty = max(int(current_qty * 0.5 // 100) * 100, 100)
         if reduce_qty >= current_qty:
             reduce_qty = current_qty
+
+        logger.info("[%s] REDUCE 计算: current_qty=%d, reduce_qty=%d", symbol, current_qty, reduce_qty)
+
+        # 防止超卖：如果已经卖出过，检查剩余持仓
+        if current_qty <= 0:
+            logger.warning("[%s] 持仓已为0，跳过减仓", symbol)
+            return {**result, "executed": False, "reason": "持仓已为0"}
+
         signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审减仓"), qty=reduce_qty)
-        engine = ExecutionEngine(session_id)
+        logger.info("[%s] REDUCE 信号: target_qty=%s", symbol, signal.get("target_qty"))
+
+        engine = ExecutionEngine(session_id, persona_id=effective_persona_id)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
-            new_qty = current_qty - reduce_qty
-            brain.store.update_position_qty(position["position_id"], new_qty)
+            actual_sold = fills[0]["quantity"]
+            new_qty = current_qty - actual_sold
+            brain.store.update_position_qty(position_id, new_qty)
+            logger.info("[%s] REDUCE 完成: 实际卖出=%d, 新持仓=%d", symbol, actual_sold, new_qty)
+
             if new_qty <= 0:
                 pnl = (current_price - position["entry_price"]) * current_qty
-                brain.store.close_position(position["position_id"], current_price, pnl)
+                brain.store.close_position(position_id, current_price, pnl)
+                logger.info("[%s] 持仓清零，已关闭 position", symbol)
 
                 # Trigger trade attribution
                 try:
@@ -172,20 +303,26 @@ async def _execute_review_action(
             result = {
                 "executed": True,
                 "trade_side": "sell",
-                "trade_qty": reduce_qty,
+                "trade_qty": actual_sold,
                 "trade_price": fills[0]["avg_price"],
                 "new_qty": new_qty,
             }
-            logger.info("[%s] 减仓 %d 股 @ %.2f", symbol, reduce_qty, fills[0]["avg_price"])
+            logger.info("[%s] 减仓 %d 股 @ %.2f", symbol, actual_sold, fills[0]["avg_price"])
 
     elif action == "EXIT":
         # 清仓
+        if current_qty <= 0:
+            logger.warning("[%s] 持仓已为0，跳过清仓", symbol)
+            return {**result, "executed": False, "reason": "持仓已为0"}
+
         signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审清仓"), qty=current_qty)
-        engine = ExecutionEngine(session_id)
+        logger.info("[%s] EXIT 信号: target_qty=%s", symbol, signal.get("target_qty"))
+
+        engine = ExecutionEngine(session_id, persona_id=effective_persona_id)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
             pnl = (current_price - position["entry_price"]) * current_qty
-            brain.store.close_position(position["position_id"], current_price, pnl)
+            brain.store.close_position(position_id, current_price, pnl)
 
             # Trigger trade attribution
             try:

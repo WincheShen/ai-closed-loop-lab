@@ -33,25 +33,70 @@ import time
 import schedule
 
 from src.agents.cio.market_brain import MarketBrain
-from src.agents.cio.trading_persona import get_persona
+from src.agents.cio.trading_persona import get_persona, list_personas
 from src.agents.reviewer.intraday_loop import run_intraday_review
+from src.agents.reviewer.stale_position_check import check_stale_positions
 from src.graph.workflow import run_daily_pipeline, run_weekly_feedback
 from src.infra.logger import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
+# --- 交易日检查 ---
+
+def is_trading_day() -> bool:
+    """检查今天是否是交易日（非周末）。"""
+    weekday = datetime.now().weekday()
+    return weekday < 5  # 0-4 是周一到周五
+
+
+def skip_if_weekend(func):
+    """装饰器：周末跳过执行。"""
+    def wrapper(*args, **kwargs):
+        if not is_trading_day():
+            logger.info("今天是周末，跳过 %s", func.__name__)
+            return None
+        return func(*args, **kwargs)
+    return wrapper
+
+
 # --- 定时任务 ---
 
+@skip_if_weekend
 def job_intraday_review() -> None:
-    """盘中每 30 分钟持仓复审。"""
-    logger.info("⏰ 定时任务触发: 盘中复审")
-    results = asyncio.run(run_intraday_review())
-    actions = [r for r in results if r.get("action") != "HOLD"]
-    if actions:
-        logger.info("复审产生 %d 个交易动作", len(actions))
+    """盘中每 30 分钟持仓复审 — 为所有活跃人格分别执行。"""
+    logger.info("⏰ 定时任务触发: 盘中复审 (多人格模式)")
+
+    personas = list_personas()
+    if not personas:
+        logger.warning("未找到任何人格配置，使用默认人格复审")
+        results = asyncio.run(run_intraday_review())
+        actions = [r for r in results if r.get("action") != "HOLD"]
+        if actions:
+            logger.info("复审产生 %d 个交易动作", len(actions))
+        return
+
+    total_actions = 0
+    for p in personas:
+        persona_id = p["id"]
+        persona_name = p.get("name", persona_id)
+        logger.info("开始复审人格: %s (%s)", persona_name, persona_id)
+        try:
+            results = asyncio.run(run_intraday_review(persona_id=persona_id))
+            actions = [r for r in results if r.get("action") != "HOLD"]
+            if actions:
+                logger.info("人格 %s 复审产生 %d 个交易动作", persona_name, len(actions))
+                total_actions += len(actions)
+            else:
+                logger.info("人格 %s 无交易动作", persona_name)
+        except Exception as e:
+            logger.error("人格 %s 复审失败: %s", persona_name, e)
+
+    if total_actions > 0:
+        logger.info("总计产生 %d 个交易动作", total_actions)
 
 
+@skip_if_weekend
 def job_market_brain_only() -> None:
     """盘中 MarketBrain 单独判定（不触发交易），用于积累 regime 漂移数据。"""
     logger.info("⏰ 定时任务触发: MarketBrain 单独判定")
@@ -70,6 +115,7 @@ def job_market_brain_only() -> None:
         logger.warning("MarketBrain 盘中判定失败: %s", e)
 
 
+@skip_if_weekend
 def job_closing_analysis() -> None:
     """每日 15:05 收盘分析 + 生成发帖内容。"""
     logger.info("⏰ 定时任务触发: 收盘分析")
@@ -80,12 +126,31 @@ def job_closing_analysis() -> None:
         logger.warning("closing_analysis 模块尚未实现，跳过")
 
 
+@skip_if_weekend
 def job_daily_pipeline() -> None:
-    """每日 15:35 收盘后完整管线 (MarketBrain→Explorer→Strategist→RiskGovernor→Executioner→Influencer)。"""
-    logger.info("⏰ 定时任务触发: 每日完整管线 (mock)")
-    asyncio.run(run_daily_pipeline("mock"))
+    """每日 15:35 收盘后完整管线 — 为所有活跃人格分别执行。"""
+    logger.info("⏰ 定时任务触发: 每日完整管线 (多人格模式)")
+
+    personas = list_personas()
+    if not personas:
+        logger.warning("未找到任何人格配置，使用默认人格运行")
+        asyncio.run(run_daily_pipeline("mock"))
+        return
+
+    logger.info("为 %d 个人格执行每日交易管线", len(personas))
+
+    for p in personas:
+        persona_id = p["id"]
+        persona_name = p.get("name", persona_id)
+        logger.info("开始执行人格: %s (%s)", persona_name, persona_id)
+        try:
+            asyncio.run(run_daily_pipeline("mock", persona_id=persona_id))
+            logger.info("人格 %s 执行完成", persona_name)
+        except Exception as e:
+            logger.error("人格 %s 执行失败: %s", persona_name, e)
 
 
+@skip_if_weekend
 def job_health_check() -> None:
     """每日 16:00 健康检查 — 确认各节点今日是否产出数据。"""
     from src.central_brain import get_central_brain
@@ -134,11 +199,29 @@ def job_health_check() -> None:
 
 
 def job_weekly_feedback() -> None:
-    """每周日 20:00 复盘。"""
-    logger.info("⏰ 定时任务触发: 周复盘")
-    asyncio.run(run_weekly_feedback())
+    """每周日 20:00 复盘 — 为所有人格分别执行。"""
+    logger.info("⏰ 定时任务触发: 周复盘 (多人格模式)")
+
+    personas = list_personas()
+    if not personas:
+        logger.warning("未找到任何人格配置，使用默认人格复盘")
+        asyncio.run(run_weekly_feedback())
+        return
+
+    logger.info("为 %d 个人格执行周复盘", len(personas))
+
+    for p in personas:
+        persona_id = p["id"]
+        persona_name = p.get("name", persona_id)
+        logger.info("开始复盘人格: %s (%s)", persona_name, persona_id)
+        try:
+            asyncio.run(run_weekly_feedback(persona_id=persona_id))
+            logger.info("人格 %s 复盘完成", persona_name)
+        except Exception as e:
+            logger.error("人格 %s 复盘失败: %s", persona_name, e)
 
 
+@skip_if_weekend
 def job_watchlist_check() -> None:
     """每日 15:40 自选股池检查 — 检查入场条件 + 剔除过期标的。"""
     logger.info("⏰ 定时任务触发: 自选股池检查")
@@ -187,6 +270,36 @@ def job_backfill_attributions() -> None:
         logger.warning("归因补跑任务异常: %s", e)
 
 
+@skip_if_weekend
+def job_stale_position_check() -> None:
+    """每日 15:50 长期持仓预警 — 检查超期持仓并触发强制复审。"""
+    logger.info("⏰ 定时任务触发: 长期持仓预警")
+
+    personas = list_personas()
+    if not personas:
+        stale = check_stale_positions()
+        if stale:
+            logger.warning("发现 %d 只超期持仓，建议关注", len(stale))
+        return
+
+    total_stale = 0
+    for p in personas:
+        persona_id = p["id"]
+        persona_name = p.get("name", persona_id)
+        try:
+            stale = check_stale_positions(persona_id=persona_id)
+            if stale:
+                logger.warning(
+                    "人格 %s 有 %d 只超期持仓", persona_name, len(stale),
+                )
+                total_stale += len(stale)
+        except Exception as e:
+            logger.error("人格 %s 超期检查失败: %s", persona_name, e)
+
+    if total_stale > 0:
+        logger.warning("总计 %d 只超期持仓需要关注", total_stale)
+
+
 # --- 调度配置 ---
 
 def setup_schedule() -> None:
@@ -211,6 +324,7 @@ def setup_schedule() -> None:
     schedule.every().day.at("15:15").do(job_backfill_attributions)
     schedule.every().day.at("15:35").do(job_daily_pipeline)
     schedule.every().day.at("15:40").do(job_watchlist_check)
+    schedule.every().day.at("15:50").do(job_stale_position_check)
     schedule.every().day.at("16:00").do(job_health_check)
 
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)

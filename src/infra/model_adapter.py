@@ -22,6 +22,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 from src.infra.config import cfg
+from src.infra.llm_observability import PipelineLLMCallback
 from src.infra.logger import get_logger
 
 logger = get_logger(__name__)
@@ -125,30 +126,43 @@ def get_api_stats() -> Dict[str, dict]:
     return _latency_tracker.stats()
 
 
-def get_llm(model_name: str | None = None, temperature: float = 0.3) -> Any:
+def get_llm(
+    model_name: str | None = None,
+    temperature: float = 0.3,
+    stage: str | None = None,
+) -> Any:
     provider = cfg().get("default_llm_provider", "openai")
     model = model_name or cfg().get("quick_think_model", "gpt-4o-mini")
-    return _create_llm(provider, model, temperature)
+    return _create_llm(provider, model, temperature, stage=stage)
 
 
-def get_deep_think_llm(model_name: str | None = None, temperature: float = 0.2) -> Any:
+def get_deep_think_llm(
+    model_name: str | None = None,
+    temperature: float = 0.2,
+    stage: str | None = None,
+) -> Any:
     provider = cfg().get("default_llm_provider", "openai")
     model = model_name or cfg().get("deep_think_model", "gpt-4o")
-    return _create_llm(provider, model, temperature)
+    return _create_llm(provider, model, temperature, stage=stage)
 
 
-def _create_llm(provider: str, model: str, temperature: float) -> Any:
+def _create_llm(
+    provider: str, model: str, temperature: float, stage: str | None = None
+) -> Any:
     provider_lower = provider.lower()
+    callbacks = [PipelineLLMCallback(provider=provider_lower, stage=stage)]
 
     if provider_lower == "openai":
         api_key = cfg().get("openai_api_key")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured")
-        kwargs = dict(model=model, api_key=api_key)
+        kwargs = dict(model=model, api_key=api_key, callbacks=callbacks)
         base_url = cfg().get("openai_base_url")
         if base_url:
             kwargs["base_url"] = base_url
-        if "gpt-5" not in model:
+        # 某些模型不支持自定义 temperature（如 gpt-5, gpt-chat-latest, o1, o3）
+        _no_temp_models = ("gpt-5", "gpt-chat-latest", "o1", "o3")
+        if not any(m in model for m in _no_temp_models):
             kwargs["temperature"] = temperature
         llm = ChatOpenAI(**kwargs)
 
@@ -160,6 +174,7 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
             model=model,
             api_key=api_key,
             temperature=temperature,
+            callbacks=callbacks,
         )
 
     elif provider_lower == "azure":
@@ -174,6 +189,7 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
             api_key=api_key,
             api_version=api_version,
             deployment_name=model,
+            callbacks=callbacks,
         )
 
         if "gpt-5" not in model:
@@ -193,6 +209,7 @@ def _create_llm(provider: str, model: str, temperature: float) -> Any:
                 model=model,
                 google_api_key=api_key,
                 temperature=temperature,
+                callbacks=callbacks,
             )
         except ImportError:
             raise ImportError("Please install langchain-google-genai for Google provider")
