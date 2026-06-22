@@ -39,6 +39,11 @@ class StockQuote:
     market_cap_yi: Optional[float] = None  # 总市值（亿元）
     industry: str = ""
     main_fund_net_inflow: float = 0.0  # 主力净流入（元）
+    # 基本面数据（由 FundamentalClient 填充，价值投资人格使用）
+    roe: Optional[float] = None              # ROE %
+    debt_to_equity: Optional[float] = None   # 资产负债率
+    dividend_yield: Optional[float] = None   # 股息率 %
+    fcf_yield: Optional[float] = None        # 自由现金流收益率 %
 
     @property
     def is_st(self) -> bool:

@@ -13,29 +13,43 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from src.agents.cio.trading_persona import load_persona_by_id
 from src.central_brain import get_central_brain
 from src.graph.state import StockCandidate, TradingState
 from src.infra.logger import get_agent_logger
 from src.stock_analyzer.data_source import AkshareClient, HotSectorDetector
-from src.stock_analyzer.rules import RuleEngine, load_rules_from_yaml
+from src.stock_analyzer.rules import RuleEngine, load_rules_from_yaml, Rule
+from src.stock_analyzer.rules.rule_engine import get_registered
 
 logger = get_agent_logger("explorer", "init")
 
 _RULES_YAML = Path("config/rules.yaml")
 _KLINE_ENRICH_LIMIT = 10
 
+# persona fundamental_filters indicator → builtin rule_id 映射
+_INDICATOR_TO_RULE: dict[str, tuple[str, str]] = {
+    "roe": ("high_roe", "min_roe"),
+    "debt_to_equity": ("low_debt", "max_de"),
+    "dividend_yield": ("high_dividend", "min_yield"),
+    "free_cash_flow_yield": ("high_fcf_yield", "min_fcf"),
+    "pe": ("value_pe", "pe_max"),
+}
+
 
 class ExplorerScanner:
-    """探索者扫描器 — AKShare 行情 + 规则引擎 + 热点检测。"""
+    """探索者扫描器 — AKShare 行情 + 规则引擎 + 热点检测（多人格支持）。"""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, persona_id: str | None = None) -> None:
         self.session_id = session_id
+        self.persona_id = persona_id
         self.logger = get_agent_logger("explorer", session_id)
         self.brain = get_central_brain()
         self.akshare = AkshareClient(allow_mock_fallback=True)
         self.hot_detector = HotSectorDetector()
         self._snapshot = None
         self._hot_names: list[str] = []
+        self._persona = load_persona_by_id(persona_id) if persona_id else None
+        self._kline_days = self._get_kline_lookback_days()
 
     def scan_market(self, date_str: str | None = None, snapshot: MarketSnapshot | None = None, hot_sectors: list[str] | None = None) -> list[StockCandidate]:
         """全市场扫描 → 热点检测 → 规则引擎 → 候选票列表。
@@ -72,24 +86,47 @@ class ExplorerScanner:
             self._hot_names = [h.sector.name for h in hot_results]
             self.logger.info("热点板块: %s", self._hot_names)
 
-        # 3. 规则引擎筛选
-        rules = load_rules_from_yaml(_RULES_YAML)
-        for rule in rules:
-            if rule.id == "in_hot_sector":
-                rule.params = {**rule.params, "hot_sectors": self._hot_names}
+        # 3. 基本面数据填充（仅价值投资人格需要）
+        if self._needs_fundamental_data():
+            try:
+                from src.stock_analyzer.data_source import FundamentalClient
+                fc = FundamentalClient()
+                fc.enrich_quotes(self._snapshot.stocks)
+                self.logger.info("基本面数据已填充 (persona=%s)", self.persona_id)
+            except Exception:
+                self.logger.warning("基本面数据填充失败 (不影响主流程)", exc_info=True)
+
+            # 价值投资人格：合并 ValueStockPool 中不在快照内的标的
+            try:
+                from src.agents.explorer.value_pool import ValueStockPool
+                vp = ValueStockPool()
+                pool_stocks = vp.get_pool()
+                existing_symbols = {s.symbol for s in self._snapshot.stocks}
+                added = 0
+                for ps in pool_stocks:
+                    if ps.symbol not in existing_symbols:
+                        self._snapshot.stocks.append(ps)
+                        added += 1
+                if added:
+                    self.logger.info("ValuePool 补充 %d 只标的到快照", added)
+            except Exception:
+                self.logger.warning("ValuePool 合并失败 (不影响主流程)", exc_info=True)
+
+        # 4. 规则引擎筛选（支持人格级规则覆盖）
+        rules = self._build_rules_for_persona()
         engine = RuleEngine(rules)
         results = engine.filter_and_rank(
             self._snapshot.stocks, min_score=2.0, top_k=30,
         )
-        self.logger.info("规则引擎筛选: %d 只通过", len(results))
+        self.logger.info("规则引擎筛选: %d 只通过 (persona=%s)", len(results), self.persona_id or "default")
 
-        # 4. 转化为 StockCandidate（前 N 只附带 K 线摘要）
+        # 5. 转化为 StockCandidate（前 N 只附带 K 线摘要）
         max_score = results[0].score if results else 1.0
         candidates: list[StockCandidate] = []
         for idx, r in enumerate(results):
             stock = r.stock
             kline = (
-                self._build_kline_summary(stock.symbol, stock.price)
+                self._build_kline_summary(stock.symbol, stock.price, days=self._kline_days)
                 if idx < _KLINE_ENRICH_LIMIT
                 else {"current_price": stock.price, "trend": "not_fetched"}
             )
@@ -111,6 +148,10 @@ class ExplorerScanner:
                     "pe_ttm": stock.pe_ttm,
                     "pb": stock.pb,
                     "market_cap_yi": stock.market_cap_yi,
+                    "roe": stock.roe,
+                    "debt_to_equity": stock.debt_to_equity,
+                    "dividend_yield": stock.dividend_yield,
+                    "fcf_yield": stock.fcf_yield,
                 },
                 "fund_flow": {
                     "main_net_inflow": stock.main_fund_net_inflow,
@@ -148,10 +189,90 @@ class ExplorerScanner:
         self.logger.info("候选票 %d 只（规则引擎已筛选）", len(candidates))
         return candidates
 
-    def _build_kline_summary(self, symbol: str, current_price: float) -> dict:
-        """拉取近 20 日 K 线，生成数值摘要供 Strategist LLM 分析。"""
+    def _get_kline_lookback_days(self) -> int:
+        """根据人格配置返回 K 线回看天数。"""
+        if self._persona and self._persona.stock_selection_rules:
+            return self._persona.stock_selection_rules.get("kline_lookback_days", 20)
+        return 20
+
+    def _build_rules_for_persona(self) -> list[Rule]:
+        """根据人格配置构建选股规则列表。
+
+        对价值投资人格：
+        - 禁用热点板块、量价类规则
+        - 从 persona.fundamental_filters 动态生成基本面规则
+        """
+        rules = load_rules_from_yaml(_RULES_YAML)
+
+        # 更新热点板块参数
+        for rule in rules:
+            if rule.id == "in_hot_sector":
+                rule.params = {**rule.params, "hot_sectors": self._hot_names}
+
+        if not self._persona or not self._persona.stock_selection_rules:
+            return rules
+
+        stock_rules = self._persona.stock_selection_rules
+
+        # 如果人格不关注热点，禁用 in_hot_sector 规则
+        follow_hot = stock_rules.get("follow_hot_sectors", True)
+        if not follow_hot:
+            for rule in rules:
+                if rule.id == "in_hot_sector":
+                    rule.enabled = False
+            # 价值投资人格：同时降低量价类规则权重
+            for rule in rules:
+                if rule.id in ("volume_breakout", "strong_turnover", "main_fund_inflow"):
+                    rule.weight = 0.3
+            self.logger.info("人格 %s 禁用热点+降低量价权重", self.persona_id)
+
+        # 从 persona.fundamental_filters 动态生成基本面规则
+        fundamental_filters = stock_rules.get("fundamental_filters", [])
+        for filt in fundamental_filters:
+            indicator = filt.get("indicator", "")
+            mapping = _INDICATOR_TO_RULE.get(indicator)
+            if not mapping:
+                continue
+            rule_id, param_key = mapping
+            func = get_registered(rule_id)
+            if not func:
+                continue
+
+            weight = float(filt.get("weight", 1.0))
+            value = filt.get("value")
+            if value is None:
+                continue
+
+            params = {param_key: float(value)}
+            rules.append(Rule(
+                id=rule_id,
+                name=f"persona_{indicator}",
+                func=func,
+                enabled=True,
+                weight=weight,
+                params=params,
+            ))
+            self.logger.debug(
+                "人格规则: %s %s=%s weight=%.1f", rule_id, param_key, value, weight,
+            )
+
+        return rules
+
+    def _needs_fundamental_data(self) -> bool:
+        """判断当前人格是否需要基本面数据。"""
+        if not self._persona or not self._persona.stock_selection_rules:
+            return False
+        filters = self._persona.stock_selection_rules.get("fundamental_filters", [])
+        has_fundamental = any(
+            f.get("indicator") in ("roe", "debt_to_equity", "dividend_yield", "free_cash_flow_yield")
+            for f in filters
+        )
+        return has_fundamental
+
+    def _build_kline_summary(self, symbol: str, current_price: float, days: int = 20) -> dict:
+        """拉取近 N 日 K 线，生成数值摘要供 Strategist LLM 分析。"""
         try:
-            bars = self.akshare.fetch_kline(symbol, days=20)
+            bars = self.akshare.fetch_kline(symbol, days=days)
             if not bars:
                 return {"current_price": current_price, "trend": "no_data"}
 
@@ -196,7 +317,8 @@ def run_discovery_node(state: TradingState) -> dict[str, Any]:
     from datetime import date
 
     session_id = state["session_id"]
-    scanner = ExplorerScanner(session_id)
+    persona_id = state.get("persona_id")
+    scanner = ExplorerScanner(session_id, persona_id=persona_id)
 
     # 尝试从 state 中复用 MarketBrain 的快照
     market_snapshot_dict = state.get("market_snapshot")
@@ -245,13 +367,13 @@ def run_discovery_node(state: TradingState) -> dict[str, Any]:
     # 热点板块已经在 scan_market 中从 state 获取
     hot_sectors = scanner.fetch_hot_sectors()
 
-    # 将高分候选纳入自选股池 (不阻塞主流程)
+    # 将高分候选纳入自选股池 (不阻塞主流程，但记录异常堆栈)
     try:
         from src.agents.explorer.watchlist import run_watchlist_ingest
         ingested = run_watchlist_ingest(candidates)
         logger.info("Watchlist 纳入 %d 只新候选", ingested)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Watchlist ingest 失败 (不影响主流程): %s", e)
+    except Exception:
+        logger.exception("Watchlist ingest 失败 (不影响主流程)")
 
     return {
         "target_stocks": candidates,

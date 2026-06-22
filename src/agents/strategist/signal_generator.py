@@ -37,6 +37,11 @@ _STRATEGY_NAME_TO_ID = {
     "高股息": "defensive_bluechip",
     "均值回归": "mean_reversion",
     "超跌反弹": "mean_reversion",
+    "价值投资": "value_investing",
+    "优质低估": "value_investing",
+    "护城河": "moat_quality",
+    "高ROE": "value_investing",
+    "分红稳定": "value_investing",
 }
 
 
@@ -71,6 +76,7 @@ STRATEGIST_SYSTEM_PROMPT = """\
 ```json
 {
     "action": "BUY 或 PASS",
+    "entry_condition": "immediate(当前价可直接买入) 或 breakout(需等待突破某价位) 或 pullback(需等待回调到某价位)",
     "entry_price": 建议入场价,
     "target_price": 目标价,
     "stop_loss": 止损价,
@@ -82,6 +88,14 @@ STRATEGIST_SYSTEM_PROMPT = """\
     "bear_case": "最大的风险点"
 }
 ```
+
+## entry_condition 说明
+- **immediate**: 当前价格已在合理入场区间，可以直接买入
+- **breakout**: 需要等股价突破 entry_price 后再买入（如突破前高、突破压力位）
+- **pullback**: 需要等股价回调到 entry_price 附近再买入（如回踩支撑位）
+- 如果 entry_price 高于当前价格且需要等突破，必须选 breakout
+- 如果 entry_price 低于当前价格且需要等回调，必须选 pullback
+- 如果当前价格就是合理入场价，选 immediate
 """
 
 STRATEGIST_USER_TEMPLATE = """\
@@ -135,6 +149,98 @@ STRATEGIST_USER_TEMPLATE = """\
 """
 
 
+# ---------------------------------------------------------------------------
+# 价值投资专用 Prompt（段永平 / 巴菲特人格）
+# ---------------------------------------------------------------------------
+
+VALUE_INVESTING_SYSTEM_PROMPT = """\
+你是一位价值投资决策者。你必须严格遵守"投资人格"约束，
+以企业内在价值为核心标准，而非短期技术走势。宁可错过不要做错。
+
+## 决策原则
+1. **企业质量优先**：ROE > 15% 且稳定、负债率低、分红好的才值得关注
+2. **估值安全边际**：PE 必须在合理区间内，PB 不过高，相对历史估值有折价
+3. **护城河与持续性**：品牌溢价、网络效应、转换成本、规模经济 — 至少满足一项
+4. **管理层质量**：诚信、回购、增持 = 加分；减持、高管离职 = 减分
+5. **不追热点**：不因短期涨跌或热门板块做决策，只关注企业长期价值
+6. 弱势市场是好机会，优质资产被错杀时应考虑买入
+
+## 决策框架
+- **BUY**: 企业质量优秀 + 估值合理/低估 + 有安全边际 + 符合 persona 偏好
+- **PASS**: 基本面不达标 / 估值偏高 / 商业模式看不懂 / 管理层不可信
+
+## 输出格式（严格 JSON）
+```json
+{
+    "action": "BUY 或 PASS",
+    "entry_condition": "immediate(估值已进入安全区) 或 pullback(等待回调到更安全价位)",
+    "entry_price": 建议入场价,
+    "target_price": 目标价(基于内在价值估算),
+    "stop_loss": 止损价(基于安全边际下限),
+    "position_pct": 建议仓位比例(价值投资可重仓,0.05-0.30),
+    "strategy": "策略名称(如 价值投资/优质低估/护城河/高ROE/分红稳定)",
+    "confidence": 0.0到1.0,
+    "rationale": "完整的投资逻辑(2-3句话,必须引用基本面指标)",
+    "bull_case": "最核心的投资价值",
+    "bear_case": "最大的风险点"
+}
+```
+
+## entry_condition 说明
+- **immediate**: 当前估值已有足够安全边际，可以建仓
+- **pullback**: 企业质量好但估值需要更大折价，等回调到目标价再买
+- 价值投资不用 breakout（不追突破）
+"""
+
+VALUE_INVESTING_USER_TEMPLATE = """\
+{persona_block}
+
+## 今日市场环境 (来自 MarketBrain)
+- regime: {regime}  | posture: {posture}  | risk_appetite: {risk_appetite}
+- 总仓位上限: {max_total_pos:.0%}
+- 摘要: {regime_summary}
+- 注意: 价值投资不受短期 regime 过多影响，弱市反而可能是建仓好时机
+
+## 候选股票
+- 代码: {symbol}
+- 名称: {name}
+- 所属行业: {sector}
+
+## 入选理由
+{hot_reason}
+
+## 基本面数据（核心决策依据）
+- PE(TTM): {pe_ttm}
+- PB: {pb}
+- 市值: {market_cap}亿
+- **ROE**: {roe}
+- **资产负债率**: {debt_to_equity}
+- **股息率**: {dividend_yield}
+- **自由现金流收益率**: {fcf_yield}
+
+## 估值参考
+- 当前价格: {price}
+- 今日涨跌: {change_pct}%
+- 近60日涨幅: {recent_60d}%
+- 价格 vs MA60: {price_vs_ma60}
+- 近60日高点: {high_60d} | 低点: {low_60d}
+
+## 技术辅助（仅做参考，不作为主要决策依据）
+- MA20: {ma20} | MA60: {ma60}
+- 趋势: {trend}
+- 量比: {vol_ratio}
+
+## 决策提示
+- 重点关注：ROE是否稳定在15%以上、负债率是否健康、现金流是否充裕
+- 估值：PE 是否在历史合理区间的下半部分
+- 分红：股息率是否有吸引力
+- 不要因为短期下跌就恐慌 PASS，反而可能是机会
+- 不要因为热点或涨势就盲目 BUY，必须基于企业价值
+
+请基于以上基本面数据和投资人格给出决策。
+"""
+
+
 class StrategistEngine:
 
     def __init__(
@@ -155,10 +261,15 @@ class StrategistEngine:
     def _persona_block(self) -> str:
         return self.persona.prompt_summary()
 
+    def _is_value_persona(self) -> bool:
+        """判断当前人格是否为价值投资风格。"""
+        pid = self.persona.id.lower()
+        return any(k in pid for k in ("duan", "buffett", "value"))
+
     def _lessons_block(self) -> str:
         regime = self.market_regime.get("regime")
         try:
-            lessons = self.brain.store.get_recent_lessons(regime=regime, limit=3)
+            lessons = self.brain.store.get_recent_lessons(regime=regime, limit=5)
         except Exception:
             lessons = []
 
@@ -169,8 +280,15 @@ class StrategistEngine:
         for l in lessons:
             txt = l.get("lesson_text") or l.get("lesson") or ""
             symbol = l.get("symbol", "")
+            strategy = l.get("strategy_id", "")
+            outcome = l.get("outcome", "")
             if txt:
-                lines.append(f"- {symbol}: {txt}")
+                tag = f"({'盈' if outcome == 'win' else '亏' if outcome == 'loss' else '平'})"
+                lines.append(f"- [{strategy}] {symbol}{tag}: {txt}")
+                try:
+                    self.brain.store.increment_lesson_cited(l["lesson_id"])
+                except Exception:
+                    pass
 
         if not lines:
             return ""
@@ -212,16 +330,12 @@ class StrategistEngine:
             "regime_summary": regime.get("summary", "—"),
         }
 
-    def analyze_candidate(self, candidate: StockCandidate) -> TradeSignal | None:
-        symbol = candidate["symbol"]
-        name = candidate["name"]
-        kline = candidate.get("kline_summary", {})
-        fund = candidate.get("fund_flow", {})
-
-        user_msg = STRATEGIST_USER_TEMPLATE.format(
+    def _build_short_term_msg(self, candidate: StockCandidate, kline: dict, fund: dict) -> str:
+        """构建短线人格的 user message（技术面+资金面为主）。"""
+        return STRATEGIST_USER_TEMPLATE.format(
             persona_block=self._persona_block(),
-            symbol=symbol,
-            name=name,
+            symbol=candidate["symbol"],
+            name=candidate["name"],
             sector=candidate.get("sector", "未知"),
             hot_reason="\n".join(
                 f"- {r}" for r in candidate.get("hot_reason", [])
@@ -241,12 +355,71 @@ class StrategistEngine:
             low_10d=kline.get("recent_low_10d", "N/A"),
             vol_ratio=kline.get("vol_ratio", "N/A"),
             trend=kline.get("trend", "N/A"),
-            inflow_wan=round(fund.get("main_net_inflow", 0) / 1e4, 1),
-            turnover_yi=round(fund.get("turnover", 0) / 1e8, 2),
-            turnover_rate=fund.get("turnover_rate", 0),
+            inflow_wan=round((fund or {}).get("main_net_inflow", 0) / 1e4, 1),
+            turnover_yi=round((fund or {}).get("turnover", 0) / 1e8, 2),
+            turnover_rate=(fund or {}).get("turnover_rate", 0),
             hot_sectors=", ".join(self.hot_sectors) if self.hot_sectors else "无",
             **self._regime_kwargs(),
         )
+
+    def _build_value_investing_msg(self, candidate: StockCandidate, kline: dict, fund: dict) -> str:
+        """构建价值投资人格的 user message（基本面为主 + 估值参考）。"""
+        # 从 kline_summary 中提取基本面字段
+        roe = kline.get("roe")
+        debt_to_equity = kline.get("debt_to_equity")
+        dividend_yield = kline.get("dividend_yield")
+        fcf_yield = kline.get("fcf_yield")
+
+        def fmt(v, suffix: str = "") -> str:
+            return f"{v}{suffix}" if v is not None else "N/A"
+
+        regime_kw = self._regime_kwargs()
+        return VALUE_INVESTING_USER_TEMPLATE.format(
+            persona_block=self._persona_block(),
+            symbol=candidate["symbol"],
+            name=candidate["name"],
+            sector=candidate.get("sector", "未知"),
+            hot_reason="\n".join(
+                f"- {r}" for r in candidate.get("hot_reason", [])
+            ),
+            price=kline.get("current_price", 0),
+            change_pct=kline.get("change_pct", 0),
+            pe_ttm=kline.get("pe_ttm") or "N/A",
+            pb=kline.get("pb") or "N/A",
+            market_cap=kline.get("market_cap_yi") or "N/A",
+            roe=fmt(roe, "%"),
+            debt_to_equity=fmt(
+                round(debt_to_equity * 100, 1) if debt_to_equity is not None else None, "%"
+            ),
+            dividend_yield=fmt(dividend_yield, "%"),
+            fcf_yield=fmt(fcf_yield, "%"),
+            recent_60d=kline.get("recent_5d_change_pct", "N/A"),
+            price_vs_ma60=kline.get("price_vs_ma20", "N/A"),
+            high_60d=kline.get("recent_high_10d", "N/A"),
+            low_60d=kline.get("recent_low_10d", "N/A"),
+            ma20=kline.get("ma20", "N/A"),
+            ma60=kline.get("ma20", "N/A"),
+            trend=kline.get("trend", "N/A"),
+            vol_ratio=kline.get("vol_ratio", "N/A"),
+            regime=regime_kw["regime"],
+            posture=regime_kw["posture"],
+            risk_appetite=regime_kw["risk_appetite"],
+            max_total_pos=regime_kw["max_total_pos"],
+            regime_summary=regime_kw["regime_summary"],
+        )
+
+    def analyze_candidate(self, candidate: StockCandidate) -> TradeSignal | None:
+        symbol = candidate["symbol"]
+        name = candidate["name"]
+        kline = candidate.get("kline_summary", {})
+        fund = candidate.get("fund_flow", {})
+
+        if self._is_value_persona():
+            user_msg = self._build_value_investing_msg(candidate, kline, fund)
+            system_prompt = VALUE_INVESTING_SYSTEM_PROMPT
+        else:
+            user_msg = self._build_short_term_msg(candidate, kline, fund)
+            system_prompt = STRATEGIST_SYSTEM_PROMPT
 
         user_msg += self._lessons_block()
         user_msg += self._evolution_block()
@@ -254,7 +427,7 @@ class StrategistEngine:
         try:
             llm = get_llm()
             messages = [
-                {"role": "system", "content": STRATEGIST_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ]
             response = llm.invoke(messages)
@@ -273,7 +446,20 @@ class StrategistEngine:
         entry_price = result.get("entry_price") or current_price
         if entry_price <= 0:
             entry_price = current_price
-        stop_loss_pct = self.config.get("default_stop_loss_pct", 0.05)
+        stop_loss_pct = self.persona.default_stop_loss_pct if hasattr(
+            self.persona, 'default_stop_loss_pct'
+        ) else self.config.get("default_stop_loss_pct", 0.05)
+
+        # 判断入场条件类型
+        llm_condition = result.get("entry_condition", "").lower()
+        if llm_condition in ("breakout", "pullback"):
+            entry_condition = llm_condition
+        elif current_price > 0 and entry_price > current_price * 1.005:
+            entry_condition = "breakout"
+        elif current_price > 0 and entry_price < current_price * 0.995:
+            entry_condition = "pullback"
+        else:
+            entry_condition = "immediate"
 
         signal: TradeSignal = {
             "signal_id": f"SIG-{uuid.uuid4().hex[:8].upper()}",
@@ -288,12 +474,18 @@ class StrategistEngine:
             ),
             "position_pct": min(
                 result.get("position_pct", 0.08),
-                self.config.get("max_position_pct", 0.10),
+                self.persona.max_single_position_pct if hasattr(
+                    self.persona, 'max_single_position_pct'
+                ) else self.config.get("max_position_pct", 0.10),
             ),
             "strategy": result.get("strategy", "LLM综合分析"),
             "rationale": result.get("rationale", ""),
             "timestamp": datetime.now().isoformat(),
-            "expiry": (datetime.now() + timedelta(days=5)).isoformat(),
+            "expiry": (datetime.now() + timedelta(
+                days=self.persona.preferred_holding_days[-1] if hasattr(
+                    self.persona, 'preferred_holding_days'
+                ) and self.persona.preferred_holding_days else 5
+            )).isoformat(),
         }
 
         signal["name"] = name
@@ -304,12 +496,21 @@ class StrategistEngine:
         signal["strategy_id"] = _infer_strategy_id(signal["strategy"])
         signal["market_regime"] = self.market_regime.get("regime", "")
         signal["persona_version"] = self.persona.persona_version
+        signal["persona_id"] = self.persona.id  # P1: 人格标识
+        signal["entry_condition"] = entry_condition
+        signal["current_price"] = round(current_price, 2)
 
+        condition_label = {
+            "immediate": "立即",
+            "breakout": f"突破{entry_price:.2f}",
+            "pullback": f"回调{entry_price:.2f}",
+        }.get(entry_condition, entry_condition)
         self.logger.info(
-            "生成信号 %s | %s %s | 策略=%s (id=%s) | regime=%s | 入场=%.2f | 止损=%.2f | 目标=%.2f | 置信=%.0f%%",
+            "生成信号 %s | %s %s | 策略=%s (id=%s) | regime=%s | 条件=%s | 入场=%.2f | 当前=%.2f | 止损=%.2f | 目标=%.2f | 置信=%.0f%%",
             signal["signal_id"], symbol, name, signal["strategy"],
             signal["strategy_id"], signal["market_regime"],
-            signal["entry_price"], signal["stop_loss"], signal["target_price"],
+            condition_label,
+            signal["entry_price"], current_price, signal["stop_loss"], signal["target_price"],
             result.get("confidence", 0) * 100,
         )
         return signal
@@ -388,7 +589,8 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
     session_id = state["session_id"]
     hot_sectors = state.get("hot_sectors", [])
     market_regime = state.get("market_regime") or {}
-    persona = get_persona()
+    persona_id = state.get("persona_id")
+    persona = get_persona(persona_id=persona_id)
     engine = StrategistEngine(
         session_id,
         hot_sectors=hot_sectors,
@@ -396,7 +598,12 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
         market_regime=market_regime,
     )
 
-    candidates = state.get("target_stocks", [])
+    candidates = list(state.get("target_stocks", []))
+
+    # --- 合并自选股池中已触发的标的 ---
+    triggered_candidates = _merge_triggered_watchlist(engine, candidates)
+    candidates = triggered_candidates + candidates
+
     if not candidates:
         return {
             "trade_signals": [],
@@ -410,12 +617,78 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
     for sig in signals:
         get_central_brain().bus.emit_trade_signal(sig)
 
+    triggered_count = len(triggered_candidates)
     return {
         "trade_signals": signals,
         "risk_assessment": risk,
         "logs": state.get("logs", []) + [
             f"[Strategist] regime={market_regime.get('regime', 'n/a')} 分析 "
-            f"{min(len(candidates), MAX_LLM_ANALYSIS)} 只, "
+            f"{min(len(candidates), MAX_LLM_ANALYSIS)} 只"
+            f"(含{triggered_count}只自选触发), "
             f"生成 {len(signals)} 条买入信号, 风控={risk['risk_level']}"
         ],
     }
+
+
+def _merge_triggered_watchlist(
+    engine: StrategistEngine,
+    existing: list[StockCandidate],
+) -> list[StockCandidate]:
+    """读取自选股池中 status=triggered 的标的，转换为 StockCandidate 并排在最前面。
+
+    优先级高于 Scanner 新选出的候选，确保 LLM 分析额度优先给已触发的自选股。
+    已在现有候选列表中的 symbol 会跳过去重。
+    """
+    try:
+        brain = get_central_brain()
+        triggered = brain.store.get_watchlist(status="triggered")
+    except Exception:
+        engine.logger.warning("读取 triggered watchlist 失败", exc_info=True)
+        return []
+
+    if not triggered:
+        return []
+
+    existing_symbols = {c["symbol"] for c in existing}
+    result: list[StockCandidate] = []
+
+    for item in triggered:
+        symbol = item.get("symbol", "")
+        if not symbol or symbol in existing_symbols:
+            continue
+
+        candidate: StockCandidate = {
+            "symbol": symbol,
+            "name": item.get("name", ""),
+            "qlib_score": 5.0,  # 高分以确保排在前面
+            "sector": item.get("sector", ""),
+            "hot_reason": [
+                f"自选股触发: {item.get('entry_condition', '')}",
+                item.get("thesis", ""),
+            ],
+            "kline_summary": {
+                "current_price": item.get("last_price") or 0,
+            },
+            "fund_flow": None,
+            "dragon_tiger": None,
+        }
+        result.append(candidate)
+        engine.logger.info(
+            "[WATCHLIST→STRATEGIST] 自选股触发纳入分析: %s %s | 条件=%s",
+            symbol, item.get("name", ""), item.get("entry_condition", ""),
+        )
+
+        # 标记为已消费，避免下次重复处理
+        try:
+            brain.store.remove_from_watchlist(
+                item["watch_id"], reason="triggered_consumed_by_strategist",
+            )
+        except Exception:
+            pass
+
+    if result:
+        engine.logger.info(
+            "[WATCHLIST] 共 %d 只自选股触发，优先纳入 Strategist 分析", len(result),
+        )
+
+    return result

@@ -91,6 +91,47 @@ def in_hot_sector(stock: StockQuote, params: dict) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# 基本面类（价值投资人格使用）
+# ---------------------------------------------------------------------------
+
+@register("high_roe")
+def high_roe(stock: StockQuote, params: dict) -> bool:
+    """ROE ≥ 阈值（%）。"""
+    min_roe = float(params.get("min_roe", 15))
+    return stock.roe is not None and stock.roe >= min_roe
+
+
+@register("low_debt")
+def low_debt(stock: StockQuote, params: dict) -> bool:
+    """资产负债率 ≤ 阈值（0-1 比例）。"""
+    max_de = float(params.get("max_de", 0.5))
+    return stock.debt_to_equity is not None and stock.debt_to_equity <= max_de
+
+
+@register("high_dividend")
+def high_dividend(stock: StockQuote, params: dict) -> bool:
+    """股息率 ≥ 阈值（%）。"""
+    min_yield = float(params.get("min_yield", 2.0))
+    return stock.dividend_yield is not None and stock.dividend_yield >= min_yield
+
+
+@register("high_fcf_yield")
+def high_fcf_yield(stock: StockQuote, params: dict) -> bool:
+    """自由现金流收益率 ≥ 阈值（%）。"""
+    min_fcf = float(params.get("min_fcf", 4.0))
+    return stock.fcf_yield is not None and stock.fcf_yield >= min_fcf
+
+
+@register("value_pe")
+def value_pe(stock: StockQuote, params: dict) -> bool:
+    """价值投资 PE 筛选：PE 在低估区间。"""
+    pe_max = float(params.get("pe_max", 30))
+    if stock.pe_ttm is None:
+        return False
+    return 0 < stock.pe_ttm <= pe_max
+
+
 # 便于外部一次性导入
 BUILTIN_RULES = [
     "volume_breakout",
@@ -100,6 +141,11 @@ BUILTIN_RULES = [
     "not_st",
     "market_cap_range",
     "in_hot_sector",
+    "high_roe",
+    "low_debt",
+    "high_dividend",
+    "high_fcf_yield",
+    "value_pe",
 ]
 
 
