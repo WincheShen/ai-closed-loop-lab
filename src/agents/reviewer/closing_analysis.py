@@ -324,11 +324,23 @@ def _dispatch_to_sma(brain, post_data: dict, today: str) -> bool:
     try:
         from src.social_media_dispatcher.client import SmaClient
         from src.social_media_dispatcher.schemas import TopicContext, TopicPayload
+        from src.infra.config import cfg
+
+        # 从 social_accounts 配置中获取第一个启用的小红书账号
+        xhs_cfg = cfg().get("xiaohongshu", {})
+        account_id = None
+        for aid, conf in xhs_cfg.items():
+            if isinstance(conf, dict) and conf.get("enabled", False):
+                account_id = aid
+                break
+        if not account_id:
+            logger.info("无启用的小红书账号，跳过 SMA dispatch")
+            return False
 
         client = SmaClient()
         context = TopicContext(images=post_data.get("images", []))
         payload = TopicPayload(
-            account_id="XHS_01",
+            account_id=account_id,
             kind="daily_picks",
             description=post_data.get("content", ""),
             context=context,
@@ -337,7 +349,7 @@ def _dispatch_to_sma(brain, post_data: dict, today: str) -> bool:
         if result and getattr(result, "success", False):
             brain.store.record_social_post(
                 sma_task_id=getattr(result, "task_id", post_data["post_id"]),
-                account_id="XHS_01",
+                account_id=account_id,
                 platform="xiaohongshu",
                 source_pick_date=today,
                 topic=post_data.get("title", ""),

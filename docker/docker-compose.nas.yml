@@ -16,7 +16,7 @@ services:
   # 核心 Web 服务 (React UI + 所有 API)
   # ═══════════════════════════════════════════
   web:
-    image: ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
+    image: ai-lab:latest-amd64
     container_name: ai-lab-web
     ports:
       - "8002:8002"
@@ -24,10 +24,13 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+    env_file:
+      - .env
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-      - TRADING_AGENT_URL=http://ai-lab-web:8002
+      - TRADING_AGENT_URL=http://trading-agent:8001
+      - DB_PATH=/app/data/central_brain.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -36,21 +39,52 @@ services:
       retries: 3
 
   # ═══════════════════════════════════════════
+  # TradingAgent 个股深度分析服务
+  # ═══════════════════════════════════════════
+  trading-agent:
+    image: ai-lab:latest-amd64
+    container_name: ai-lab-trading-agent
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - TAS_HOST=0.0.0.0
+      - TAS_PORT=8001
+      - TAS_ANALYZER=auto
+      - DB_PATH=/app/data/central_brain.db
+    restart: unless-stopped
+    command: ["python", "scripts/run_trading_agent_service.py"]
+
+  # ═══════════════════════════════════════════
   # 定时调度器 (盘中复审 / 收盘扫描 / 周复盘)
   # ═══════════════════════════════════════════
   scheduler:
-    image: ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
+    image: ai-lab:latest-amd64
     container_name: ai-lab-scheduler
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+    env_file:
+      - .env
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-      - TRADING_AGENT_URL=http://ai-lab-web:8002
+      - TRADING_AGENT_URL=http://trading-agent:8001
+      - DB_PATH=/app/data/central_brain.db
+      - SMA_BASE_URL=http://ai-lab-sma:8003
     restart: unless-stopped
     command: ["python", "scripts/scheduler.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; assert time.time()-os.path.getmtime('/app/data/scheduler.heartbeat')<600"]
+      interval: 300s
+      timeout: 10s
+      retries: 2
     profiles:
       - scheduler
     depends_on:
