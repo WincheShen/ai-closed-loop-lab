@@ -152,11 +152,21 @@ def _create_llm(
     provider_lower = provider.lower()
     callbacks = [PipelineLLMCallback(provider=provider_lower, stage=stage)]
 
+    # 全局超时与重试配置 — 防止 HTTP 请求无限挂起导致调度器卡死
+    request_timeout = cfg().get("llm_timeout", 120)  # 秒
+    max_retries = cfg().get("llm_max_retries", 3)
+
     if provider_lower == "openai":
         api_key = cfg().get("openai_api_key")
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured")
-        kwargs = dict(model=model, api_key=api_key, callbacks=callbacks)
+        kwargs = dict(
+            model=model,
+            api_key=api_key,
+            callbacks=callbacks,
+            timeout=request_timeout,
+            max_retries=max_retries,
+        )
         base_url = cfg().get("openai_base_url")
         if base_url:
             kwargs["base_url"] = base_url
@@ -175,6 +185,8 @@ def _create_llm(
             api_key=api_key,
             temperature=temperature,
             callbacks=callbacks,
+            timeout=float(request_timeout),
+            max_retries=max_retries,
         )
 
     elif provider_lower == "azure":
@@ -190,6 +202,8 @@ def _create_llm(
             api_version=api_version,
             deployment_name=model,
             callbacks=callbacks,
+            timeout=request_timeout,
+            max_retries=max_retries,
         )
 
         if "gpt-5" not in model:
@@ -210,6 +224,8 @@ def _create_llm(
                 google_api_key=api_key,
                 temperature=temperature,
                 callbacks=callbacks,
+                timeout=request_timeout,
+                max_retries=max_retries,
             )
         except ImportError:
             raise ImportError("Please install langchain-google-genai for Google provider")

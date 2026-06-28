@@ -147,6 +147,27 @@ class AkshareClient:
             logger.warning("akshare 未安装，将使用 mock 数据")
             self._ak_available = False
 
+        # 复用 HTTP 会话 — 避免每次请求新建 TCP 连接导致 RemoteDisconnected
+        import requests as _req
+        from urllib3.util.retry import Retry
+        from requests.adapters import HTTPAdapter
+
+        self._session = _req.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=[429, 456, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=5,
+            pool_maxsize=10,
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+        self._session.headers.update(self._SINA_HEADERS)
+
     def fetch_snapshot(self) -> MarketSnapshot:
         if self._ak_available:
             try:
@@ -359,7 +380,6 @@ class AkshareClient:
         - 完全失败的页数 > 5 才抛异常让外层降级
         """
         import time
-        import requests as _req
 
         all_data: list[dict] = []
         failed_pages: list[int] = []
@@ -373,9 +393,9 @@ class AkshareClient:
             batch: list[dict] | None = None
             for attempt in range(3):
                 try:
-                    resp = _req.get(
+                    resp = self._session.get(
                         self._SINA_HQ_URL, params=params,
-                        headers=self._SINA_HEADERS, timeout=15,
+                        timeout=15,
                     )
                     resp.raise_for_status()
                     batch = resp.json()
@@ -447,8 +467,6 @@ class AkshareClient:
 
     def _fetch_kline_sina(self, symbol: str, days: int) -> list[KlineBar]:
         """通过新浪财经 API 拉取日K线。"""
-        import requests as _req
-
         prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
         sina_symbol = f"{prefix}{symbol}"
 
@@ -458,9 +476,9 @@ class AkshareClient:
             "ma": "no",
             "datalen": days,
         }
-        resp = _req.get(
+        resp = self._session.get(
             self._SINA_KLINE_URL, params=params,
-            headers=self._SINA_HEADERS, timeout=15,
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()

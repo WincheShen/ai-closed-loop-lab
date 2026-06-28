@@ -13,6 +13,7 @@ from rich.logging import RichHandler
 from src.infra.config import cfg
 
 _CONSOLE = Console(stderr=True)
+_logging_initialized = False
 
 
 def setup_logging(
@@ -25,32 +26,43 @@ def setup_logging(
     同时输出到：
     - 终端 (RichHandler, 带颜色)
     - 文件 (data/logs/YYYY-MM-DD_{session_id}.log)
+
+    首次调用：清除默认 handler，添加 Rich + 文件 handler。
+    后续调用（如 pipeline 每次运行）：仅追加新的 session 文件 handler，
+    不清除已有的 Rich handler 和调度器文件 handler，避免破坏上层日志。
     """
+    global _logging_initialized
     effective_level = (level or cfg().get("log_level", "INFO")).upper()
 
     root = logging.getLogger()
     root.setLevel(effective_level)
 
-    # 清除已有 handler，避免重复
-    for h in root.handlers[:]:
-        root.removeHandler(h)
+    if not _logging_initialized:
+        # 首次：清除默认 handler，添加 Rich 终端输出
+        for h in root.handlers[:]:
+            root.removeHandler(h)
 
-    # 1. Rich 终端输出
-    rich_handler = RichHandler(
-        console=_CONSOLE,
-        rich_tracebacks=True,
-        markup=True,
-        show_path=False,
-    )
-    rich_handler.setLevel(effective_level)
-    fmt = logging.Formatter(
-        fmt="%(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    rich_handler.setFormatter(fmt)
-    root.addHandler(rich_handler)
+        rich_handler = RichHandler(
+            console=_CONSOLE,
+            rich_tracebacks=True,
+            markup=True,
+            show_path=False,
+        )
+        rich_handler.setLevel(effective_level)
+        fmt = logging.Formatter(
+            fmt="%(name)s | %(message)s",
+            datefmt="%H:%M:%S",
+        )
+        rich_handler.setFormatter(fmt)
+        root.addHandler(rich_handler)
+        _logging_initialized = True
+    else:
+        # 后续调用：更新 handler 日志级别，不清除
+        for h in root.handlers:
+            if isinstance(h, RichHandler):
+                h.setLevel(effective_level)
 
-    # 2. 文件输出 (JSON Lines 或纯文本)
+    # 文件输出 — 每个 session 一个独立日志文件
     if log_dir is None:
         log_dir = Path(cfg().get("data_dir", "data")) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -59,13 +71,21 @@ def setup_logging(
     suffix = f"_{session_id}" if session_id else ""
     file_path = log_dir / f"{today}{suffix}.log"
 
-    file_handler = logging.FileHandler(file_path, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_fmt = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-    )
-    file_handler.setFormatter(file_fmt)
-    root.addHandler(file_handler)
+    # 避免同一文件路径重复添加 handler
+    existing_files = {
+        h.baseFilename
+        for h in root.handlers
+        if isinstance(h, logging.FileHandler) and hasattr(h, "baseFilename")
+    }
+    resolved = str(file_path.resolve())
+    if resolved not in existing_files:
+        file_handler = logging.FileHandler(file_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_fmt = logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+        )
+        file_handler.setFormatter(file_fmt)
+        root.addHandler(file_handler)
 
     logging.info("Logging initialized — level=%s, file=%s", effective_level, file_path)
 

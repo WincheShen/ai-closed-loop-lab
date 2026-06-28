@@ -446,6 +446,16 @@ class StrategistEngine:
         entry_price = result.get("entry_price") or current_price
         if entry_price <= 0:
             entry_price = current_price
+
+        # 入场价合理性校验 — 防止 LLM 返回偏离当前价过大的值（如复权价/错误价）
+        if current_price > 0 and entry_price > 0:
+            deviation = abs(entry_price - current_price) / current_price
+            if deviation > 0.20:
+                self.logger.warning(
+                    "[%s] LLM entry_price=%.2f 偏离 current_price=%.2f 达 %.0f%%，修正为当前价",
+                    symbol, entry_price, current_price, deviation * 100,
+                )
+                entry_price = current_price
         stop_loss_pct = self.persona.default_stop_loss_pct if hasattr(
             self.persona, 'default_stop_loss_pct'
         ) else self.config.get("default_stop_loss_pct", 0.05)
