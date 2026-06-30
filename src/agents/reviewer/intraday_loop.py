@@ -130,13 +130,19 @@ async def _check_pending_signals(
     条件类型:
     - breakout: 当前价 >= entry_price 时触发
     - pullback: 当前价 <= entry_price 时触发
+
+    安全措施:
+    - 禁止使用 mock 数据触发条件单（防止随机价格误触发）
+    - 当前价偏离入场价 > 30% 视为数据异常，跳过
+    - 不覆写原始 entry_price，用它作为下单限价
     """
     pending = brain.store.list_pending_signals()
     if not pending:
         return []
 
     logger.info("检查 %d 个 pending 条件单", len(pending))
-    intraday = IntradayClient(allow_mock_fallback=True)
+    # 关键: 禁止 mock fallback — 条件单触发必须基于真实行情
+    intraday = IntradayClient(allow_mock_fallback=False)
     triggered_results = []
 
     for sig in pending:
@@ -144,16 +150,26 @@ async def _check_pending_signals(
         entry_price = sig.get("entry_price", 0)
         condition = sig.get("entry_condition", "breakout")
 
-        # 获取当前价
+        # 获取当前价（仅真实数据源，不允许 mock）
         try:
             snapshot = intraday.fetch_intraday_snapshot(symbol, period="1", bar_limit=1)
             current_price = snapshot.current_price or 0
         except Exception as e:
-            logger.warning("获取 %s 实时价格失败: %s", symbol, e)
+            logger.warning("获取 %s 实时价格失败（数据源不可用）: %s", symbol, e)
             continue
 
         if current_price <= 0:
             continue
+
+        # 价格合理性校验 — 防止数据源返回异常价格导致误触发
+        if entry_price > 0:
+            price_deviation = abs(current_price - entry_price) / entry_price
+            if price_deviation > 0.30:
+                logger.warning(
+                    "[SKIP] %s 当前价 %.2f 偏离入场价 %.2f 达 %.0f%%，疑似数据异常，跳过",
+                    symbol, current_price, entry_price, price_deviation * 100,
+                )
+                continue
 
         # 判断是否触发
         triggered = False
@@ -178,8 +194,7 @@ async def _check_pending_signals(
             continue
 
         # 触发 → 执行买入
-        # 更新 signal 中的 entry_price 为实际触发价
-        sig["entry_price"] = current_price
+        # 保留原始 entry_price 作为下单限价（不用 current_price 覆写）
         sig["entry_condition"] = "immediate"
         engine = ExecutionEngine(session_id)
         try:
@@ -189,7 +204,7 @@ async def _check_pending_signals(
                 triggered_results.append({
                     "symbol": symbol,
                     "action": "BUY",
-                    "reason": f"条件单触发({condition}): 价格 {current_price:.2f} 达到 {entry_price:.2f}",
+                    "reason": f"条件单触发({condition}): 当前价 {current_price:.2f} 达到入场价 {entry_price:.2f}",
                     "trade_price": fills[0]["avg_price"],
                     "signal_id": sig["signal_id"],
                     "entry_condition": condition,
