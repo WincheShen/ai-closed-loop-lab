@@ -114,7 +114,12 @@ class FundamentalClient:
             if m:
                 q.roe = m.roe
                 q.debt_to_equity = m.debt_to_equity
-                q.dividend_yield = m.dividend_yield
+                # dividend_yield 存储的是每股分红金额，需结合价格计算收益率
+                if m.dividend_yield is not None and q.price and q.price > 0:
+                    q.dividend_yield = round(m.dividend_yield / q.price * 100, 2)
+                elif m.dividend_yield is not None:
+                    # 无实时价格时直接存原始值（后续有价格时可重算）
+                    q.dividend_yield = m.dividend_yield
                 q.fcf_yield = m.fcf_yield
 
     def get_metrics(self, symbol: str) -> Optional[FundamentalMetrics]:
@@ -144,16 +149,17 @@ class FundamentalClient:
         """从 AKShare 批量拉取基本面数据。
 
         使用 stock_financial_analysis_indicator_em 按个股查询。
-        为避免频率限制，每次最多处理 50 只，每只间隔 0.3s。
+        为避免频率限制，每只间隔 0.2s。
+        价值投资池通常只有 ~150 只，全部处理。
         """
         result: dict[str, FundamentalMetrics] = {}
-        batch = symbols[:50]
+        batch = symbols[:200]  # 价值池通常 150 只，允许全量
 
         for symbol in batch:
             metrics = self._fetch_single(symbol)
             if metrics:
                 result[symbol] = metrics
-            time.sleep(0.3)
+            time.sleep(0.2)
 
         logger.info(
             "FundamentalClient 批量拉取: 请求 %d 只, 成功 %d 只",
@@ -165,52 +171,69 @@ class FundamentalClient:
         """拉取单只股票的财务分析指标。"""
         try:
             import akshare as ak
-            df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year="2020")
-        except Exception:
-            try:
-                import akshare as ak
-                em_code = f"SH{symbol}" if symbol.startswith(("6", "9")) else f"SZ{symbol}"
-                df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year="2020")
-            except Exception as e:
-                logger.debug("基本面数据拉取失败 %s: %s", symbol, e)
-                return None
+            df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year="2023")
+        except Exception as e:
+            logger.debug("基本面数据拉取失败 %s: %s", symbol, e)
+            return None
 
         if df is None or df.empty:
             return None
 
         try:
-            latest = df.iloc[0]
-            roe = self._safe_float(latest, "净资产收益率(%)")
+            # 数据按日期排列，取最近一个年报（12月）的全年 ROE
+            # 如果没有年报则取最新半年报/季报
+            annual_rows = df[df["日期"].astype(str).str.endswith("12-31")]
+            if not annual_rows.empty:
+                latest = annual_rows.iloc[-1]  # 最新年报
+            else:
+                latest = df.iloc[-1]  # 最新可用数据
+
+            roe = self._safe_float(latest, "加权净资产收益率(%)")
             if roe is None:
-                roe = self._safe_float(latest, "摊薄净资产收益率(%)")
+                roe = self._safe_float(latest, "净资产收益率(%)")
+
             debt_ratio = self._safe_float(latest, "资产负债率(%)")
             debt_to_equity = debt_ratio / 100 if debt_ratio is not None else None
 
             report_date = str(latest.get("日期", "")) or None
 
+            # 尝试获取股息率（从分红数据）
+            dividend_yield = self._fetch_dividend_yield_from_df(symbol, df)
+
             return FundamentalMetrics(
                 symbol=symbol,
                 roe=roe,
                 debt_to_equity=debt_to_equity,
-                dividend_yield=None,  # 需单独接口获取
-                fcf_yield=None,       # 需现金流报表计算
+                dividend_yield=dividend_yield,
+                fcf_yield=None,       # 需现金流报表计算，暂不支持
                 report_date=report_date,
             )
         except Exception as e:
             logger.debug("解析基本面数据失败 %s: %s", symbol, e)
             return None
 
-    def fetch_dividend_yield(self, symbol: str, price: float) -> Optional[float]:
-        """从 AKShare 获取股息率（需要最新分红数据 + 当前股价）。"""
+    def _fetch_dividend_yield_from_df(self, symbol: str, fin_df) -> Optional[float]:
+        """尝试获取每股分红（返回每股派息金额，由 enrich_quotes 结合价格计算收益率）。"""
         try:
             import akshare as ak
             df = ak.stock_history_dividend_detail(symbol=symbol, indicator="分红")
             if df is None or df.empty:
                 return None
-            latest_year = df.iloc[0]
-            per_share = self._safe_float(latest_year, "每股分红")
-            if per_share and price > 0:
-                return round(per_share / price * 100, 2)
+            # 跳过"预案"状态，找已实施的分红
+            impl_df = df[df["进度"].isin(["实施", "已实施"])]
+            if impl_df.empty:
+                # 没有已实施的，取最新一条（可能是预案）
+                impl_df = df
+            latest = impl_df.iloc[0]
+            # 列名可能是 "派息"、"每股分红"、"派息(税前)(元)"
+            # 注意：AKShare 的"派息"字段单位是"元/10股"
+            per_10_share = self._safe_float(latest, "派息")
+            if per_10_share is not None and per_10_share > 0:
+                return per_10_share / 10.0  # 转为每股
+            per_share = self._safe_float(latest, "每股分红")
+            if per_share is None:
+                per_share = self._safe_float(latest, "派息(税前)(元)")
+            return per_share if per_share and per_share > 0 else None
         except Exception as e:
             logger.debug("股息率获取失败 %s: %s", symbol, e)
         return None

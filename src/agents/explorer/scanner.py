@@ -86,8 +86,10 @@ class ExplorerScanner:
             self._hot_names = [h.sector.name for h in hot_results]
             self.logger.info("热点板块: %s", self._hot_names)
 
-        # 3. 基本面数据填充（仅价值投资人格需要）
-        if self._needs_fundamental_data():
+        # 3. 价值投资人格：使用 ValueStockPool 作为主要候选池
+        if self._is_value_persona():
+            self._snapshot = self._build_value_universe(self._snapshot)
+        elif self._needs_fundamental_data():
             try:
                 from src.stock_analyzer.data_source import FundamentalClient
                 fc = FundamentalClient()
@@ -95,22 +97,6 @@ class ExplorerScanner:
                 self.logger.info("基本面数据已填充 (persona=%s)", self.persona_id)
             except Exception:
                 self.logger.warning("基本面数据填充失败 (不影响主流程)", exc_info=True)
-
-            # 价值投资人格：合并 ValueStockPool 中不在快照内的标的
-            try:
-                from src.agents.explorer.value_pool import ValueStockPool
-                vp = ValueStockPool()
-                pool_stocks = vp.get_pool()
-                existing_symbols = {s.symbol for s in self._snapshot.stocks}
-                added = 0
-                for ps in pool_stocks:
-                    if ps.symbol not in existing_symbols:
-                        self._snapshot.stocks.append(ps)
-                        added += 1
-                if added:
-                    self.logger.info("ValuePool 补充 %d 只标的到快照", added)
-            except Exception:
-                self.logger.warning("ValuePool 合并失败 (不影响主流程)", exc_info=True)
 
         # 4. 规则引擎筛选（支持人格级规则覆盖）
         rules = self._build_rules_for_persona()
@@ -220,11 +206,11 @@ class ExplorerScanner:
             for rule in rules:
                 if rule.id == "in_hot_sector":
                     rule.enabled = False
-            # 价值投资人格：同时降低量价类规则权重
+            # 价值投资人格：完全禁用量价类规则（避免干扰基本面筛选）
             for rule in rules:
                 if rule.id in ("volume_breakout", "strong_turnover", "main_fund_inflow"):
-                    rule.weight = 0.3
-            self.logger.info("人格 %s 禁用热点+降低量价权重", self.persona_id)
+                    rule.enabled = False
+            self.logger.info("人格 %s 禁用热点+量价规则", self.persona_id)
 
         # 从 persona.fundamental_filters 动态生成基本面规则
         fundamental_filters = stock_rules.get("fundamental_filters", [])
@@ -257,6 +243,84 @@ class ExplorerScanner:
             )
 
         return rules
+
+    def _is_value_persona(self) -> bool:
+        """判断是否为价值投资人格（不追热点 + 有基本面筛选）。"""
+        if not self._persona or not self._persona.stock_selection_rules:
+            return False
+        rules = self._persona.stock_selection_rules
+        return (
+            not rules.get("follow_hot_sectors", True)
+            and len(rules.get("fundamental_filters", [])) >= 2
+        )
+
+    def _build_value_universe(self, full_snapshot) -> "MarketSnapshot":
+        """为价值投资人格构建专用选股池。
+
+        策略：
+        1. 从 ValueStockPool 获取基本面预筛选的候选票（~150只）
+        2. 用当日快照中的实时价格/成交数据更新这些票的行情字段
+        3. 对候选池进行基本面数据填充（数量小，可全量覆盖）
+        4. 返回一个精简的 MarketSnapshot 供规则引擎使用
+        """
+        from src.agents.explorer.value_pool import ValueStockPool
+        from src.stock_analyzer.data_source.akshare_client import MarketSnapshot
+
+        # 1. 获取 ValuePool 候选票
+        try:
+            vp = ValueStockPool()
+            pool_stocks = vp.get_pool()
+        except Exception:
+            self.logger.warning("ValuePool 获取失败，降级使用全量快照", exc_info=True)
+            return full_snapshot
+
+        if not pool_stocks:
+            self.logger.warning("ValuePool 为空，降级使用全量快照")
+            return full_snapshot
+
+        # 2. 用实时快照数据更新 pool 票的行情字段（价格/成交额/涨跌幅）
+        live_map = {s.symbol: s for s in full_snapshot.stocks}
+        updated_count = 0
+        for ps in pool_stocks:
+            live = live_map.get(ps.symbol)
+            if live:
+                ps.price = live.price
+                ps.change_pct = live.change_pct
+                ps.volume = live.volume
+                ps.turnover = live.turnover
+                ps.turnover_rate = live.turnover_rate
+                ps.main_fund_net_inflow = live.main_fund_net_inflow
+                # 保留 pool 中的基本面数据（如有），否则用 live 数据
+                if ps.pe_ttm is None and live.pe_ttm is not None:
+                    ps.pe_ttm = live.pe_ttm
+                if ps.pb is None and live.pb is not None:
+                    ps.pb = live.pb
+                if ps.market_cap_yi is None and live.market_cap_yi is not None:
+                    ps.market_cap_yi = live.market_cap_yi
+                updated_count += 1
+
+        self.logger.info(
+            "价值投资选股池: %d 只候选, %d 只有实时行情",
+            len(pool_stocks), updated_count,
+        )
+
+        # 3. 基本面数据填充（仅对 pool 票，数量可控）
+        try:
+            from src.stock_analyzer.data_source import FundamentalClient
+            fc = FundamentalClient()
+            fc.enrich_quotes(pool_stocks)
+            enriched = sum(1 for s in pool_stocks if s.roe is not None)
+            self.logger.info("基本面填充完成: %d/%d 有 ROE 数据", enriched, len(pool_stocks))
+        except Exception:
+            self.logger.warning("基本面数据填充失败 (不影响主流程)", exc_info=True)
+
+        # 4. 构建精简的 MarketSnapshot
+        return MarketSnapshot(
+            snapshot_date=full_snapshot.snapshot_date,
+            stocks=pool_stocks,
+            sectors=full_snapshot.sectors,
+            is_mock=full_snapshot.is_mock,
+        )
 
     def _needs_fundamental_data(self) -> bool:
         """判断当前人格是否需要基本面数据。"""

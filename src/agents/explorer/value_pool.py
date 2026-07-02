@@ -137,10 +137,12 @@ class ValueStockPool:
             candidates.sort(key=lambda s: s.market_cap_yi or 0, reverse=True)
             candidates = candidates[:200]
 
-            # 填充基本面数据
+            # 填充基本面数据（200只以内，FundamentalClient 可全量处理）
             try:
                 fc = FundamentalClient()
                 fc.enrich_quotes(candidates)
+                enriched_count = sum(1 for s in candidates if s.roe is not None)
+                logger.info("ValueStockPool: 基本面填充 %d/%d 只成功", enriched_count, len(candidates))
             except Exception:
                 logger.warning("ValueStockPool: 基本面数据填充失败")
 
