@@ -264,13 +264,12 @@ class TradeAttributor:
             )
             self.brain.store.save_lesson(lesson.to_dict())
 
-        # 增量更新策略权重 — 闭环反馈
-        try:
-            from src.feedback_loop.prompt_evolution import PromptEvolution
-            evo = PromptEvolution(self.session_id)
-            evo.update_from_attribution(attr.to_dict())
-        except Exception as e:
-            self.logger.warning("策略权重更新失败: %s", e)
+        # 闭环反馈 — ExperienceLayer 基于 DB 实时聚合，无需额外更新
+        # trade_attributions 表写入后，StrategyLedger / StockMemory 自动可查
+        self.logger.info(
+            "归因已写入 DB — ExperienceLayer 将自动反映: strategy=%s outcome=%s",
+            attr.strategy_id, attr.outcome,
+        )
 
         return attr
 

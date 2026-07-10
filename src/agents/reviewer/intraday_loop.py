@@ -193,6 +193,38 @@ async def _check_pending_signals(
             )
             continue
 
+        # 触发前重评估 — 检查经验层是否建议取消
+        try:
+            from src.experience_layer import get_experience
+            exp = get_experience()
+            persona_id = sig.get("persona_id")
+
+            # 检查个股冷却期
+            if exp.is_stock_in_cooldown(symbol):
+                logger.info(
+                    "[CANCEL] %s 条件单触发但个股在冷却期，取消执行", symbol,
+                )
+                brain.store.update_signal_status(sig["signal_id"], "cancelled_cooldown")
+                continue
+
+            # 检查策略在当前 regime 下是否被暂停
+            strategy_id = sig.get("strategy_id", "")
+            if strategy_id:
+                latest_regime = brain.store.latest_market_regime()
+                current_regime = latest_regime.get("regime", "") if latest_regime else ""
+                if current_regime:
+                    stats = exp.get_strategy_stats(strategy_id, regime=current_regime)
+                    if stats and stats.get("recommendation") == "SUSPEND":
+                        logger.info(
+                            "[CANCEL] %s 条件单触发但策略 %s 在 %s 环境下已暂停 (胜率%.0f%%)，取消执行",
+                            symbol, strategy_id, current_regime,
+                            stats["win_rate"] * 100,
+                        )
+                        brain.store.update_signal_status(sig["signal_id"], "cancelled_strategy_suspended")
+                        continue
+        except Exception:
+            logger.debug("条件单重评估失败 (降级: 正常执行)", exc_info=True)
+
         # 触发 → 执行买入
         # 保留原始 entry_price 作为下单限价（不用 current_price 覆写）
         sig["entry_condition"] = "immediate"

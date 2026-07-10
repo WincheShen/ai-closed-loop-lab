@@ -296,18 +296,24 @@ class StrategistEngine:
         return "\n\n## 历史交易教训（避免重复错误）\n" + "\n".join(lines)
 
     def _evolution_block(self) -> str:
-        """读取策略权重文件，生成权重反馈片段注入 prompt。"""
+        """从 ExperienceLayer 生成策略表现反馈片段注入 prompt。
+
+        替代旧的 prompt_weights.json 机制，直接从 trade_attributions 表聚合。
+        """
         try:
-            from src.feedback_loop.prompt_evolution import PromptEvolution
-            evo = PromptEvolution(self.session_id)
-            weights = evo.load_weights()
-            if not weights:
-                return ""
-            # 至少有一个策略有样本才生成
-            has_data = any((w["win_count"] + w["loss_count"]) > 0 for w in weights)
-            if not has_data:
-                return ""
-            return evo.generate_evolution_prompt(weights)
+            from src.experience_layer import get_experience
+            exp = get_experience()
+            regime = self.market_regime.get("regime") if self.market_regime else None
+            return exp.strategy_prompt_block(regime=regime)
+        except Exception:
+            return ""
+
+    def _stock_memory_block(self, symbol: str) -> str:
+        """从 ExperienceLayer 生成个股交易记忆片段注入 prompt。"""
+        try:
+            from src.experience_layer import get_experience
+            exp = get_experience()
+            return exp.stock_prompt_block(symbol)
         except Exception:
             return ""
 
@@ -423,6 +429,7 @@ class StrategistEngine:
 
         user_msg += self._lessons_block()
         user_msg += self._evolution_block()
+        user_msg += self._stock_memory_block(symbol)
 
         try:
             llm = get_llm()

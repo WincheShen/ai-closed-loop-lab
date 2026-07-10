@@ -4,7 +4,8 @@
 1. 每日收盘后抓取全市场行情快照（AKShare 真实数据，失败时降级 mock）
 2. 检测热点板块 Top 5
 3. 运行规则引擎筛选候选票 → Top 30
-4. 拉取候选票近期 K 线，生成走势摘要供 Strategist 使用
+4. 经验过滤：黑名单/冷却期/历史降权（ExperienceLayer）
+5. 拉取候选票近期 K 线，生成走势摘要供 Strategist 使用
 """
 
 from __future__ import annotations
@@ -35,11 +36,19 @@ _INDICATOR_TO_RULE: dict[str, tuple[str, str]] = {
     "pe": ("value_pe", "pe_max"),
 }
 
+# 规则 ID → 策略 ID 映射（用于查询 StrategyLedger 调整权重）
+_RULE_TO_STRATEGY: dict[str, str] = {
+    "in_hot_sector": "热点板块前排回踩",
+    "volume_breakout": "放量突破",
+    "strong_turnover": "放量突破",
+    "main_fund_inflow": "热点板块前排回踩",
+}
+
 
 class ExplorerScanner:
     """探索者扫描器 — AKShare 行情 + 规则引擎 + 热点检测（多人格支持）。"""
 
-    def __init__(self, session_id: str, persona_id: str | None = None) -> None:
+    def __init__(self, session_id: str, persona_id: str | None = None, market_regime: dict | None = None) -> None:
         self.session_id = session_id
         self.persona_id = persona_id
         self.logger = get_agent_logger("explorer", session_id)
@@ -50,6 +59,7 @@ class ExplorerScanner:
         self._hot_names: list[str] = []
         self._persona = load_persona_by_id(persona_id) if persona_id else None
         self._kline_days = self._get_kline_lookback_days()
+        self._market_regime = market_regime or {}
 
     def scan_market(self, date_str: str | None = None, snapshot: MarketSnapshot | None = None, hot_sectors: list[str] | None = None) -> list[StockCandidate]:
         """全市场扫描 → 热点检测 → 规则引擎 → 候选票列表。
@@ -98,7 +108,7 @@ class ExplorerScanner:
             except Exception:
                 self.logger.warning("基本面数据填充失败 (不影响主流程)", exc_info=True)
 
-        # 4. 规则引擎筛选（支持人格级规则覆盖）
+        # 4. 规则引擎筛选（支持人格级规则覆盖 + 经验驱动权重调整）
         rules = self._build_rules_for_persona()
         engine = RuleEngine(rules)
         results = engine.filter_and_rank(
@@ -147,6 +157,9 @@ class ExplorerScanner:
                 "dragon_tiger": None,
             })
 
+        # 6. 经验过滤：黑名单 / 冷却期 / 历史胜率降权
+        candidates = self._apply_experience_filter(candidates)
+
         self.logger.info("扫描完成 — 候选票 %d 只", len(candidates))
         self.brain.log_agent_event(
             self.session_id, "explorer", "scan_complete",
@@ -181,12 +194,38 @@ class ExplorerScanner:
             return self._persona.stock_selection_rules.get("kline_lookback_days", 20)
         return 20
 
+    def _apply_experience_filter(self, candidates: list[StockCandidate]) -> list[StockCandidate]:
+        """对候选票应用经验过滤（黑名单/冷却期/历史降权）。
+
+        这是闭环的关键环节：交易归因 → ExperienceLayer → Explorer 选股。
+        """
+        try:
+            from src.experience_layer import get_experience
+            exp = get_experience()
+            blacklist = exp.blacklist_for(persona_id=self.persona_id)
+            regime = self._market_regime.get("regime")
+            filtered = blacklist.filter_candidates(candidates, regime=regime)
+            removed = len(candidates) - len(filtered)
+            if removed > 0:
+                self.logger.info(
+                    "经验过滤: %d → %d 只候选 (移除 %d 只)",
+                    len(candidates), len(filtered), removed,
+                )
+            return filtered
+        except Exception:
+            self.logger.warning("经验过滤失败 (降级: 不过滤)", exc_info=True)
+            return candidates
+
     def _build_rules_for_persona(self) -> list[Rule]:
         """根据人格配置构建选股规则列表。
 
         对价值投资人格：
         - 禁用热点板块、量价类规则
         - 从 persona.fundamental_filters 动态生成基本面规则
+
+        经验驱动权重调整：
+        - 查询 StrategyLedger 获取策略在当前 regime 下的胜率
+        - 胜率高的规则权重 × 1.5~1.8，胜率低的 × 0.3~0.5
         """
         rules = load_rules_from_yaml(_RULES_YAML)
 
@@ -242,6 +281,41 @@ class ExplorerScanner:
                 "人格规则: %s %s=%s weight=%.1f", rule_id, param_key, value, weight,
             )
 
+        # 经验驱动权重调整：根据 StrategyLedger 动态调整规则权重
+        rules = self._adjust_rule_weights_from_experience(rules)
+
+        return rules
+
+    def _adjust_rule_weights_from_experience(self, rules: list[Rule]) -> list[Rule]:
+        """根据 StrategyLedger 的实盘数据动态调整规则权重。
+
+        例如: 放量突破在 bear 市场胜率 0% → volume_breakout 权重 × 0.3
+        """
+        try:
+            from src.experience_layer import get_experience
+            exp = get_experience()
+            regime = self._market_regime.get("regime")
+            adjusted = 0
+            for rule in rules:
+                if not rule.enabled:
+                    continue
+                strategy_id = _RULE_TO_STRATEGY.get(rule.id)
+                if not strategy_id:
+                    continue
+                multiplier = exp.get_rule_weight_multiplier(strategy_id, regime=regime)
+                if multiplier != 1.0:
+                    old_weight = rule.weight
+                    rule.weight = round(rule.weight * multiplier, 2)
+                    self.logger.info(
+                        "经验调权: %s (策略=%s, regime=%s) 权重 %.1f → %.1f (×%.2f)",
+                        rule.id, strategy_id, regime or "all",
+                        old_weight, rule.weight, multiplier,
+                    )
+                    adjusted += 1
+            if adjusted > 0:
+                self.logger.info("经验驱动调整了 %d 条规则权重", adjusted)
+        except Exception:
+            self.logger.warning("经验驱动权重调整失败 (降级: 不调整)", exc_info=True)
         return rules
 
     def _is_value_persona(self) -> bool:
@@ -382,7 +456,8 @@ def run_discovery_node(state: TradingState) -> dict[str, Any]:
 
     session_id = state["session_id"]
     persona_id = state.get("persona_id")
-    scanner = ExplorerScanner(session_id, persona_id=persona_id)
+    market_regime = state.get("market_regime") or {}
+    scanner = ExplorerScanner(session_id, persona_id=persona_id, market_regime=market_regime)
 
     # 尝试从 state 中复用 MarketBrain 的快照
     market_snapshot_dict = state.get("market_snapshot")
