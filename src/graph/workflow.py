@@ -135,19 +135,24 @@ def build_weekly_graph() -> StateGraph:
 # 运行入口
 # =============================================================================
 
-async def run_daily_pipeline(run_mode: str = "mock") -> TradingState:
+async def run_daily_pipeline(
+    run_mode: str = "mock",
+    persona_id: str | None = None,
+) -> TradingState:
     """运行一次完整的日常交易闭环。
 
     Args:
         run_mode: "scan"(只扫描) / "mock"(模拟盘) / "paper"(模拟盘) / "live"(实盘)
+        persona_id: 指定的交易人格 ID，为 None 时使用默认人格
     """
     setup_logging()
     session_id = f"daily-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
     logger.info("=" * 60)
-    logger.info("🚀 启动日常交易流 — session=%s, mode=%s", session_id, run_mode)
+    logger.info("🚀 启动日常交易流 — session=%s, mode=%s, persona=%s", session_id, run_mode, persona_id or "default")
     logger.info("=" * 60)
 
     initial_state = create_empty_state(session_id, run_mode)
+    initial_state["persona_id"] = persona_id or "short_term_hot_rotation_v1"
     graph = build_daily_graph()
 
     result = await graph.ainvoke(initial_state)
@@ -182,15 +187,22 @@ async def run_daily_pipeline(run_mode: str = "mock") -> TradingState:
     return result
 
 
-async def run_weekly_feedback() -> TradingState:
-    """运行一次周末复盘与 Prompt 进化。"""
+async def run_weekly_feedback(
+    persona_id: str | None = None,
+) -> TradingState:
+    """运行一次周末复盘与 Prompt 进化。
+
+    Args:
+        persona_id: 指定的交易人格 ID，为 None 时复盘所有人格
+    """
     setup_logging()
     session_id = f"weekly-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
     logger.info("=" * 60)
-    logger.info("🔁 启动周末复盘 — session=%s", session_id)
+    logger.info("🔁 启动周末复盘 — session=%s, persona=%s", session_id, persona_id or "all")
     logger.info("=" * 60)
 
     initial_state = create_empty_state(session_id, "feedback")
+    initial_state["persona_id"] = persona_id
     graph = build_weekly_graph()
 
     result = await graph.ainvoke(initial_state)

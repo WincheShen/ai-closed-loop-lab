@@ -31,6 +31,7 @@ class TradingPersona:
     id: str
     version: str
     name: str
+    capital: int = 0  # 资金规模（元）
     philosophy: list[str] = field(default_factory=list)
     preferred_holding_days: list[int] = field(default_factory=lambda: [1, 5])
     preferred_setups: list[str] = field(default_factory=list)
@@ -40,6 +41,7 @@ class TradingPersona:
         default_factory=dict,
     )
     social_style: dict[str, Any] = field(default_factory=dict)
+    stock_selection_rules: dict[str, Any] = field(default_factory=dict)
     config_hash: str = ""
 
     @property
@@ -110,8 +112,13 @@ class TradingPersona:
         return "\n".join(lines)
 
 
-def load_persona(path: Path | str | None = None) -> TradingPersona:
-    """从 YAML 加载投资人格。失败时返回内置默认 persona。"""
+def load_persona(path: Path | str | None = None, persona_id: str | None = None) -> TradingPersona:
+    """从 YAML 加载投资人格。失败时返回内置默认 persona。
+
+    Args:
+        path: YAML 文件路径
+        persona_id: 指定加载的人格 ID，如果为 None 则加载第一个人格
+    """
     yaml_path = Path(path) if path else _PERSONA_YAML
     if not yaml_path.exists():
         logger.warning("trading_persona.yaml 不存在 (%s)，使用默认 persona", yaml_path)
@@ -121,11 +128,32 @@ def load_persona(path: Path | str | None = None) -> TradingPersona:
         raw = yaml_path.read_bytes()
         config_hash = hashlib.sha256(raw).hexdigest()
         data = yaml.safe_load(raw) or {}
-        p = data.get("persona", {})
+
+        # 支持旧格式（单个 persona）和新格式（多个 personas）
+        personas_data = data.get("personas", [])
+        if not personas_data:
+            # 旧格式兼容
+            p = data.get("persona", {})
+            personas_data = [p] if p else []
+
+        if not personas_data:
+            logger.warning("未找到 persona 配置，使用默认 persona")
+            return _default_persona()
+
+        # 选择要加载的 persona
+        if persona_id:
+            p = next((p for p in personas_data if p.get("id") == persona_id), None)
+            if not p:
+                logger.warning("未找到 persona_id=%s，使用第一个 persona", persona_id)
+                p = personas_data[0]
+        else:
+            p = personas_data[0]
+
         return TradingPersona(
             id=p.get("id", "default_v1"),
             version=p.get("version", "v1.0"),
             name=p.get("name", "默认交易员"),
+            capital=p.get("capital", 0),
             philosophy=list(p.get("philosophy", [])),
             preferred_holding_days=list(p.get("preferred_holding_days", [1, 5])),
             preferred_setups=list(p.get("preferred_setups", [])),
@@ -135,11 +163,53 @@ def load_persona(path: Path | str | None = None) -> TradingPersona:
                 p.get("strategy_regime_compatibility", {}),
             ),
             social_style=dict(p.get("social_style", {})),
+            stock_selection_rules=dict(p.get("stock_selection_rules", {})),
             config_hash=config_hash,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("加载 persona 失败: %s，使用默认 persona", e)
         return _default_persona()
+
+
+def load_persona_by_id(persona_id: str, path: Path | str | None = None) -> TradingPersona:
+    """按 ID 加载指定人格。"""
+    return load_persona(path, persona_id)
+
+
+def list_personas(path: Path | str | None = None) -> list[dict[str, Any]]:
+    """列出所有可用的人格。"""
+    yaml_path = Path(path) if path else _PERSONA_YAML
+    if not yaml_path.exists():
+        return []
+
+    try:
+        data = yaml.safe_load(yaml_path.read_bytes()) or {}
+        personas_data = data.get("personas", [])
+        if not personas_data:
+            # 旧格式兼容
+            p = data.get("persona", {})
+            personas_data = [p] if p else []
+
+        return [
+            {
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "version": p.get("version", "v1.0"),
+                "capital": p.get("capital", 0),
+                "philosophy": p.get("philosophy", []),
+                "preferred_holding_days": p.get("preferred_holding_days", [1, 5]),
+                "preferred_setups": p.get("preferred_setups", []),
+                "avoid_setups": p.get("avoid_setups", []),
+                "risk_limits": p.get("risk_limits", {}),
+                "strategy_regime_compatibility": p.get("strategy_regime_compatibility", {}),
+                "social_style": p.get("social_style", {}),
+                "stock_selection_rules": p.get("stock_selection_rules", {}),
+            }
+            for p in personas_data
+        ]
+    except Exception as e:  # noqa: BLE001
+        logger.error("列出 personas 失败: %s", e)
+        return []
 
 
 def _default_persona() -> TradingPersona:
@@ -164,12 +234,19 @@ def _default_persona() -> TradingPersona:
     )
 
 
-_persona_cache: TradingPersona | None = None
+_persona_cache: dict[str, TradingPersona] = {}
 
 
-def get_persona(reload: bool = False) -> TradingPersona:
-    """获取全局 persona 单例。"""
+def get_persona(persona_id: str | None = None, reload: bool = False) -> TradingPersona:
+    """获取 persona。如果指定 persona_id 则加载指定人格，否则加载第一个。
+
+    Args:
+        persona_id: 人格 ID，如果为 None 则加载第一个人格
+        reload: 是否重新加载
+    """
     global _persona_cache
-    if _persona_cache is None or reload:
-        _persona_cache = load_persona()
-    return _persona_cache
+    key = persona_id or "default"
+
+    if key not in _persona_cache or reload:
+        _persona_cache[key] = load_persona(persona_id=persona_id)
+    return _persona_cache[key]

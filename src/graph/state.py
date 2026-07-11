@@ -19,9 +19,10 @@ class StockCandidate(TypedDict):
     dragon_tiger: Optional[dict]   # 龙虎榜数据
 
 
-class TradeSignal(TypedDict):
+class TradeSignal(TypedDict, total=False):
     """决策者生成的交易信号。"""
 
+    # --- 必填字段 ---
     signal_id: str                 # 唯一ID
     symbol: str
     action: Literal["buy", "sell", "hold"]
@@ -32,7 +33,25 @@ class TradeSignal(TypedDict):
     strategy: str                  # 触发策略 (如 "20日线回踩", "15分钟放量突破")
     rationale: str                 # 决策理由
     timestamp: str                 # ISO 格式时间戳
+
+    # --- 入场条件 ---
+    entry_condition: Literal["immediate", "breakout", "pullback"]
+    current_price: float           # 信号生成时的实时价格
+
+    # --- 元数据 (Strategist / RiskGovernor 填充) ---
+    name: str                      # 股票名称
+    sector: str                    # 板块
     expiry: Optional[str]          # 信号有效期
+    confidence: float              # LLM 置信度 (0-1)
+    strategy_id: str               # 策略 ID (如 "hot_money_breakout")
+    bull_case: str                 # 看多逻辑
+    bear_case: str                 # 看空逻辑
+    market_regime: str             # 市场状态 (bull/bear/neutral/...)
+    persona_id: str                # 交易人格 ID
+    persona_version: str           # 人格版本号
+    target_qty: int                # 目标数量 (卖出时使用)
+    risk_decision: str             # RiskGovernor 决策
+    risk_reason: str               # RiskGovernor 理由
 
 
 class Order(TypedDict):
@@ -132,6 +151,7 @@ class TradingState(TypedDict):
 
     # ===== Phase 0: 认知层 (MarketBrain + Persona) =====
     market_regime: Optional[dict]    # MarketRegimeSnapshot 序列化
+    persona_id: Optional[str]       # 当前生效的 TradingPersona ID (多人格核心字段)
     persona_version: Optional[str]   # 当前生效的 TradingPersona 版本
     market_snapshot: Optional[dict]  # MarketSnapshot 序列化（供 Explorer 复用）
 
@@ -173,6 +193,7 @@ def create_empty_state(session_id: str, run_mode: str = "scan") -> TradingState:
         "run_mode": run_mode,  # type: ignore[typeddict-item]
         "timestamp": datetime.now().isoformat(),
         "market_regime": None,
+        "persona_id": None,
         "persona_version": None,
         "market_snapshot": None,
         "hot_sectors": [],

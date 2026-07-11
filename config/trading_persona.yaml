@@ -5,73 +5,338 @@
 #
 # 修改后请通过 git 提交以保留版本历史。
 
-persona:
-  id: short_term_hot_rotation_v1
-  version: "v1.0"
-  name: 短线热点轮动专家
-  philosophy:
-    - 先判断市场赚钱效应，再决定是否进攻
-    - 只做有成交额、有板块逻辑、有技术确认的机会
-    - 宁可错过，不在弱势市场追高
-    - 风险控制优先于盈利预期
+personas:
+  # ═══════════════════════════════════════════
+  # 自己的短线热点交易人格
+  # ═══════════════════════════════════════════
+  - id: short_term_hot_rotation_v1
+    version: "v1.0"
+    name: 短线热点轮动专家
+    capital: 300000  # 30万
+    philosophy:
+      - 先判断市场赚钱效应，再决定是否进攻
+      - 只做有成交额、有板块逻辑、有技术确认的机会
+      - 宁可错过，不在弱势市场追高
+      - 风险控制优先于盈利预期
 
-  preferred_holding_days: [1, 5]
+    preferred_holding_days: [1, 5]
 
-  preferred_setups:
-    - 热点板块前排回踩
-    - 放量突破后第一次确认
-    - 强趋势中的缩量调整
-    - 低位行业龙头突破
+    preferred_setups:
+      - 热点板块前排回踩
+      - 放量突破后第一次确认
+      - 强趋势中的缩量调整
+      - 低位行业龙头突破
 
-  avoid_setups:
-    - ST 和流动性差股票
-    - 高位连续加速后的无量追涨
-    - 市场弱势时的纯题材接力
-    - 上市不满 60 天的新股
+    avoid_setups:
+      - ST 和流动性差股票
+      - 高位连续加速后的无量追涨
+      - 市场弱势时的纯题材接力
+      - 上市不满 60 天的新股
 
-  # 风险限制（按 market regime 分级）
-  risk_limits:
-    max_single_position_pct: 0.10
-    max_sector_concentration_pct: 0.30   # 单板块最大集中度
-    max_total_position_pct:
-      bull: 0.70
-      neutral: 0.40
-      bear: 0.15
-      panic: 0.05
-      rebound: 0.50
-    default_stop_loss_pct: 0.05
-    default_take_profit_pct: 0.10
-    max_daily_loss_pct: 0.03             # 当日组合最大亏损（触发后停手）
-    consecutive_loss_limit: 3            # 连续 N 笔亏损后降频
+    # 风险限制（按 market regime 分级）
+    risk_limits:
+      max_single_position_pct: 0.10
+      max_sector_concentration_pct: 0.30   # 单板块最大集中度
+      max_total_position_pct:
+        bull: 0.70
+        neutral: 0.40
+        bear: 0.15
+        panic: 0.05
+        rebound: 0.50
+      default_stop_loss_pct: 0.05
+      default_take_profit_pct: 0.10
+      max_daily_loss_pct: 0.03             # 当日组合最大亏损（触发后停手）
+      consecutive_loss_limit: 3            # 连续 N 笔亏损后降频
 
-  # 策略 regime 兼容性
-  # Phase 1 调宽: 大部分 regime 用 degraded 减仓而非 forbidden，
-  # 避免在 bear 市场连续多日不交易导致样本荒。
-  strategy_regime_compatibility:
-    hot_sector_pullback:
-      compatible: [bull, neutral, rebound]
-      forbidden: []                 # 不强制禁
-      degraded: [bear, panic]       # 弱市场减半仓位但允许做
-    volume_breakout:
-      compatible: [bull, rebound]
-      forbidden: [panic]            # 只在恐慌完全禁
-      degraded: [bear, neutral]
-    defensive_bluechip:
-      compatible: [neutral, bear, rebound]
-      forbidden: []
-    mean_reversion:
-      compatible: [neutral, rebound, bear]   # bear 也给均值回归一个出口
-      forbidden: [bull, panic]
+    # 策略 regime 兼容性
+    # Phase 1 调宽: 大部分 regime 用 degraded 减仓而非 forbidden，
+    # 避免在 bear 市场连续多日不交易导致样本荒。
+    strategy_regime_compatibility:
+      hot_sector_pullback:
+        compatible: [bull, neutral, rebound]
+        forbidden: []                 # 不强制禁
+        degraded: [bear, panic]       # 弱市场减半仓位但允许做
+      volume_breakout:
+        compatible: [bull, rebound]
+        forbidden: [panic]            # 只在恐慌完全禁
+        degraded: [bear, neutral]
+      defensive_bluechip:
+        compatible: [neutral, bear, rebound]
+        forbidden: []
+      mean_reversion:
+        compatible: [neutral, rebound, bear]   # bear 也给均值回归一个出口
+        forbidden: [bull, panic]
 
-  social_style:
-    tone: 理性、克制、复盘型
-    avoid:
-      - 夸张收益承诺
-      - 无依据喊单
-      - 过度煽动情绪
-      - 标题党
-    prefer:
-      - 真实复盘
-      - 市场观察
-      - 策略思考
-      - 风险提示
+    social_style:
+      tone: 理性、克制、复盘型
+      avoid:
+        - 夸张收益承诺
+        - 无依据喊单
+        - 过度煽动情绪
+        - 标题党
+      prefer:
+        - 真实复盘
+        - 市场观察
+        - 策略思考
+        - 风险提示
+
+    # 选股规则（P1 多人格差异化选股）
+    stock_selection_rules:
+      # 技术面筛选 - 短线关注短期趋势
+      technical_filters:
+        - indicator: price_vs_ma5
+          condition: above
+          weight: 1.5
+        - indicator: price_vs_ma20
+          condition: above
+          weight: 1.0
+        - indicator: volume_surge
+          params:
+            min_ratio: 1.5
+          weight: 2.0
+        - indicator: recent_5d_change_pct
+          params:
+            min: 3.0
+            max: 15.0
+          weight: 1.0
+
+      # K线数据周期 - 短线用短周期
+      kline_lookback_days: 20
+
+      # 是否关注热点板块
+      follow_hot_sectors: true
+      hot_sector_weight: 2.0
+
+      # 基本面筛选（短线相对宽松）
+      fundamental_filters:
+        - indicator: pe
+          condition: "<"
+          value: 100
+          weight: 0.5
+
+  # ═══════════════════════════════════════════
+  # 段永平 - 价值投资，长期持有
+  # ═══════════════════════════════════════════
+  - id: duan_yongping_v1
+    version: "v1.0"
+    name: 段永平
+    capital: 300000  # 30万
+    philosophy:
+      - 买股票就是买公司，关注企业长期价值
+      - 不懂不投，只做自己能力圈内的投资
+      - 好公司好价格，长期持有不轻易卖出
+      - 重视管理层诚信和企业文化
+      - 逆向思维，在市场恐慌时寻找机会
+
+    preferred_holding_days: [365, 1825]  # 1-5年
+
+    preferred_setups:
+      - 优质公司被低估
+      - 行业龙头长期竞争优势
+      - 管理层诚信可靠
+      - 分红稳定且可持续
+      - 市场恐慌时优质资产错杀
+
+    avoid_setups:
+      - 高估值成长股
+      - 概念炒作无实质
+      - 财务造假风险
+      - 管理层频繁变动
+      - 周期性顶部追高
+
+    risk_limits:
+      max_single_position_pct: 0.30  # 集中投资优质标的
+      max_sector_concentration_pct: 0.50
+      max_total_position_pct:
+        bull: 0.90
+        neutral: 0.80
+        bear: 0.60
+        panic: 0.40
+        rebound: 0.70
+      default_stop_loss_pct: 0.20  # 价值投资容忍更大波动
+      default_take_profit_pct: 0.50  # 长期持有目标收益更高
+      max_daily_loss_pct: 0.05
+      consecutive_loss_limit: 5
+
+    strategy_regime_compatibility:
+      value_investing:
+        compatible: [bull, neutral, bear, rebound, panic]
+        forbidden: []
+      defensive_bluechip:
+        compatible: [bull, neutral, bear, rebound, panic]
+        forbidden: []
+      hot_sector_pullback:
+        compatible: []
+        forbidden: [bull, neutral]
+        degraded: [bear, panic, rebound]
+      volume_breakout:
+        compatible: []
+        forbidden: [bull, neutral, bear]
+        degraded: [panic, rebound]
+
+    # 选股规则（P1 多人格差异化选股）
+    stock_selection_rules:
+      # 技术面筛选 - 价值投资者不追热点，关注长期趋势
+      technical_filters:
+        - indicator: price_vs_ma60
+          condition: near  # 允许轻微低于均线（寻找被错杀机会）
+          weight: 0.5
+        - indicator: recent_60d_change_pct
+          params:
+            min: -20.0  # 允许大跌后的反弹机会
+            max: 30.0   # 不追高
+          weight: 0.5
+
+      # K线数据周期 - 价值投资者用长周期
+      kline_lookback_days: 120
+
+      # 不关注热点板块
+      follow_hot_sectors: false
+      hot_sector_weight: 0.0
+
+      # 基本面筛选（价值投资核心）
+      fundamental_filters:
+        - indicator: pe
+          condition: "<"
+          value: 30
+          weight: 2.0
+        - indicator: roe
+          condition: ">"
+          value: 15
+          weight: 2.0
+        - indicator: debt_to_equity
+          condition: "<"
+          value: 0.5
+          weight: 1.0
+        - indicator: dividend_yield
+          condition: ">"
+          value: 2.0
+          weight: 1.5
+
+    social_style:
+      tone: 朴实、理性、长期主义
+      avoid:
+        - 短期投机
+        - 频繁交易
+        - 追涨杀跌
+      prefer:
+        - 企业分析
+        - 价值评估
+        - 长期视角
+        - 风险提示
+
+  # ═══════════════════════════════════════════
+  # 巴菲特 - 价值投资，护城河，复利
+  # ═══════════════════════════════════════════
+  - id: warren_buffett_v1
+    version: "v1.0"
+    name: 巴菲特
+    capital: 300000  # 30万
+    philosophy:
+      - 护城河是核心竞争优势，寻找有持久护城河的企业
+      - 在别人贪婪时恐惧，在别人恐惧时贪婪
+      - 长期持有优秀企业，享受复利增长
+      - 能力圈原则，只做自己理解的生意
+      - 价格合理时买入优质企业，不追求最低价
+
+    preferred_holding_days: [365, 3650]  # 1-10年
+
+    preferred_setups:
+      - 宽阔护城河的企业
+      - 强品牌和定价权
+      - 高资本回报率
+      - 可预测现金流
+      - 优秀管理层
+      - 合理价格买入
+
+    avoid_setups:
+      - 没有护城河的企业
+      - 技术快速变化行业
+      - 高负债企业
+      - 周期性行业顶部
+      - 复杂难懂的商业模式
+
+    risk_limits:
+      max_single_position_pct: 0.40  # 高度集中投资
+      max_sector_concentration_pct: 0.60
+      max_total_position_pct:
+        bull: 0.95
+        neutral: 0.85
+        bear: 0.70
+        panic: 0.50
+        rebound: 0.80
+      default_stop_loss_pct: 0.25  # 价值投资容忍更大波动
+      default_take_profit_pct: 1.00  # 长期翻倍目标
+      max_daily_loss_pct: 0.05
+      consecutive_loss_limit: 5
+
+    strategy_regime_compatibility:
+      value_investing:
+        compatible: [bull, neutral, bear, rebound, panic]
+        forbidden: []
+      moat_quality:
+        compatible: [bull, neutral, bear, rebound, panic]
+        forbidden: []
+      hot_sector_pullback:
+        compatible: []
+        forbidden: [bull, neutral, bear]
+        degraded: [panic, rebound]
+      volume_breakout:
+        compatible: []
+        forbidden: [bull, neutral, bear, panic]
+        degraded: [rebound]
+
+    # 选股规则（P1 多人格差异化选股）
+    stock_selection_rules:
+      # 技术面筛选 - 巴菲特不关注技术形态，只看长期稳定性
+      technical_filters:
+        - indicator: price_vs_ma250
+          condition: near  # 允许低于年线（买入机会）
+          weight: 0.3
+        - indicator: recent_250d_volatility
+          params:
+            max: 0.4  # 低波动性，稳定的企业
+          weight: 0.5
+
+      # K线数据周期 - 巴菲特看极长周期
+      kline_lookback_days: 500
+
+      # 不关注热点板块
+      follow_hot_sectors: false
+      hot_sector_weight: 0.0
+
+      # 基本面筛选（护城河/复利核心）
+      fundamental_filters:
+        - indicator: pe
+          condition: "<"
+          value: 25
+          weight: 1.5
+        - indicator: roe
+          condition: ">"
+          value: 20  # 巴菲特偏好高ROE企业
+          weight: 3.0
+        - indicator: roe_consistency  # ROE持续性
+          params:
+            years: 5
+            min_roe: 15
+          weight: 3.0
+        - indicator: debt_to_equity
+          condition: "<"
+          value: 0.3  # 更严格的负债要求
+          weight: 1.5
+        - indicator: free_cash_flow_yield  # 自由现金流收益率
+          condition: ">"
+          value: 4.0
+          weight: 2.0
+
+    social_style:
+      tone: 智慧、长期、复利思维
+      avoid:
+        - 短期波动
+        - 频繁交易
+        - 投机心态
+      prefer:
+        - 护城河分析
+        - 长期价值
+        - 复利增长
+        - 理性投资
