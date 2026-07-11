@@ -116,6 +116,28 @@ def institutional_buying(stock: StockQuote, params: dict) -> bool:
     return inst_net_wan >= min_net_buy_wan and appearance >= min_appearance
 
 
+@register("positive_news_catalyst")
+def positive_news_catalyst(stock: StockQuote, params: dict) -> bool:
+    """近期存在正面新闻催化剂。
+
+    params:
+        news_map: dict[str, dict]  动态注入的 {symbol: 新闻聚合记录}
+        min_positive: int          最小正面新闻条数（默认 1）
+    """
+    news_map = params.get("news_map") or {}
+    if not news_map:
+        return False
+    record = news_map.get(stock.symbol)
+    if not record:
+        return False
+
+    min_positive = int(params.get("min_positive", 1))
+    return (
+        record.get("has_positive_catalyst", False)
+        and record.get("positive_count", 0) >= min_positive
+    )
+
+
 # ---------------------------------------------------------------------------
 # 基本面类（价值投资人格使用）
 # ---------------------------------------------------------------------------
@@ -167,6 +189,7 @@ BUILTIN_RULES = [
     "market_cap_range",
     "in_hot_sector",
     "institutional_buying",
+    "positive_news_catalyst",
     "high_roe",
     "low_debt",
     "high_dividend",

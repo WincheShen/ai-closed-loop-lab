@@ -249,6 +249,18 @@ class ExplorerScanner:
                 sum(1 for r in dragon_tiger_map.values() if r.get("institutional_net_buy_wan", 0) > 0),
             )
 
+        # 注入新闻数据（用于 positive_news_catalyst 规则）
+        news_map = self._fetch_news_map()
+        if news_map:
+            for rule in rules:
+                if rule.id == "positive_news_catalyst":
+                    rule.params = {**rule.params, "news_map": news_map}
+            self.logger.info(
+                "新闻数据已注入: %d 只股票有相关新闻，其中 %d 只有正面催化",
+                len(news_map),
+                sum(1 for r in news_map.values() if r.get("has_positive_catalyst", False)),
+            )
+
         if not self._persona or not self._persona.stock_selection_rules:
             return rules
 
@@ -313,6 +325,24 @@ class ExplorerScanner:
             return {sym: rec.as_dict() for sym, rec in records.items()}
         except Exception as e:
             self.logger.warning("龙虎榜拉取失败 (降级): %s", e)
+            return {}
+
+    def _fetch_news_map(self) -> dict[str, dict]:
+        """拉取全市场新闻并匹配到候选股票，返回 {symbol: dict}。
+
+        失败/无 akshare 时返回空 dict。
+        """
+        try:
+            from src.stock_analyzer.data_source.news_client import NewsClient
+            client = NewsClient()
+            # 用当前 snapshot 里的所有股票做匹配
+            stocks = [(s.symbol, s.name) for s in self._snapshot.stocks] if self._snapshot else []
+            if not stocks:
+                return {}
+            records = client.match_to_stocks(stocks)
+            return {sym: rec.as_dict() for sym, rec in records.items()}
+        except Exception as e:
+            self.logger.warning("新闻拉取失败 (降级): %s", e)
             return {}
 
     def _adjust_rule_weights_from_experience(self, rules: list[Rule]) -> list[Rule]:

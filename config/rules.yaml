@@ -58,6 +58,15 @@ rules:
       min_appearance: 1           # 最近 3 天内至少上榜 1 次
     description: 近 3 天龙虎榜机构专用席位净买入超过阈值（"聪明钱"信号）
 
+  - id: positive_news_catalyst
+    name: 正面新闻催化剂
+    enabled: true
+    weight: 1.3
+    params:
+      # news_map 由 Explorer 运行时动态注入
+      min_positive: 1
+    description: 近期新闻中存在正面催化剂（利好/订单/中标/预增等）
+
   - id: reasonable_valuation
     name: 估值合理
     enabled: false   # 默认关闭，A股短线选股估值非主因
