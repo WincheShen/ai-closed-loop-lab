@@ -317,6 +317,14 @@ class StrategistEngine:
         except Exception:
             return ""
 
+    def _meta_rules_block(self) -> str:
+        """从 MetaRuleSynthesizer 获取当前生效的元规则并注入 prompt。"""
+        try:
+            from src.experience_layer.meta_rule_synthesizer import get_synthesizer
+            return get_synthesizer().generate_prompt_block()
+        except Exception:
+            return ""
+
     def _regime_kwargs(self) -> dict[str, Any]:
         regime = self.market_regime or {}
         return {
@@ -430,6 +438,7 @@ class StrategistEngine:
         user_msg += self._lessons_block()
         user_msg += self._evolution_block()
         user_msg += self._stock_memory_block(symbol)
+        user_msg += self._meta_rules_block()
 
         try:
             llm = get_llm()

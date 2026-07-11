@@ -208,19 +208,34 @@ def job_weekly_feedback() -> None:
     if not personas:
         logger.warning("未找到任何人格配置，使用默认人格复盘")
         asyncio.run(run_weekly_feedback())
-        return
+    else:
+        logger.info("为 %d 个人格执行周复盘", len(personas))
+        for p in personas:
+            persona_id = p.get("id") or p.get("persona_id")
+            if not persona_id:
+                continue
+            persona_name = p.get("name", persona_id)
+            logger.info("开始复盘人格: %s (%s)", persona_name, persona_id)
+            try:
+                asyncio.run(run_weekly_feedback(persona_id=persona_id))
+                logger.info("人格 %s 复盘完成", persona_name)
+            except Exception as e:
+                logger.error("人格 %s 复盘失败: %s", persona_name, e)
 
-    logger.info("为 %d 个人格执行周复盘", len(personas))
-
-    for p in personas:
-        persona_id = p["id"]
-        persona_name = p.get("name", persona_id)
-        logger.info("开始复盘人格: %s (%s)", persona_name, persona_id)
-        try:
-            asyncio.run(run_weekly_feedback(persona_id=persona_id))
-            logger.info("人格 %s 复盘完成", persona_name)
-        except Exception as e:
-            logger.error("人格 %s 复盘失败: %s", persona_name, e)
+    # 元规则归纳：跨人格共享的教训归纳（不区分 persona，因为交易数据是打通的）
+    try:
+        from src.experience_layer.meta_rule_synthesizer import get_synthesizer
+        synth = get_synthesizer()
+        result = synth.synthesize()
+        if result:
+            logger.info(
+                "[MetaRule] 归纳完成: %d avoid / %d prefer | %s",
+                len(result.get("avoid_patterns", [])),
+                len(result.get("prefer_patterns", [])),
+                result.get("summary", ""),
+            )
+    except Exception as e:
+        logger.error("[MetaRule] 归纳失败 (不影响主流程): %s", e)
 
 
 @skip_if_weekend
