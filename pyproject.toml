@@ -57,6 +57,10 @@ quant = [
     "pyqlib>=0.9",           # 注意：PyPI 包名是 pyqlib 不是 qlib
     "easyquotation>=0.7",
 ]
+# Phase 3 TradingAgent 真实分析：pip install -e ".[trading]"
+trading = [
+    "tradingagents>=0.2.3",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

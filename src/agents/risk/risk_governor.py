@@ -41,6 +41,7 @@ class RiskDecision:
     risk_flags: list[str] = field(default_factory=list)
     market_regime: str = ""
     persona_version: str = ""
+    persona_id: str = ""  # P1: 人格标识
     created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,10 +90,24 @@ class RiskGovernor:
         decisions: list[RiskDecision] = []
         approved: list[TradeSignal] = []
 
-        # posture=exit 时拒绝所有新买
-        if self.posture == "exit":
+        # 硬约束: bear/panic 市场下强制降级 posture（防止 LLM 返回过于激进的 posture）
+        if self.regime in ("bear", "panic") and self.posture in ("attack", "selective_attack"):
+            forced_posture = "defend" if self.regime == "bear" else "exit"
+            self.logger.warning(
+                "RiskGovernor 覆盖 posture: %s → %s (regime=%s 下不允许进攻)",
+                self.posture, forced_posture, self.regime,
+            )
+            self.posture = forced_posture
+
+        # posture=exit/defend/observe 时拒绝所有新买
+        if self.posture in ("exit", "defend", "observe"):
+            label = {"exit": "撤退", "defend": "防守", "observe": "观望"}[self.posture]
             for sig in signals:
-                d = self._reject(sig, "市场处于撤退状态，禁止新开仓", ["posture_exit"])
+                d = self._reject(
+                    sig,
+                    f"市场处于{label}状态 (regime={self.regime}, posture={self.posture})，禁止新开仓",
+                    [f"posture_{self.posture}"],
+                )
                 decisions.append(d)
             self._persist_decisions(decisions)
             self._summary_log(signals, decisions)
@@ -119,10 +134,10 @@ class RiskGovernor:
             approved_sig: TradeSignal = dict(sig)  # type: ignore[assignment]
             approved_sig["position_pct"] = decision.approved_position_pct
             # 在 signal 上挂上 risk 元信息（便于下游记录）
-            approved_sig["risk_decision"] = decision.decision  # type: ignore[typeddict-unknown-key]
-            approved_sig["risk_reason"] = decision.reason  # type: ignore[typeddict-unknown-key]
-            approved_sig["market_regime"] = self.regime  # type: ignore[typeddict-unknown-key]
-            approved_sig["persona_version"] = self.persona.persona_version  # type: ignore[typeddict-unknown-key]
+            approved_sig["risk_decision"] = decision.decision
+            approved_sig["risk_reason"] = decision.reason
+            approved_sig["market_regime"] = self.regime
+            approved_sig["persona_version"] = self.persona.persona_version
             approved.append(approved_sig)
 
             # 更新已用仓位（防止后续信号超出）
@@ -148,7 +163,7 @@ class RiskGovernor:
 
         # 1. 策略-regime 兼容性 (优先用 strategy_id, 没有则降级 strategy 名称)
         strategy_id = (
-            signal.get("strategy_id")  # type: ignore[typeddict-item]
+            signal.get("strategy_id")
             or signal.get("strategy", "")
             or "unknown"
         )
@@ -238,6 +253,7 @@ class RiskGovernor:
             risk_flags=flags,
             market_regime=self.regime,
             persona_version=self.persona.persona_version,
+            persona_id=self.persona.id,  # P1: 人格标识
             created_at=datetime.now().isoformat(),
         )
 
@@ -259,6 +275,7 @@ class RiskGovernor:
             risk_flags=flags,
             market_regime=self.regime,
             persona_version=self.persona.persona_version,
+            persona_id=self.persona.id,  # P1: 人格标识
             created_at=datetime.now().isoformat(),
         )
 
@@ -283,7 +300,7 @@ class RiskGovernor:
 
     def _signal_sector(self, signal: TradeSignal) -> str:
         """从 signal 上的扩展字段提取板块（Strategist 应该挂上）。"""
-        return signal.get("sector", "") or ""  # type: ignore[typeddict-item]
+        return signal.get("sector", "") or ""
 
     def _persist_decisions(self, decisions: list[RiskDecision]) -> None:
         for d in decisions:
@@ -322,7 +339,8 @@ def run_risk_governor_node(state: TradingState) -> dict[str, Any]:
     session_id = state["session_id"]
     signals = state.get("trade_signals", [])
     market_regime = state.get("market_regime") or {}
-    persona = get_persona()
+    persona_id = state.get("persona_id")
+    persona = get_persona(persona_id=persona_id)
 
     if not signals:
         return {

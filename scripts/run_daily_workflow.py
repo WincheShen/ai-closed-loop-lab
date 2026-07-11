@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def main():
         "daily_market_workflow",
         {
             "event_bus": event_bus,
-            "trading_agent_url": "http://localhost:8001",
+            "trading_agent_url": os.getenv("TRADING_AGENT_URL", "http://localhost:8001"),
         },
     )
 

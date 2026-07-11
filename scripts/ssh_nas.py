@@ -38,6 +38,7 @@ def ssh_nas(
     command: str | None = None,
     port: int = 22,
     interactive: bool = False,
+    use_sudo: bool = False,
 ) -> None:
     """SSH 连接到 NAS 并执行命令。"""
     # 使用 sshpass 自动输入密码
@@ -54,6 +55,9 @@ def ssh_nas(
     ]
 
     if command:
+        # 如果需要 sudo，使用 -S 从 stdin 读取密码
+        if use_sudo:
+            command = f"echo '{password}' | sudo -S {command}"
         ssh_cmd.append(command)
         mode = "执行命令"
     else:
@@ -83,6 +87,7 @@ def main():
     parser.add_argument("--port", type=int, default=22, help="SSH 端口")
     parser.add_argument("--command", "-c", help="要执行的命令（不指定则进入交互式）")
     parser.add_argument("--interactive", "-i", action="store_true", help="交互式登录")
+    parser.add_argument("--sudo", action="store_true", help="使用 sudo 执行命令")
 
     args = parser.parse_args()
 
@@ -98,6 +103,7 @@ def main():
         command=args.command,
         port=args.port,
         interactive=args.interactive or args.command is None,
+        use_sudo=args.sudo,
     )
 
 

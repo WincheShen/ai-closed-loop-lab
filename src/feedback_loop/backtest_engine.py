@@ -220,18 +220,25 @@ async def run_weekly_feedback_node(state: TradingState) -> dict[str, Any]:
 
     输入：含 performance_log, trade_signals 的 TradingState
     输出：{"performance_log": [...], "error_analysis": [...]}
+
+    流程:
+    1. 对本周信号做 backtest
+    2. 统计错误归因
+    3. 更新策略权重
+    4. 生成 LLM 策略优化建议
     """
     session_id = state["session_id"]
     engine = BacktestEngine(session_id)
+    brain = get_central_brain()
 
     # 从 Central Brain 读取本周所有信号
     signals = state.get("trade_signals", [])
     if not signals:
         # 尝试从数据库读取历史信号
-        signals = get_central_brain().store.list_active_signals(session_id)
+        signals = brain.store.list_active_signals(session_id)
         # 如果状态中没有，读取全部
         if not signals:
-            signals = get_central_brain().store.list_active_signals()
+            signals = brain.store.list_active_signals()
 
     if not signals:
         return {
@@ -243,8 +250,102 @@ async def run_weekly_feedback_node(state: TradingState) -> dict[str, Any]:
     records = engine.run_backtest(signals)
     breakdown = engine.error_breakdown(records)
 
+    # 更新策略权重
+    from src.feedback_loop.prompt_evolution import PromptEvolution
+    evo = PromptEvolution(session_id)
+    weights = evo.update_weights_from_records(records)
+
+    # 生成策略优化建议
+    recommendation = _generate_strategy_recommendation(
+        session_id, records, breakdown, weights, brain,
+    )
+
     return {
         "performance_log": state.get("performance_log", []) + records,
         "error_analysis": state.get("error_analysis", []) + [breakdown],
-        "logs": state.get("logs", []) + [f"[FeedbackLoop] 复盘 {len(records)} 条信号"],
+        "strategy_recommendation": recommendation,
+        "logs": state.get("logs", []) + [
+            f"[FeedbackLoop] 复盘 {len(records)} 条信号, 优化建议已生成"
+        ],
     }
+
+
+def _generate_strategy_recommendation(
+    session_id: str,
+    records: list[PerformanceRecord],
+    breakdown: dict[str, Any],
+    weights: list[dict],
+    brain: Any,
+) -> str:
+    """基于本周数据生成《策略优化建议》。
+
+    综合 lessons + attributions + backtest records 生成可操作的优化方向。
+    """
+    # 收集 lessons
+    lessons = brain.store.get_recent_lessons(limit=10)
+    lessons_text = "\n".join(
+        f"- [{l.get('strategy_id', '')}] {l.get('symbol', '')}({l.get('outcome', '')}): {l.get('lesson_text', '')}"
+        for l in lessons
+    ) if lessons else "暂无"
+
+    # 收集 attributions
+    attributions = brain.store.list_recent_attributions(limit=10)
+    attr_text = "\n".join(
+        f"- {a.get('symbol', '')} | {a.get('outcome', '')} | cause={a.get('primary_cause', '')} | pnl={a.get('pnl_pct', 0):+.1f}%"
+        for a in attributions
+    ) if attributions else "暂无"
+
+    # 权重摘要
+    weights_text = "\n".join(
+        f"- {w['strategy_name']}: 权重={w['current_weight']:.3f} (胜{w['win_count']}/负{w['loss_count']})"
+        for w in weights
+    )
+
+    # 复盘摘要
+    wins = sum(1 for r in records if r["actual_return"] > 0)
+    losses = sum(1 for r in records if r["actual_return"] < 0)
+    avg_ret = sum(r["actual_return"] for r in records) / len(records) if records else 0
+
+    prompt = f"""\
+你是一位量化策略优化顾问。根据以下数据，生成一份简洁的《本周策略优化建议》。
+
+## 本周绩效
+- 信号数: {len(records)}, 盈利: {wins}, 亏损: {losses}, 平均收益: {avg_ret*100:.2f}%
+- 错误归因: {json.dumps(breakdown.get('by_source', {}), ensure_ascii=False)}
+
+## 策略权重现状
+{weights_text}
+
+## 交易归因记录
+{attr_text}
+
+## 历史教训库
+{lessons_text}
+
+## 要求
+请输出:
+1. 【本周总结】2-3句话概括整体表现
+2. 【策略调整建议】具体说明哪个策略应加权/降权/暂停，并说明理由
+3. 【下周注意事项】基于当前教训给出 2-3 条操作准则
+4. 【参数调整】如有需要调整止损/止盈/仓位比例的建议
+
+保持简洁、可操作。
+"""
+
+    try:
+        from src.infra.model_adapter import get_llm
+        llm = get_llm()
+        response = llm.invoke([{"role": "user", "content": prompt}])
+        recommendation = response.content
+    except Exception as e:
+        logger.warning("策略优化建议生成失败: %s", e)
+        recommendation = f"[自动生成失败] 本周{len(records)}条信号, 胜率{wins}/{len(records)}, 需人工复盘。"
+
+    # 保存到数据库
+    brain.log_agent_event(
+        session_id, "feedback_loop", "strategy_recommendation",
+        {"recommendation": recommendation, "week_stats": {"signals": len(records), "wins": wins, "losses": losses}},
+    )
+
+    logger.info("策略优化建议已生成 (%d 字)", len(recommendation))
+    return recommendation

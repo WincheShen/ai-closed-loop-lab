@@ -18,8 +18,6 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-import httpx
-
 from ..data_source import AkshareClient, HotSectorDetector
 from ..data_source.akshare_client import StockQuote
 from ..data_source.emappdata_hot_sector import EmappdataHotSectorDetector
@@ -74,6 +72,8 @@ class DailyScanPipeline:
         # Phase 2: Social Media dispatcher
         sma_base_url: Optional[str] = None,
         sma_account_id: Optional[str] = None,
+        # Multi-persona support
+        persona_id: Optional[str] = None,
     ):
         self.rules_yaml = Path(rules_yaml)
         self.trading_agent_url = trading_agent_url
@@ -83,6 +83,7 @@ class DailyScanPipeline:
         self.max_agent_calls = max_agent_calls
         self.sma_base_url = sma_base_url
         self.sma_account_id = sma_account_id
+        self.persona_id = persona_id or "short_term_hot_rotation_v1"
 
         self.akshare = AkshareClient()
         self.hot_detector = HotSectorDetector()
@@ -214,6 +215,7 @@ class DailyScanPipeline:
                 total_llm_cost_usd=cost_summary.get("total_cost_usd", 0.0),
                 elapsed_seconds=elapsed_seconds,
                 picks_file_path=picks_file_path,
+                persona_id=self.persona_id,
             )
             logger.info("daily pick archived to central_brain: %s", today_iso)
         except Exception as e:  # noqa: BLE001
@@ -288,7 +290,8 @@ class DailyScanPipeline:
         try:
             # 真实 TradingAgents propagate 一轮约 5-8 分钟（12+ 次 LLM 调用）
             # 走缓存则毫秒级；给 15 分钟上限覆盖首次慢调用
-            resp = httpx.post(
+            import requests
+            resp = requests.post(
                 f"{self.trading_agent_url}/analyze",
                 json={"symbol": stock.symbol, "depth": "deep",
                       "requested_by": "daily_scan"},

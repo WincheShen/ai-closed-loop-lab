@@ -31,12 +31,16 @@ def publish_event(ctx: Dict[str, Any]) -> Dict[str, Any]:
     event_bus = ctx.get("event_bus")
 
     if event_bus:
+        from dataclasses import asdict
+        picks_dict = asdict(ctx["picks"])
+        picks_dict["pick_date"] = ctx["picks"].pick_date.isoformat()
+        
         event_bus.publish(
             "daily.picks.generated",
             {
                 "date": str(ctx["picks"].pick_date),
                 "num_candidates": len(ctx["picks"].candidates),
-                "picks": ctx["picks"],
+                "picks": picks_dict,
             },
         )
 

@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal as signal_mod
 import sys
 import uuid
 from datetime import datetime
@@ -339,17 +341,35 @@ def run_scheduler() -> None:
     """主循环。"""
     setup_schedule()
 
+    shutdown_requested = False
+
+    def _signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        logger.info("收到信号 %d，准备优雅停机...", signum)
+        shutdown_requested = True
+
+    signal_mod.signal(signal_mod.SIGTERM, _signal_handler)
+    signal_mod.signal(signal_mod.SIGINT, _signal_handler)
+
+    heartbeat_path = Path("/app/data/scheduler.heartbeat" if os.getenv("DB_PATH") else "data/scheduler.heartbeat")
     last_heartbeat = 0
 
-    while True:
+    while not shutdown_requested:
         schedule.run_pending()
 
         now = time.time()
         if now - last_heartbeat > 300:
             logger.info("scheduler heartbeat — alive")
             last_heartbeat = now
+            try:
+                heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+                heartbeat_path.touch()
+            except OSError:
+                pass
 
         time.sleep(30)
+
+    logger.info("调度器已停止")
 
 
 if __name__ == "__main__":
