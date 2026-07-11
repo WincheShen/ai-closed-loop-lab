@@ -16,6 +16,7 @@ import asyncio
 import glob
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -24,9 +25,32 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+
+class SafeJSONEncoder(json.JSONEncoder):
+    """处理 inf/nan 等特殊浮点值的 JSON encoder。"""
+    def default(self, obj):
+        if isinstance(obj, float):
+            if math.isinf(obj) or math.isnan(obj):
+                return None
+        return super().default(obj)
+
+
+def clean_special_floats(obj):
+    """递归清理数据中的特殊浮点值（inf/nan）。"""
+    if isinstance(obj, float):
+        if math.isinf(obj) or math.isnan(obj):
+            return None
+        return obj
+    elif isinstance(obj, dict):
+        return {k: clean_special_floats(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [clean_special_floats(item) for item in obj]
+    else:
+        return obj
 
 from src.infra.config import cfg
 from .image_redactor import ImageRedactor
@@ -66,7 +90,10 @@ _DATA_ROOT.mkdir(parents=True, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 _DB_PATH = _DATA_ROOT / "trade_records.sqlite"
-_conn = sqlite3.connect(_DB_PATH, check_same_thread=False, isolation_level=None)
+_conn = sqlite3.connect(_DB_PATH, check_same_thread=False, isolation_level=None, timeout=30)
+_conn.execute("PRAGMA journal_mode=WAL")
+_conn.execute("PRAGMA synchronous=NORMAL")
+_conn.execute("PRAGMA busy_timeout=5000")
 _conn.executescript("""
 CREATE TABLE IF NOT EXISTS trade_records (
     id              TEXT PRIMARY KEY,
@@ -423,14 +450,18 @@ async def agent_report_dates():
 
 
 @app.get("/api/agent-report/{date}")
-async def agent_report(date: str):
-    """返回某日完整 Agent 报告（regime + picks + signals + risk + orders + attributions）。"""
+async def agent_report(date: str, persona_id: str | None = None):
+    """返回某日完整 Agent 报告（regime + picks + signals + risk + orders + attributions）。
+
+    Args:
+        persona_id: 可选，按交易人格过滤数据
+    """
     try:
         brain = _get_brain()
         store = brain.store
         conn = store._conn()
 
-        # ── 市场判断 ──
+        # ── 市场判断（全局，不按人格过滤）──
         row = conn.execute(
             "SELECT * FROM market_regime_snapshots "
             "WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
@@ -447,8 +478,8 @@ async def agent_report(date: str):
             r["evidence"] = json.loads(r.get("evidence_json") or "{}")
             market_regime = r
 
-        # ── 选股归档 ──
-        picks = store.get_daily_pick(date)
+        # ── 选股归档（按人格过滤）──
+        picks = store.get_daily_pick(date, persona_id=persona_id)
         if picks:
             picks["hot_sectors"] = json.loads(picks.get("hot_sectors_json") or "[]")
             picks["aggressive"] = json.loads(picks.get("aggressive_json") or "[]")
@@ -457,33 +488,75 @@ async def agent_report(date: str):
             picks.setdefault("candidates_count", 0)
             picks.setdefault("agent_calls_count", 0)
             picks.setdefault("elapsed_seconds", 0)
+        else:
+            # 如果 daily_picks_archive 没有数据，尝试从 sessions 表获取
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE created_at LIKE ? ORDER BY created_at DESC LIMIT 1",
+                (f"{date}%",),
+            ).fetchone()
+            if row:
+                session = dict(row)
+                session_data = json.loads(session.get("data_json") or "{}")
+                picks = {
+                    "pick_date": date,
+                    "hot_sectors": session_data.get("hot_sectors", []),
+                    "aggressive": session_data.get("aggressive", []),
+                    "stable": session_data.get("stable", []),
+                    "candidates": session_data.get("candidates", []),
+                    "candidates_count": len(session_data.get("candidates", [])),
+                    "agent_calls_count": 0,
+                    "elapsed_seconds": 0,
+                }
 
-        # ── 交易信号 ──
-        rows = conn.execute(
-            "SELECT * FROM trade_signals WHERE timestamp LIKE ? ORDER BY timestamp",
-            (f"{date}%",),
-        ).fetchall()
+        # ── 交易信号（按人格过滤）──
+        if persona_id:
+            # 严格过滤：只显示该人格的数据（不显示NULL旧数据）
+            rows = conn.execute(
+                "SELECT * FROM trade_signals WHERE timestamp LIKE ? AND persona_id = ? ORDER BY timestamp",
+                (f"{date}%", persona_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM trade_signals WHERE timestamp LIKE ? ORDER BY timestamp",
+                (f"{date}%",),
+            ).fetchall()
         signals = [dict(r) for r in rows]
 
-        # ── 风控裁决 ──
-        rows = conn.execute(
-            "SELECT * FROM risk_decisions WHERE created_at LIKE ? ORDER BY created_at",
-            (f"{date}%",),
-        ).fetchall()
+        # ── 风控裁决（按人格过滤）──
+        if persona_id:
+            rows = conn.execute(
+                "SELECT * FROM risk_decisions WHERE created_at LIKE ? AND persona_id = ? ORDER BY created_at",
+                (f"{date}%", persona_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM risk_decisions WHERE created_at LIKE ? ORDER BY created_at",
+                (f"{date}%",),
+            ).fetchall()
         risk_decisions = []
         for r in rows:
             d = dict(r)
             d["risk_flags"] = json.loads(d.get("risk_flags_json") or "[]")
             risk_decisions.append(d)
 
-        # ── 订单 + 成交 ──
-        rows = conn.execute(
-            """SELECT o.*, f.avg_price, f.fees, f.filled_at
-               FROM orders o
-               LEFT JOIN fills f ON o.order_id = f.order_id
-               WHERE o.submitted_at LIKE ? ORDER BY o.submitted_at""",
-            (f"{date}%",),
-        ).fetchall()
+        # ── 订单 + 成交（按人格过滤，通过 fills.persona_id 关联）──
+        if persona_id:
+            rows = conn.execute(
+                """SELECT o.*, f.avg_price, f.fees, f.filled_at, f.persona_id as fill_persona_id
+                   FROM orders o
+                   LEFT JOIN fills f ON o.order_id = f.order_id
+                   WHERE o.submitted_at LIKE ? AND f.persona_id = ?
+                   ORDER BY o.submitted_at""",
+                (f"{date}%", persona_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT o.*, f.avg_price, f.fees, f.filled_at, f.persona_id as fill_persona_id
+                   FROM orders o
+                   LEFT JOIN fills f ON o.order_id = f.order_id
+                   WHERE o.submitted_at LIKE ? ORDER BY o.submitted_at""",
+                (f"{date}%",),
+            ).fetchall()
         orders = [dict(r) for r in rows]
 
         # ── LLM 成本 ──
@@ -512,7 +585,7 @@ async def agent_report(date: str):
             d["tags"] = json.loads(d.get("tags_json") or "[]")
             attributions.append(d)
 
-        return {
+        result = {
             "date": date,
             "market_regime": market_regime,
             "picks": picks,
@@ -522,6 +595,10 @@ async def agent_report(date: str):
             "cost": cost,
             "attributions": attributions,
         }
+        # 递归清理特殊浮点值后再序列化
+        cleaned_result = clean_special_floats(result)
+        json_str = json.dumps(cleaned_result, cls=SafeJSONEncoder)
+        return Response(content=json_str, media_type="application/json")
 
     except Exception as e:
         logger.error("agent_report error for %s: %s", date, e)
@@ -551,24 +628,30 @@ async def get_lessons(
 
 
 @app.get("/api/positions")
-async def get_positions(status: str = "open"):
-    """返回持仓列表。status=open|closed|all"""
+async def get_positions(status: str = "open", persona_id: str | None = None):
+    """返回持仓列表。status=open|closed|all，可按人格过滤"""
     try:
         brain = _get_brain()
         conn = brain.store._conn()
-        if status == "all":
-            rows = conn.execute(
-                "SELECT * FROM positions ORDER BY entry_date DESC LIMIT 100"
-            ).fetchall()
+
+        # 构建查询条件
+        conditions = []
+        params = []
+
+        if status == "open":
+            conditions.append("status = 'open'")
         elif status == "closed":
-            rows = conn.execute(
-                "SELECT * FROM positions WHERE status = 'closed' "
-                "ORDER BY closed_at DESC LIMIT 50"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_date"
-            ).fetchall()
+            conditions.append("status = 'closed'")
+
+        if persona_id:
+            conditions.append("persona_id = ?")
+            params.append(persona_id)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        order_clause = "ORDER BY closed_at DESC LIMIT 50" if status == "closed" else "ORDER BY entry_date DESC LIMIT 100"
+
+        sql = f"SELECT * FROM positions {where_clause} {order_clause}"
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
         logger.error("get_positions error: %s", e)
@@ -576,15 +659,22 @@ async def get_positions(status: str = "open"):
 
 
 @app.get("/api/fills")
-async def get_fills(limit: int = 50):
-    """返回成交记录列表。"""
+async def get_fills(limit: int = 50, persona_id: str | None = None):
+    """返回成交记录列表，可按人格过滤"""
     try:
         brain = _get_brain()
         conn = brain.store._conn()
-        rows = conn.execute(
-            "SELECT * FROM fills ORDER BY filled_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+
+        if persona_id:
+            rows = conn.execute(
+                "SELECT * FROM fills WHERE persona_id = ? ORDER BY filled_at DESC LIMIT ?",
+                (persona_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM fills ORDER BY filled_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [dict(r) for r in rows]
     except Exception as e:
         logger.error("get_fills error: %s", e)
@@ -608,15 +698,28 @@ async def get_orders(limit: int = 50):
 
 
 @app.get("/api/portfolio-summary")
-async def portfolio_summary():
-    """返回投资组合汇总统计。"""
+async def portfolio_summary(persona_id: str | None = None):
+    """返回投资组合汇总统计，可按人格过滤"""
     try:
         brain = _get_brain()
         conn = brain.store._conn()
 
+        # 构建 WHERE 条件
+        where_open = "WHERE status = 'open'"
+        where_closed = "WHERE status = 'closed'"
+        params_open = []
+        params_closed = []
+
+        if persona_id:
+            where_open += " AND persona_id = ?"
+            where_closed += " AND persona_id = ?"
+            params_open.append(persona_id)
+            params_closed.append(persona_id)
+
         # 当前持仓统计
         open_rows = conn.execute(
-            "SELECT * FROM positions WHERE status = 'open'"
+            f"SELECT * FROM positions {where_open}",
+            params_open
         ).fetchall()
         open_positions = [dict(r) for r in open_rows]
 
@@ -635,8 +738,8 @@ async def portfolio_summary():
 
         # 已平仓统计
         closed_rows = conn.execute(
-            "SELECT realized_pnl, closed_at FROM positions WHERE status = 'closed' "
-            "ORDER BY closed_at"
+            f"SELECT realized_pnl, closed_at FROM positions {where_closed} ORDER BY closed_at",
+            params_closed
         ).fetchall()
         total_realized_pnl = sum(r["realized_pnl"] or 0 for r in closed_rows)
         win_count = sum(1 for r in closed_rows if (r["realized_pnl"] or 0) > 0)
@@ -704,20 +807,28 @@ async def strategy_weights():
         return {"weights": []}
 
 
-@app.get("/api/persona")
-async def get_persona():
-    """返回 trading_persona.yaml 配置。"""
-    import yaml
+@app.get("/api/personas")
+async def get_personas():
+    """返回所有交易人格列表。"""
     try:
-        persona_path = Path(__file__).resolve().parents[2] / "config" / "trading_persona.yaml"
-        if persona_path.exists():
-            with open(persona_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            return data.get("persona", data)
-        return {"error": "persona config not found"}
+        from src.agents.cio.trading_persona import list_personas
+        personas = list_personas()
+        return {"personas": personas}
     except Exception as e:
-        logger.error("get_persona error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("get_personas error: %s", e)
+        return {"personas": []}
+
+
+@app.get("/api/accounts")
+async def get_accounts():
+    """返回所有资金账户信息。"""
+    try:
+        brain = _get_brain()
+        accounts = brain.store.list_accounts()
+        return {"accounts": accounts}
+    except Exception as e:
+        logger.error("get_accounts error: %s", e)
+        return {"accounts": []}
 
 
 @app.get("/api/lessons-timeline")
@@ -770,6 +881,87 @@ async def attribution_stats(days: int = 30):
     except Exception as e:
         logger.error("attribution_stats error: %s", e)
         return {"attributions": [], "by_strategy": [], "by_exit_reason": []}
+
+
+@app.get("/api/events/recent")
+async def recent_events(limit: int = 20):
+    """返回最近的事件记录（用于工作流监控）。"""
+    try:
+        event_db_path = Path("data/event_bus/events.sqlite")
+        if not event_db_path.exists():
+            return []
+
+        conn = sqlite3.connect(str(event_db_path))
+        rows = conn.execute(
+            """
+            SELECT id, event_type, payload_json, created_at
+            FROM events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        conn.close()
+
+        events = []
+        for r in rows:
+            try:
+                payload = json.loads(r[2])
+            except Exception:
+                payload = {}
+
+            events.append({
+                "id": r[0],
+                "event_type": r[1],
+                "created_at": r[3],
+                "payload": payload,
+            })
+
+        return events
+    except Exception as e:
+        logger.error("recent_events error: %s", e)
+        return []
+
+
+@app.post("/api/workflow/trigger")
+async def trigger_workflow():
+    """手动触发完整工作流执行。"""
+    try:
+        import asyncio
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        # 在后台运行工作流
+        def run_workflow():
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", "import asyncio; from src.graph.workflow import run_daily_pipeline; asyncio.run(run_daily_pipeline('mock'))"],
+                    cwd=Path(__file__).resolve().parents[2],
+                    capture_output=True,
+                    text=True,
+                    timeout=600  # 10分钟超时
+                )
+                logger.info("Workflow triggered: %s", result.stdout)
+                if result.stderr:
+                    logger.warning("Workflow stderr: %s", result.stderr)
+            except subprocess.TimeoutExpired:
+                logger.error("Workflow execution timeout")
+            except Exception as e:
+                logger.error("Workflow execution failed: %s", e)
+
+        # 在后台线程中运行
+        import threading
+        thread = threading.Thread(target=run_workflow, daemon=True)
+        thread.start()
+
+        return {
+            "status": "triggered",
+            "message": "工作流已在后台启动，请查看日志监控执行进度"
+        }
+    except Exception as e:
+        logger.error("trigger_workflow error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 _react_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

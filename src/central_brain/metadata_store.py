@@ -28,17 +28,35 @@ logger = get_logger(__name__)
 # =============================================================================
 
 class EventBus:
-    """轻量级 Pub/Sub，用于 Agent 簇间异步通信。"""
+    """Pub/Sub with SQLite persistence for audit trail."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: MemoryStore | None = None) -> None:
         self._subscribers: dict[str, list[Callable[[dict], None]]] = {}
         self._lock = threading.Lock()
+        self._store = store  # Will be set when CentralBrain initializes
+
+    def set_store(self, store: MemoryStore) -> None:
+        """Set the backing store for event persistence."""
+        self._store = store
 
     def subscribe(self, channel: str, handler: Callable[[dict], None]) -> None:
         with self._lock:
             self._subscribers.setdefault(channel, []).append(handler)
 
     def publish(self, channel: str, payload: dict) -> None:
+        # 1. Persist to DB first (audit trail, best-effort)
+        if self._store:
+            try:
+                event_id = f"EVT-{uuid.uuid4().hex[:8].upper()}"
+                self._store._conn().execute(
+                    "INSERT INTO events (event_id, session_id, agent, event_type, payload, created_at) VALUES (?,?,?,?,?,?)",
+                    (event_id, payload.get("session_id", ""), "event_bus", channel, json.dumps(payload, default=str), datetime.now().isoformat()),
+                )
+                self._store._conn().commit()
+            except Exception as e:
+                logger.warning("Event persistence failed on %s: %s", channel, e)
+
+        # 2. In-memory dispatch
         with self._lock:
             handlers = self._subscribers.get(channel, []).copy()
         for handler in handlers:
@@ -70,12 +88,20 @@ class MemoryStore:
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or cfg().get("db_path")
         self._local = threading.local()
+        self._in_transaction = False
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._local.conn = sqlite3.connect(
+                self.db_path, check_same_thread=False, timeout=30,
+                isolation_level=None,
+            )
             self._local.conn.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrent access
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA synchronous=NORMAL")
+            self._local.conn.execute("PRAGMA busy_timeout=5000")
         return self._local.conn
 
     def _init_db(self) -> None:
@@ -133,6 +159,7 @@ class MemoryStore:
             );
             CREATE TABLE IF NOT EXISTS fills (
                 fill_id TEXT PRIMARY KEY,
+                persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1',
                 order_id TEXT,
                 symbol TEXT,
                 side TEXT,
@@ -162,7 +189,8 @@ class MemoryStore:
                 meta_json TEXT
             );
             CREATE TABLE IF NOT EXISTS daily_picks_archive (
-                pick_date TEXT PRIMARY KEY,
+                pick_date TEXT NOT NULL,
+                persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1',
                 is_mock_data INTEGER DEFAULT 0,
                 hot_sectors_json TEXT,
                 candidates_count INTEGER DEFAULT 0,
@@ -172,7 +200,8 @@ class MemoryStore:
                 total_llm_cost_usd REAL DEFAULT 0.0,
                 elapsed_seconds REAL DEFAULT 0.0,
                 picks_file_path TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (pick_date, persona_id)
             );
             CREATE TABLE IF NOT EXISTS social_posts (
                 sma_task_id TEXT PRIMARY KEY,
@@ -194,6 +223,7 @@ class MemoryStore:
             -- ---------------------------------------------------------------
             CREATE TABLE IF NOT EXISTS positions (
                 position_id TEXT PRIMARY KEY,
+                persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1',
                 symbol TEXT NOT NULL,
                 name TEXT,
                 side TEXT DEFAULT 'long',
@@ -275,6 +305,10 @@ class MemoryStore:
             CREATE INDEX IF NOT EXISTS idx_posts_date ON social_posts(dispatched_at);
             CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
             CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
+            CREATE INDEX IF NOT EXISTS idx_positions_persona ON positions(persona_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_unique_open
+                ON positions(symbol, persona_id) WHERE status = 'open';
+            CREATE INDEX IF NOT EXISTS idx_fills_persona ON fills(persona_id);
             CREATE INDEX IF NOT EXISTS idx_reviews_position ON position_reviews(position_id);
             CREATE INDEX IF NOT EXISTS idx_regime_date ON market_regime_snapshots(trade_date);
             CREATE INDEX IF NOT EXISTS idx_risk_session ON risk_decisions(session_id);
@@ -354,11 +388,27 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol);
             CREATE INDEX IF NOT EXISTS idx_watchlist_status ON watchlist(status);
+            -- ---------------------------------------------------------------
+            -- Multi-Persona Account Management
+            -- ---------------------------------------------------------------
+            CREATE TABLE IF NOT EXISTS accounts (
+                account_id TEXT PRIMARY KEY,
+                persona_id TEXT NOT NULL UNIQUE,
+                persona_name TEXT,
+                capital REAL NOT NULL,
+                available_cash REAL NOT NULL,
+                total_value REAL NOT NULL,
+                total_pnl REAL DEFAULT 0.0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_accounts_persona ON accounts(persona_id);
             """
         )
         conn.commit()
         # 兼容旧数据库：为已存在的表补字段
         self._apply_phase1_migrations(conn)
+        self._apply_multi_persona_migrations(conn)
 
     def _apply_phase1_migrations(self, conn: sqlite3.Connection) -> None:
         """为 Phase 1 增加 trade_signals/positions 的认知元数据字段。
@@ -370,6 +420,8 @@ class MemoryStore:
             ("trade_signals", "persona_version TEXT"),
             ("trade_signals", "risk_decision TEXT"),
             ("trade_signals", "approved_position_pct REAL"),
+            ("trade_signals", "entry_condition TEXT DEFAULT 'immediate'"),
+            ("trade_signals", "current_price REAL"),
             ("positions", "market_regime TEXT"),
             ("positions", "persona_version TEXT"),
             ("positions", "sector TEXT"),
@@ -383,13 +435,85 @@ class MemoryStore:
                     logger.debug("ALTER %s.%s skipped: %s", table, col_name, e)
         conn.commit()
 
+    def _apply_multi_persona_migrations(self, conn: sqlite3.Connection) -> None:
+        """为多人格支持添加 account_id 和 persona_id 字段。"""
+        migrations = [
+            ("positions", "account_id TEXT"),
+            ("trade_signals", "account_id TEXT"),
+            ("positions", "persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'"),
+            ("fills", "persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'"),
+            # P1: 选股和风控也需要人格标识
+            ("trade_signals", "persona_id TEXT"),
+            ("risk_decisions", "persona_id TEXT"),
+            # P1: 选股归档表支持多人格
+            ("daily_picks_archive", "persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'"),
+        ]
+        for table, col_def in migrations:
+            col_name = col_def.split()[0]
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.debug("ALTER %s.%s skipped: %s", table, col_name, e)
+        conn.commit()
+
+    # ------------------------------------------------------------------
+    # Transaction helpers
+    # ------------------------------------------------------------------
+
+    def begin_transaction(self) -> None:
+        """Begin an IMMEDIATE transaction (acquires write lock)."""
+        self._conn().execute("BEGIN IMMEDIATE")
+        self._in_transaction = True
+
+    def commit_transaction(self) -> None:
+        """Commit the current transaction."""
+        self._in_transaction = False
+        self._conn().commit()
+
+    def rollback_transaction(self) -> None:
+        """Rollback the current transaction."""
+        self._in_transaction = False
+        self._conn().rollback()
+
+    def _auto_commit(self) -> None:
+        """Commit only when not inside a managed transaction."""
+        if not self._in_transaction:
+            self._conn().commit()
+
+    # ------------------------------------------------------------------
+    # Position queries (generic)
+    # ------------------------------------------------------------------
+
+    def list_positions(
+        self,
+        persona_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """List positions with optional persona_id and status filters."""
+        conn = self._conn()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if persona_id:
+            conditions.append("persona_id = ?")
+            params.append(persona_id)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM positions {where} ORDER BY entry_date",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def save_session(self, session_id: str, run_mode: str, state: dict) -> None:
         conn = self._conn()
         conn.execute(
             "INSERT OR REPLACE INTO sessions (session_id, created_at, run_mode, state_json) VALUES (?, ?, ?, ?)",
             (session_id, datetime.now().isoformat(), run_mode, json.dumps(state, ensure_ascii=False, default=str)),
         )
-        conn.commit()
+        self._auto_commit()
 
     def load_session(self, session_id: str) -> dict | None:
         conn = self._conn()
@@ -413,16 +537,19 @@ class MemoryStore:
                 datetime.now().isoformat(),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def save_trade_signal(self, session_id: str, signal: dict) -> None:
         conn = self._conn()
+        entry_condition = signal.get("entry_condition", "immediate")
+        status = "pending" if entry_condition in ("breakout", "pullback") else "active"
         conn.execute(
             """INSERT OR REPLACE INTO trade_signals
             (signal_id, session_id, symbol, action, entry_price, target_price,
              stop_loss, position_pct, strategy, rationale, timestamp, status,
-             market_regime, persona_version, risk_decision, approved_position_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             market_regime, persona_version, risk_decision, approved_position_pct,
+             entry_condition, current_price, persona_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal["signal_id"],
                 session_id,
@@ -435,14 +562,17 @@ class MemoryStore:
                 signal.get("strategy"),
                 signal.get("rationale"),
                 signal.get("timestamp"),
-                "active",
+                status,
                 signal.get("market_regime"),
                 signal.get("persona_version"),
                 signal.get("risk_decision"),
                 signal.get("approved_position_pct"),
+                entry_condition,
+                signal.get("current_price"),
+                signal.get("persona_id"),  # P1: 人格标识
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     # ------------------------------------------------------------------
     # Phase 1: MarketBrain + RiskGovernor 持久化
@@ -479,7 +609,7 @@ class MemoryStore:
                 snapshot.get("created_at") or datetime.now().isoformat(),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def latest_market_regime(self) -> dict | None:
         """获取最近一次的 market regime 快照。"""
@@ -496,8 +626,8 @@ class MemoryStore:
             """INSERT INTO risk_decisions
             (session_id, signal_id, symbol, decision,
              original_position_pct, approved_position_pct, reason,
-             risk_flags_json, market_regime, persona_version, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             risk_flags_json, market_regime, persona_version, created_at, persona_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 decision["signal_id"],
@@ -510,9 +640,10 @@ class MemoryStore:
                 decision.get("market_regime"),
                 decision.get("persona_version"),
                 decision.get("created_at") or datetime.now().isoformat(),
+                decision.get("persona_id"),  # P1: 人格标识
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def list_active_signals(self, session_id: str | None = None) -> list[dict]:
         conn = self._conn()
@@ -527,13 +658,24 @@ class MemoryStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_pending_signals(self) -> list[dict]:
+        """获取所有待触发的条件单 (status=pending, 未过期)。"""
+        conn = self._conn()
+        rows = conn.execute(
+            """SELECT * FROM trade_signals
+            WHERE status = 'pending'
+              AND (timestamp IS NULL OR datetime(timestamp, '+5 days') >= datetime('now'))
+            ORDER BY timestamp""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def update_signal_status(self, signal_id: str, status: str) -> None:
         conn = self._conn()
         conn.execute(
             "UPDATE trade_signals SET status = ? WHERE signal_id = ?",
             (status, signal_id),
         )
-        conn.commit()
+        self._auto_commit()
 
     def save_order(self, order: dict) -> None:
         conn = self._conn()
@@ -556,16 +698,17 @@ class MemoryStore:
                 order.get("updated_at"),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def save_fill(self, fill: dict) -> None:
         conn = self._conn()
         conn.execute(
             """INSERT OR REPLACE INTO fills
-            (fill_id, order_id, symbol, side, quantity, avg_price, fees, filled_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (fill_id, persona_id, order_id, symbol, side, quantity, avg_price, fees, filled_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fill["fill_id"],
+                fill.get("persona_id", "short_term_hot_rotation_v1"),
                 fill["order_id"],
                 fill["symbol"],
                 fill["side"],
@@ -575,7 +718,7 @@ class MemoryStore:
                 fill["filled_at"],
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def query_events(self, session_id: str | None = None, agent: str | None = None, limit: int = 100) -> list[dict]:
         conn = self._conn()
@@ -608,21 +751,25 @@ class MemoryStore:
         total_llm_cost_usd: float = 0.0,
         elapsed_seconds: float = 0.0,
         picks_file_path: str | None = None,
+        persona_id: str | None = None,
     ) -> None:
         """Archive one day's selection result.
 
-        ``pick_date`` is ISO date (YYYY-MM-DD) and serves as primary key;
-        re-running the same day overwrites the record.
+        ``pick_date`` is ISO date (YYYY-MM-DD);
+        ``persona_id`` identifies the trading persona;
+        re-running the same day + persona overwrites the record.
         """
         conn = self._conn()
+        persona = persona_id or "short_term_hot_rotation_v1"
         conn.execute(
             """INSERT OR REPLACE INTO daily_picks_archive
-            (pick_date, is_mock_data, hot_sectors_json, candidates_count,
+            (pick_date, persona_id, is_mock_data, hot_sectors_json, candidates_count,
              agent_calls_count, aggressive_json, stable_json,
              total_llm_cost_usd, elapsed_seconds, picks_file_path, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pick_date,
+                persona,
                 1 if is_mock_data else 0,
                 json.dumps(hot_sectors, ensure_ascii=False),
                 candidates_count,
@@ -635,14 +782,27 @@ class MemoryStore:
                 datetime.now().isoformat(),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
-    def get_daily_pick(self, pick_date: str) -> dict | None:
+    def get_daily_pick(self, pick_date: str, persona_id: str | None = None) -> dict | None:
         conn = self._conn()
-        row = conn.execute(
-            "SELECT * FROM daily_picks_archive WHERE pick_date = ?",
-            (pick_date,),
-        ).fetchone()
+        if persona_id:
+            row = conn.execute(
+                "SELECT * FROM daily_picks_archive WHERE pick_date = ? AND persona_id = ?",
+                (pick_date, persona_id),
+            ).fetchone()
+        else:
+            # 默认返回短线热点的数据（向后兼容）
+            row = conn.execute(
+                "SELECT * FROM daily_picks_archive WHERE pick_date = ? AND persona_id = ?",
+                (pick_date, "short_term_hot_rotation_v1"),
+            ).fetchone()
+            # 如果没有找到，尝试返回任意一条（旧数据兼容）
+            if not row:
+                row = conn.execute(
+                    "SELECT * FROM daily_picks_archive WHERE pick_date = ?",
+                    (pick_date,),
+                ).fetchone()
         return dict(row) if row else None
 
     def record_social_post(
@@ -672,7 +832,7 @@ class MemoryStore:
                 dispatched_at or datetime.now().isoformat(),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def update_social_post_metrics(
         self,
@@ -711,7 +871,7 @@ class MemoryStore:
             f"UPDATE social_posts SET {', '.join(fields)} WHERE sma_task_id = ?",
             params,
         )
-        conn.commit()
+        self._auto_commit()
 
     def list_social_posts(
         self,
@@ -773,7 +933,7 @@ class MemoryStore:
                 json.dumps(meta, ensure_ascii=False) if meta else None,
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def llm_cost_summary(
         self,
@@ -821,30 +981,38 @@ class MemoryStore:
         market_regime: str | None = None,
         persona_version: str | None = None,
         sector: str | None = None,
+        persona_id: str | None = None,
     ) -> None:
         """Open a new position with the original analysis thesis attached."""
         conn = self._conn()
         conn.execute(
             """INSERT OR REPLACE INTO positions
-            (position_id, symbol, name, side, entry_price, current_qty, entry_date,
+            (position_id, persona_id, symbol, name, side, entry_price, current_qty, entry_date,
              status, original_signal_id, original_thesis, original_strategy,
              bull_case, bear_case, target_price, stop_loss, created_at,
              market_regime, persona_version, sector)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                position_id, symbol, name, side, entry_price, qty, entry_date,
+                position_id, persona_id or "short_term_hot_rotation_v1", symbol, name, side,
+                entry_price, qty, entry_date,
                 signal_id, thesis, strategy, bull_case, bear_case,
                 target_price, stop_loss, datetime.now().isoformat(),
                 market_regime, persona_version, sector,
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
-    def list_open_positions(self) -> list[dict]:
+    def list_open_positions(self, persona_id: str | None = None) -> list[dict]:
         conn = self._conn()
-        rows = conn.execute(
-            "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_date"
-        ).fetchall()
+        if persona_id:
+            rows = conn.execute(
+                "SELECT * FROM positions WHERE status = 'open' AND persona_id = ? ORDER BY entry_date",
+                (persona_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_date"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_position(self, position_id: str) -> dict | None:
@@ -870,7 +1038,7 @@ class MemoryStore:
             WHERE position_id = ?""",
             (ts, action, reason, position_id),
         )
-        conn.commit()
+        self._auto_commit()
 
     def update_position_qty(self, position_id: str, new_qty: int) -> None:
         conn = self._conn()
@@ -878,7 +1046,7 @@ class MemoryStore:
             "UPDATE positions SET current_qty = ? WHERE position_id = ?",
             (new_qty, position_id),
         )
-        conn.commit()
+        self._auto_commit()
 
     def close_position(
         self,
@@ -896,7 +1064,7 @@ class MemoryStore:
             WHERE position_id = ?""",
             (close_price, realized_pnl, ts, position_id),
         )
-        conn.commit()
+        self._auto_commit()
 
     def save_position_review(
         self,
@@ -923,7 +1091,7 @@ class MemoryStore:
                 market_summary, model, tokens_used,
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def list_position_reviews(
         self, position_id: str, limit: int = 50,
@@ -977,7 +1145,16 @@ class MemoryStore:
                 attr.get("created_at") or datetime.now().isoformat(),
             ),
         )
-        conn.commit()
+        self._auto_commit()
+
+    def list_recent_attributions(self, limit: int = 10) -> list[dict]:
+        """获取最近的交易归因记录。"""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM trade_attributions ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_lesson(self, lesson: dict) -> None:
         """保存单条 lesson。"""
@@ -1001,7 +1178,7 @@ class MemoryStore:
                 lesson.get("created_at") or datetime.now().isoformat(),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def get_recent_lessons(
         self,
@@ -1076,7 +1253,7 @@ class MemoryStore:
             "UPDATE lessons SET cited_count = cited_count + 1 WHERE lesson_id = ?",
             (lesson_id,),
         )
-        conn.commit()
+        self._auto_commit()
 
     # ------------------------------------------------------------------
     # Watchlist (自选股池)
@@ -1116,7 +1293,7 @@ class MemoryStore:
                 item.get("notes", ""),
             ),
         )
-        conn.commit()
+        self._auto_commit()
 
     def get_watchlist(self, status: str = "watching") -> list[dict]:
         """获取指定状态的自选股列表。"""
@@ -1150,7 +1327,7 @@ class MemoryStore:
             WHERE watch_id = ?""",
             (datetime.now().isoformat(), price, change_pct, watch_id),
         )
-        conn.commit()
+        self._auto_commit()
 
     def trigger_watchlist_item(self, watch_id: str) -> None:
         """标记自选股触发入场条件。"""
@@ -1160,7 +1337,7 @@ class MemoryStore:
             "WHERE watch_id = ?",
             (datetime.now().isoformat(), watch_id),
         )
-        conn.commit()
+        self._auto_commit()
 
     def remove_from_watchlist(self, watch_id: str, reason: str = "") -> None:
         """从自选股池移除（标记为 removed）。"""
@@ -1170,7 +1347,73 @@ class MemoryStore:
             "WHERE watch_id = ?",
             (datetime.now().isoformat(), reason, watch_id),
         )
-        conn.commit()
+        self._auto_commit()
+
+    # ------------------------------------------------------------------
+    # Multi-Persona Account Management
+    # ------------------------------------------------------------------
+
+    def create_account(self, persona_id: str, persona_name: str, capital: float) -> str:
+        """为指定人格创建资金账户。"""
+        conn = self._conn()
+        account_id = f"acc-{persona_id}"
+        now = datetime.now().isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO accounts
+            (account_id, persona_id, persona_name, capital, available_cash, total_value, total_pnl, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (account_id, persona_id, persona_name, capital, capital, capital, 0.0, now, now),
+        )
+        self._auto_commit()
+        return account_id
+
+    def get_account_by_persona(self, persona_id: str) -> dict | None:
+        """根据人格 ID 获取账户信息。"""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM accounts WHERE persona_id = ?", (persona_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def update_account_balance(
+        self,
+        account_id: str,
+        available_cash: float | None = None,
+        total_value: float | None = None,
+        total_pnl: float | None = None,
+    ) -> None:
+        """更新账户余额。"""
+        conn = self._conn()
+        updates = []
+        params = []
+        if available_cash is not None:
+            updates.append("available_cash = ?")
+            params.append(available_cash)
+        if total_value is not None:
+            updates.append("total_value = ?")
+            params.append(total_value)
+        if total_pnl is not None:
+            updates.append("total_pnl = ?")
+            params.append(total_pnl)
+        updates.append("updated_at = ?")
+        params.append(datetime.now().isoformat())
+        params.append(account_id)
+
+        conn.execute(
+            f"UPDATE accounts SET {', '.join(updates)} WHERE account_id = ?",
+            params,
+        )
+        self._auto_commit()
+
+    def list_accounts(self) -> list[dict]:
+        """列出所有账户。"""
+        conn = self._conn()
+        rows = conn.execute("SELECT * FROM accounts ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+
+# 别名以保持向后兼容
+MetadataStore = MemoryStore
 
 
 # =============================================================================
@@ -1188,8 +1431,9 @@ class CentralBrain:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._bus = EventBus()
                     cls._instance._store = MemoryStore()
+                    cls._instance._bus = EventBus()
+                    cls._instance._bus.set_store(cls._instance._store)
         return cls._instance
 
     @property
