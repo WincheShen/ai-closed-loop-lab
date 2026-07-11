@@ -15,6 +15,7 @@ import {
   FileText,
   Briefcase,
   BrainCircuit,
+  Users,
 } from 'lucide-react'
 
 const navItems = [
@@ -61,6 +62,12 @@ const navItems = [
     path: '/records',
     label: '交易记录管理',
     icon: ClipboardList,
+    badge: null,
+  },
+  {
+    path: '/personas',
+    label: '交易人格管理',
+    icon: Users,
     badge: null,
   },
 ]

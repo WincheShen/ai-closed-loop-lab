@@ -10,6 +10,7 @@ import Analyze from '@/pages/Analyze'
 import Records from '@/pages/Records'
 import Portfolio from '@/pages/Portfolio'
 import StrategyEvolution from '@/pages/StrategyEvolution'
+import Personas from '@/pages/Personas'
 import NotFound from '@/pages/NotFound'
 
 function App() {
@@ -25,6 +26,7 @@ function App() {
       <Route path="/records" element={<Layout><Records /></Layout>} />
       <Route path="/portfolio" element={<Layout><Portfolio /></Layout>} />
       <Route path="/strategy-evolution" element={<Layout><StrategyEvolution /></Layout>} />
+      <Route path="/personas" element={<Layout><Personas /></Layout>} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   )

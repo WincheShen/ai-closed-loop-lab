@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronRight,
   Zap,
+  BarChart3,
 } from 'lucide-react'
 import {
   ResponsiveContainer,
@@ -49,6 +50,24 @@ interface Persona {
   risk_limits: Record<string, any>
   strategy_regime_compatibility: Record<string, any>
   social_style: Record<string, any>
+  stock_selection_rules: {
+    technical_filters?: Array<{
+      indicator: string
+      condition?: string
+      value?: number
+      params?: Record<string, any>
+      weight: number
+    }>
+    fundamental_filters?: Array<{
+      indicator: string
+      condition: string
+      value: number
+      weight: number
+    }>
+    kline_lookback_days?: number
+    follow_hot_sectors?: boolean
+    hot_sector_weight?: number
+  }
 }
 
 interface Lesson {
@@ -76,10 +95,18 @@ interface ExitReason {
   count: number
 }
 
+// 人格选项
+const PERSONA_OPTIONS = [
+  { id: 'short_term_hot_rotation_v1', name: '短线热点' },
+  { id: 'duan_yongping_v1', name: '段永平' },
+  { id: 'warren_buffett_v1', name: '巴菲特' },
+]
+
 // ── 主页面 ──
 export default function StrategyEvolution() {
   const [weights, setWeights] = useState<PromptWeight[]>([])
-  const [persona, setPersona] = useState<Persona | null>(null)
+  const [personas, setPersonas] = useState<Persona[]>([])
+  const [selectedPersona, setSelectedPersona] = useState<string>('short_term_hot_rotation_v1')
   const [lessons, setLessons] = useState<Lesson[]>([])
   const [strategyStats, setStrategyStats] = useState<StrategyStats[]>([])
   const [exitReasons, setExitReasons] = useState<ExitReason[]>([])
@@ -92,7 +119,7 @@ export default function StrategyEvolution() {
     try {
       const [wRes, pRes, lRes, aRes] = await Promise.all([
         fetch('/api/strategy-weights'),
-        fetch('/api/persona'),
+        fetch('/api/personas'),
         fetch('/api/lessons-timeline?limit=30'),
         fetch('/api/attribution-stats?days=60'),
       ])
@@ -100,7 +127,10 @@ export default function StrategyEvolution() {
         const data = await wRes.json()
         setWeights(data.weights || [])
       }
-      if (pRes.ok) setPersona(await pRes.json())
+      if (pRes.ok) {
+        const data = await pRes.json()
+        setPersonas(data.personas || [])
+      }
       if (lRes.ok) setLessons(await lRes.json())
       if (aRes.ok) {
         const data = await aRes.json()
@@ -113,6 +143,9 @@ export default function StrategyEvolution() {
       setLoading(false)
     }
   }, [])
+
+  // 获取当前选中的人格详情
+  const persona = personas.find(p => p.id === selectedPersona) || null
 
   useEffect(() => { loadAll() }, [loadAll])
 
@@ -138,13 +171,25 @@ export default function StrategyEvolution() {
             交易人格 · 策略权重 · 经验教训 · 归因分析
           </p>
         </div>
-        <button
-          onClick={loadAll}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel-hover border border-panel-border text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
-          刷新
-        </button>
+        <div className="flex items-center gap-3">
+          {/* 人格选择器 */}
+          <select
+            value={selectedPersona}
+            onChange={(e) => setSelectedPersona(e.target.value)}
+            className="bg-panel-hover border border-panel-border rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50"
+          >
+            {PERSONA_OPTIONS.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <button
+            onClick={loadAll}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel-hover border border-panel-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+            刷新
+          </button>
+        </div>
       </div>
 
       {/* ── 交易人格概览 ── */}
@@ -265,11 +310,59 @@ export default function StrategyEvolution() {
                     <span className="text-foreground font-mono">{persona.preferred_holding_days?.join('-')} 天</span>
                   </div>
                   <div className="flex justify-between">
+                    <span className="text-muted-foreground">K线回看周期</span>
+                    <span className="text-foreground font-mono">{persona.stock_selection_rules?.kline_lookback_days || 20} 天</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">关注热点板块</span>
+                    <span className="text-foreground font-mono">{persona.stock_selection_rules?.follow_hot_sectors ? '是' : '否'}</span>
+                  </div>
+                  <div className="flex justify-between">
                     <span className="text-muted-foreground">社媒风格</span>
                     <span className="text-foreground">{persona.social_style?.tone}</span>
                   </div>
                 </div>
               </div>
+
+              {/* 技术面选股规则 */}
+              {persona.stock_selection_rules?.technical_filters && persona.stock_selection_rules.technical_filters.length > 0 && (
+                <div className="p-3 rounded-lg bg-panel-hover border border-panel-border md:col-span-2">
+                  <h3 className="text-xs font-medium text-accent mb-2 uppercase tracking-wider">技术面选股规则</h3>
+                  <div className="space-y-1.5">
+                    {persona.stock_selection_rules.technical_filters.map((filter, i) => (
+                      <div key={i} className="flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <Zap className="w-3 h-3 text-accent" />
+                          <span className="text-foreground">{filter.indicator}</span>
+                          {filter.condition && (
+                            <span className="text-muted-foreground">({filter.condition})</span>
+                          )}
+                        </div>
+                        <span className="text-accent font-mono">权重: {filter.weight}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 基本面选股规则 */}
+              {persona.stock_selection_rules?.fundamental_filters && persona.stock_selection_rules.fundamental_filters.length > 0 && (
+                <div className="p-3 rounded-lg bg-panel-hover border border-panel-border md:col-span-2">
+                  <h3 className="text-xs font-medium text-bullish mb-2 uppercase tracking-wider">基本面选股规则</h3>
+                  <div className="space-y-1.5">
+                    {persona.stock_selection_rules.fundamental_filters.map((filter, i) => (
+                      <div key={i} className="flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2">
+                          <BarChart3 className="w-3 h-3 text-bullish" />
+                          <span className="text-foreground">{filter.indicator}</span>
+                          <span className="text-muted-foreground">{filter.condition} {filter.value}</span>
+                        </div>
+                        <span className="text-bullish font-mono">权重: {filter.weight}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </section>

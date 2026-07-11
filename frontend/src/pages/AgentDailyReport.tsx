@@ -807,10 +807,19 @@ function AttributionSection({ attributions }: { attributions: TradeAttribution[]
   )
 }
 
+// 人格选项
+const PERSONA_OPTIONS = [
+  { id: 'all', name: '全部人格' },
+  { id: 'short_term_hot_rotation_v1', name: '短线热点' },
+  { id: 'duan_yongping_v1', name: '段永平' },
+  { id: 'warren_buffett_v1', name: '巴菲特' },
+]
+
 // ── 主页面 ──
 export default function AgentDailyReport() {
   const [dates, setDates] = useState<string[]>([])
   const [selectedDate, setSelectedDate] = useState<string>('')
+  const [selectedPersona, setSelectedPersona] = useState<string>('all')
   const [report, setReport] = useState<AgentReport | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -831,7 +840,8 @@ export default function AgentDailyReport() {
   useEffect(() => {
     if (!selectedDate) return
     setLoading(true)
-    fetch(`/api/agent-report/${selectedDate}`)
+    const personaParam = selectedPersona !== 'all' ? `?persona_id=${selectedPersona}` : ''
+    fetch(`/api/agent-report/${selectedDate}${personaParam}`)
       .then((r) => r.json())
       .then((data: AgentReport) => {
         setReport(data)
@@ -841,7 +851,7 @@ export default function AgentDailyReport() {
         console.error(e)
         setLoading(false)
       })
-  }, [selectedDate])
+  }, [selectedDate, selectedPersona])
 
   const regimeColor = report?.market_regime
     ? (regimeColors[report.market_regime.regime] || regimeColors.neutral)
@@ -872,6 +882,20 @@ export default function AgentDailyReport() {
             >
               {dates.map((d) => (
                 <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* 人格选择 */}
+          <div className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-accent" />
+            <select
+              value={selectedPersona}
+              onChange={(e) => setSelectedPersona(e.target.value)}
+              className="bg-panel-hover border border-panel-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent/50"
+            >
+              {PERSONA_OPTIONS.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
           </div>
@@ -908,11 +932,11 @@ export default function AgentDailyReport() {
                 </span>
                 <span>→</span>
                 <span>
-                  信号 <span className="text-foreground font-mono font-bold">{report.signals.length}</span> 条
+                  信号 <span className="text-foreground font-mono font-bold">{report.signals?.length || 0}</span> 条
                 </span>
                 <span>→</span>
                 <span>
-                  执行 <span className="text-foreground font-mono font-bold">{report.orders.length}</span> 笔
+                  执行 <span className="text-foreground font-mono font-bold">{report.orders?.length || 0}</span> 笔
                 </span>
               </div>
 
@@ -953,12 +977,12 @@ export default function AgentDailyReport() {
 
           {/* 深度评估 + 风控审核 */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <SignalsSection signals={report.signals} />
-            <RiskSection decisions={report.risk_decisions} />
+            <SignalsSection signals={report.signals || []} />
+            <RiskSection decisions={report.risk_decisions || []} />
           </div>
 
           {/* 执行记录 */}
-          <OrdersSection orders={report.orders} />
+          <OrdersSection orders={report.orders || []} />
 
           {/* 交易归因 */}
           <AttributionSection attributions={report.attributions || []} />

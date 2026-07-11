@@ -98,6 +98,14 @@ function fmtPct(entry: number, current: number) {
   return `${sign}${pct.toFixed(2)}%`
 }
 
+// 人格选项
+const PERSONA_OPTIONS = [
+  { id: 'all', name: '全部人格' },
+  { id: 'short_term_hot_rotation_v1', name: '短线热点' },
+  { id: 'duan_yongping_v1', name: '段永平' },
+  { id: 'warren_buffett_v1', name: '巴菲特' },
+]
+
 // ── 主页面 ──
 export default function Portfolio() {
   const [summary, setSummary] = useState<PortfolioSummary | null>(null)
@@ -107,15 +115,17 @@ export default function Portfolio() {
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'open' | 'closed' | 'fills' | 'watchlist'>('open')
+  const [selectedPersona, setSelectedPersona] = useState<string>('all')
 
   const loadAll = useCallback(async () => {
     setLoading(true)
     try {
+      const personaParam = selectedPersona !== 'all' ? `&persona_id=${selectedPersona}` : ''
       const [sumRes, openRes, closedRes, fillsRes, watchRes] = await Promise.all([
-        fetch('/api/portfolio-summary'),
-        fetch('/api/positions?status=open'),
-        fetch('/api/positions?status=closed'),
-        fetch('/api/fills?limit=50'),
+        fetch(`/api/portfolio-summary?${personaParam ? `persona_id=${selectedPersona}` : ''}`),
+        fetch(`/api/positions?status=open${personaParam}`),
+        fetch(`/api/positions?status=closed${personaParam}`),
+        fetch(`/api/fills?limit=50${personaParam}`),
         fetch('/api/watchlist?status=watching'),
       ])
       if (sumRes.ok) setSummary(await sumRes.json())
@@ -128,7 +138,7 @@ export default function Portfolio() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [selectedPersona])
 
   useEffect(() => {
     loadAll()
@@ -146,13 +156,25 @@ export default function Portfolio() {
             AI Agent 持仓 · 成交 · 收益 · 自选股池
           </p>
         </div>
-        <button
-          onClick={loadAll}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel-hover border border-panel-border text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
-          刷新
-        </button>
+        <div className="flex items-center gap-3">
+          {/* 人格选择器 */}
+          <select
+            value={selectedPersona}
+            onChange={(e) => setSelectedPersona(e.target.value)}
+            className="bg-panel-hover border border-panel-border rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50"
+          >
+            {PERSONA_OPTIONS.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <button
+            onClick={loadAll}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-panel-hover border border-panel-border text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+            刷新
+          </button>
+        </div>
       </div>
 
       {/* 概览卡片 */}
