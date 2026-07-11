@@ -91,6 +91,31 @@ def in_hot_sector(stock: StockQuote, params: dict) -> bool:
     )
 
 
+@register("institutional_buying")
+def institutional_buying(stock: StockQuote, params: dict) -> bool:
+    """近期机构龙虎榜净买入（"聪明钱"信号）。
+
+    params:
+        dragon_tiger_map: dict[str, dict]  动态注入的 {symbol: 龙虎榜聚合记录}
+        min_net_buy_wan: float  最小机构净买入（万元），默认 5000
+        min_appearance: int     最小上榜次数，默认 1
+    """
+    dt_map = params.get("dragon_tiger_map") or {}
+    if not dt_map:
+        return False
+    record = dt_map.get(stock.symbol)
+    if not record:
+        return False
+
+    min_net_buy_wan = float(params.get("min_net_buy_wan", 5000))
+    min_appearance = int(params.get("min_appearance", 1))
+
+    inst_net_wan = record.get("institutional_net_buy_wan", 0)
+    appearance = record.get("appearance_count", 0)
+
+    return inst_net_wan >= min_net_buy_wan and appearance >= min_appearance
+
+
 # ---------------------------------------------------------------------------
 # 基本面类（价值投资人格使用）
 # ---------------------------------------------------------------------------
@@ -141,6 +166,7 @@ BUILTIN_RULES = [
     "not_st",
     "market_cap_range",
     "in_hot_sector",
+    "institutional_buying",
     "high_roe",
     "low_debt",
     "high_dividend",

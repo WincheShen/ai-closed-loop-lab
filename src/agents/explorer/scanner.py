@@ -236,6 +236,19 @@ class ExplorerScanner:
             if rule.id == "in_hot_sector":
                 rule.params = {**rule.params, "hot_sectors": self._hot_names}
 
+        # 注入龙虎榜数据（用于 institutional_buying 规则）
+        # 失败降级：拉取失败时规则自动 miss，不影响主流程
+        dragon_tiger_map = self._fetch_dragon_tiger_map()
+        if dragon_tiger_map:
+            for rule in rules:
+                if rule.id == "institutional_buying":
+                    rule.params = {**rule.params, "dragon_tiger_map": dragon_tiger_map}
+            self.logger.info(
+                "龙虎榜数据已注入: %d 只股票，其中 %d 只有机构净买入",
+                len(dragon_tiger_map),
+                sum(1 for r in dragon_tiger_map.values() if r.get("institutional_net_buy_wan", 0) > 0),
+            )
+
         if not self._persona or not self._persona.stock_selection_rules:
             return rules
 
@@ -287,6 +300,20 @@ class ExplorerScanner:
         rules = self._adjust_rule_weights_from_experience(rules)
 
         return rules
+
+    def _fetch_dragon_tiger_map(self) -> dict[str, dict]:
+        """拉取近 3 天龙虎榜数据并转为 {symbol: dict} 供规则使用。
+
+        失败/无 akshare 时返回空 dict，规则会自动 miss，不影响主流程。
+        """
+        try:
+            from src.stock_analyzer.data_source.dragon_tiger_client import DragonTigerClient
+            client = DragonTigerClient()
+            records = client.fetch_recent(days_back=3)
+            return {sym: rec.as_dict() for sym, rec in records.items()}
+        except Exception as e:
+            self.logger.warning("龙虎榜拉取失败 (降级): %s", e)
+            return {}
 
     def _adjust_rule_weights_from_experience(self, rules: list[Rule]) -> list[Rule]:
         """根据 StrategyLedger 的实盘数据动态调整规则权重。

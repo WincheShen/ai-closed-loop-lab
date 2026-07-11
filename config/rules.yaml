@@ -48,6 +48,16 @@ rules:
     params:
       min_inflow_wan: 5000
 
+  - id: institutional_buying
+    name: 机构龙虎榜净买入
+    enabled: true
+    weight: 1.8
+    params:
+      # dragon_tiger_map 由 Explorer 运行时动态注入
+      min_net_buy_wan: 5000       # 机构净买入 >= 5000 万
+      min_appearance: 1           # 最近 3 天内至少上榜 1 次
+    description: 近 3 天龙虎榜机构专用席位净买入超过阈值（"聪明钱"信号）
+
   - id: reasonable_valuation
     name: 估值合理
     enabled: false   # 默认关闭，A股短线选股估值非主因
