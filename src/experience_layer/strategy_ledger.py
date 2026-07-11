@@ -14,11 +14,13 @@ from src.infra.logger import get_agent_logger
 logger = get_agent_logger("experience", "strategy_ledger")
 
 # 胜率低于此值且样本 >= MIN_SAMPLE 时，建议暂停
-_SUSPEND_WIN_RATE = 0.30
+# 提高到 0.40：负期望策略（33% 胜率）应被立即暂停而非继续跑
+_SUSPEND_WIN_RATE = 0.40
 # 胜率高于此值且样本 >= MIN_SAMPLE 时，建议加权
 _BOOST_WIN_RATE = 0.60
 # 最少样本数才出建议
-_MIN_SAMPLE = 3
+# 提高到 5：防止 3 笔"运气好"就 BOOST 或"运气差"就 SUSPEND
+_MIN_SAMPLE = 5
 # 规则权重乘数上下界（防止极端漂移）
 _WEIGHT_MULTIPLIER_MIN = 0.3
 _WEIGHT_MULTIPLIER_MAX = 1.8

@@ -294,10 +294,14 @@ class PositionReviewAgent:
         规则:
         1. 止损: 当前价 <= stop_loss → EXIT
         2. 止盈(阶梯):
-           - 当前价 >= target_price * 0.95 → REDUCE (锁利一半)
-           - 当前价 >= target_price → EXIT (到目标全出)
+           - 当前价 >= target_price → REDUCE 一半 + 让剩余仓位跑（让利润奔跑）
+           - 当前价 >= target_price * 0.95 → REDUCE 一半
         3. 浮亏超 -8% 且 LLM 仍 HOLD → 强制 EXIT
-        4. 持仓超 5 天且浮盈 < 2% → REDUCE (避免资金占用)
+        4. 分级 held_too_long（保护赢家）:
+           - 大赢家 pnl > 20% : 不受持仓天数限制（让趋势跑）
+           - 常规赢家 pnl > 5% : 持仓 > 10 天 才 REDUCE
+           - 平淡 -3 < pnl <= 5% : 持仓 > 5 天 REDUCE
+           - 弱势 pnl <= -3% : 持仓 > 3 天 REDUCE
         """
         symbol = position.get("symbol", "")
         target_price = position.get("target_price") or 0
@@ -319,22 +323,23 @@ class PositionReviewAgent:
                     "rule_override": True,
                 }
 
-        # 规则 2a: 到达目标价 → EXIT
+        # 规则 2a: 到达目标价 → REDUCE 一半 (让利润奔跑，而不是全出)
+        # 依据: 历史数据 held_too_long 平均 +554%，全出目标价会砍掉最大赢家
         if target_price > 0 and current_price >= target_price:
             if result["action"] in ("HOLD", "ADD"):
                 logger.info(
-                    "[%s] Rule Override: 达到目标价 %.2f (当前 %.2f) → EXIT",
+                    "[%s] Rule Override: 达到目标价 %.2f (当前 %.2f) → REDUCE 50%% (保留一半让利润奔跑)",
                     symbol, target_price, current_price,
                 )
                 return {
                     **result,
-                    "action": "EXIT",
-                    "reason": f"价格{current_price:.2f}已达目标价{target_price:.2f}，止盈清仓",
+                    "action": "REDUCE",
+                    "reason": f"价格{current_price:.2f}已达目标价{target_price:.2f}，减仓50%锁利，剩余仓位继续持有",
                     "risk_flag": "",
                     "rule_override": True,
                 }
 
-        # 规则 2b: 接近目标价 (>=95%) → REDUCE
+        # 规则 2b: 接近目标价 (>=95%) → REDUCE 一半
         if target_price > 0 and current_price >= target_price * 0.95:
             if result["action"] in ("HOLD", "ADD"):
                 logger.info(
@@ -362,20 +367,35 @@ class PositionReviewAgent:
                 "rule_override": True,
             }
 
-        # 规则 4: 持仓超 5 天且浮盈不足 → REDUCE (释放资金)
-        if entry_date and pnl_pct < 2.0 and pnl_pct > -3.0:
+        # 规则 4: 分级 held_too_long（保护赢家）
+        # 依据: 历史数据显示 6+ 天持仓平均 +201%，机械 5 天减仓正在砍最大赢家
+        if entry_date and result["action"] == "HOLD":
             try:
                 from datetime import date as date_cls
                 days_held = (date_cls.today() - date_cls.fromisoformat(entry_date)).days
-                if days_held > 5 and result["action"] == "HOLD":
+
+                # 大赢家: 不受持仓天数限制
+                if pnl_pct > 20.0:
+                    return result
+
+                # 常规赢家 (5-20%): 允许持有 10 天
+                stale_threshold = None
+                if pnl_pct > 5.0:
+                    stale_threshold = 10
+                elif pnl_pct > -3.0:  # 平淡区间
+                    stale_threshold = 5
+                else:  # -8% < pnl <= -3% 弱势
+                    stale_threshold = 3
+
+                if stale_threshold and days_held > stale_threshold:
                     logger.info(
-                        "[%s] Rule Override: 持仓 %d 天浮盈仅 %.1f%% → REDUCE",
-                        symbol, days_held, pnl_pct,
+                        "[%s] Rule Override: 持仓 %d 天浮盈 %.1f%% (阈值%d天) → REDUCE",
+                        symbol, days_held, pnl_pct, stale_threshold,
                     )
                     return {
                         **result,
                         "action": "REDUCE",
-                        "reason": f"持仓{days_held}天浮盈仅{pnl_pct:.1f}%，减仓释放资金",
+                        "reason": f"持仓{days_held}天浮盈{pnl_pct:.1f}%（该盈利水平阈值{stale_threshold}天），减仓释放资金",
                         "risk_flag": "stale_position",
                         "rule_override": True,
                     }

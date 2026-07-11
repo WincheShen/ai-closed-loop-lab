@@ -109,10 +109,12 @@ class ExplorerScanner:
                 self.logger.warning("基本面数据填充失败 (不影响主流程)", exc_info=True)
 
         # 4. 规则引擎筛选（支持人格级规则覆盖 + 经验驱动权重调整）
+        # min_score 从 2.0 提升到 2.5 — 提高入场质量，宁缺勿滥
+        # (依据: 历史数据 53% 退出是止损，说明入场质量偏弱)
         rules = self._build_rules_for_persona()
         engine = RuleEngine(rules)
         results = engine.filter_and_rank(
-            self._snapshot.stocks, min_score=2.0, top_k=30,
+            self._snapshot.stocks, min_score=2.5, top_k=20,
         )
         self.logger.info("规则引擎筛选: %d 只通过 (persona=%s)", len(results), self.persona_id or "default")
 
@@ -416,6 +418,8 @@ class ExplorerScanner:
 
             closes = [b.close for b in bars]
             volumes = [b.volume for b in bars]
+            highs = [b.high for b in bars]
+            lows = [b.low for b in bars]
             n = len(closes)
 
             ma5 = sum(closes[-5:]) / min(5, n) if n >= 1 else 0
@@ -423,6 +427,23 @@ class ExplorerScanner:
             ma20 = sum(closes) / n if n >= 1 else 0
             avg_vol = sum(volumes) / n if n >= 1 else 1
             latest_vol = volumes[-1] if volumes else 0
+
+            # ATR (14-day True Range 平均) — 用于动态止损参考
+            atr = 0.0
+            atr_pct = 0.0
+            if n >= 2:
+                trs = []
+                for i in range(1, n):
+                    tr = max(
+                        highs[i] - lows[i],
+                        abs(highs[i] - closes[i - 1]),
+                        abs(lows[i] - closes[i - 1]),
+                    )
+                    trs.append(tr)
+                # 取最近 14 天（不足则全用）
+                window = trs[-14:] if len(trs) >= 14 else trs
+                atr = sum(window) / len(window) if window else 0.0
+                atr_pct = round(atr / current_price * 100, 2) if current_price > 0 else 0.0
 
             return {
                 "current_price": current_price,
@@ -439,6 +460,9 @@ class ExplorerScanner:
                 "recent_low_10d": round(min(b.low for b in bars[-10:]), 2),
                 "vol_ratio": round(latest_vol / avg_vol, 2) if avg_vol > 0 else 1,
                 "trend": "up" if n >= 5 and closes[-1] > closes[-5] else "down",
+                "atr": round(atr, 2),
+                "atr_pct": atr_pct,  # 波动率百分比，如 3.5 表示日均波幅 3.5%
+                "suggested_stop_pct": round(min(max(atr_pct * 2, 3.0), 8.0), 2),  # 2×ATR 且限制在 3-8% 之间
             }
         except Exception as e:
             self.logger.warning("K线摘要失败 %s: %s", symbol, e)

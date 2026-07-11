@@ -449,6 +449,26 @@ class StrategistEngine:
             )
             return None
 
+        # 硬门槛：若 LLM 选择的策略在当前 regime 下被 ExperienceLayer 标记为 SUSPEND
+        # 直接拒绝，不由 LLM 判断（数据说话）
+        strategy_name = result.get("strategy", "")
+        strategy_id_check = _infer_strategy_id(strategy_name)
+        current_regime = self.market_regime.get("regime", "")
+        if strategy_id_check and strategy_id_check != "unknown" and current_regime:
+            try:
+                from src.experience_layer import get_experience
+                exp = get_experience()
+                stats = exp.get_strategy_stats(strategy_id_check, regime=current_regime)
+                if stats and stats.get("recommendation") == "SUSPEND":
+                    self.logger.warning(
+                        "[%s %s] PASS — 策略 %s 在 %s 环境下已被暂停 (胜率%.0f%%, 样本%d)",
+                        symbol, name, strategy_id_check, current_regime,
+                        stats["win_rate"] * 100, stats["total_trades"],
+                    )
+                    return None
+            except Exception:
+                self.logger.debug("SUSPEND 检查失败，降级放行", exc_info=True)
+
         current_price = kline.get("current_price", 0)
         entry_price = result.get("entry_price") or current_price
         if entry_price <= 0:
@@ -466,6 +486,22 @@ class StrategistEngine:
         stop_loss_pct = self.persona.default_stop_loss_pct if hasattr(
             self.persona, 'default_stop_loss_pct'
         ) else self.config.get("default_stop_loss_pct", 0.05)
+
+        # ATR-based 动态止损保护：如果 LLM 给的止损距离 < 1.5×ATR，认为过紧（会被日内噪音扫出）
+        # 依据: 历史数据 53% 退出是止损，一部分是被噪音扫出而非真正破位
+        llm_stop_loss = result.get("stop_loss")
+        atr_pct = kline.get("atr_pct", 0)
+        if llm_stop_loss and llm_stop_loss > 0 and entry_price > 0 and atr_pct > 0:
+            llm_stop_distance_pct = (entry_price - llm_stop_loss) / entry_price * 100
+            min_stop_distance_pct = atr_pct * 1.5  # 1.5×ATR 是硬下限
+            if 0 < llm_stop_distance_pct < min_stop_distance_pct:
+                self.logger.info(
+                    "[%s] 止损保护: LLM止损距离%.1f%% < 1.5×ATR(%.1f%%)，放宽到 1.5×ATR",
+                    symbol, llm_stop_distance_pct, min_stop_distance_pct,
+                )
+                # 用 1.5×ATR 距离作为止损（但不超过 8% 硬上限）
+                effective_stop_pct = min(min_stop_distance_pct, 8.0) / 100
+                result["stop_loss"] = entry_price * (1 - effective_stop_pct)
 
         # 判断入场条件类型
         llm_condition = result.get("entry_condition", "").lower()
