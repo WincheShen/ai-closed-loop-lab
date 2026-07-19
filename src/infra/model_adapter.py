@@ -206,7 +206,9 @@ def _create_llm(
             max_retries=max_retries,
         )
 
-        if "gpt-5" not in model:
+        # 某些模型不支持自定义 temperature（如 gpt-5, gpt-chat-latest, o1, o3）
+        _no_temp_models = ("gpt-5", "gpt-chat-latest", "o1", "o3")
+        if not any(m in model for m in _no_temp_models):
             kwargs["temperature"] = temperature
 
         llm = AzureChatOpenAI(**kwargs)

@@ -82,6 +82,11 @@ REGIME_SYSTEM_PROMPT = """\
 ## 决策框架
 - regime: 必须从以下选一: bull(强势) / neutral(震荡) / bear(弱势) / panic(恐慌) / rebound(反弹)
 - risk_appetite: high / medium / low
+  - bull: high
+  - neutral: medium (震荡市保持中等风险偏好)
+  - rebound: medium
+  - bear: low
+  - panic: low
 - recommended_posture: attack(进攻) / selective_attack(精选进攻) / defend(防守) / observe(观望) / exit(撤退)
 - dominant_styles: 当前占优的风格 (如 "热点轮动"、"防守蓝筹"、"高股息")
 - avoid_styles: 当前应避免的风格

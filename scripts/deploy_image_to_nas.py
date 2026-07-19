@@ -111,7 +111,7 @@ def download_to_nas(tar_file: str):
     """在 NAS 上下载镜像文件。"""
     print(f"📥 步骤 4/5: 在 NAS 上下载镜像文件...")
 
-    url = f"http://192.168.3.149:{HTTP_PORT}/{tar_file}"  # 本机 IP
+    url = f"http://192.168.3.158:{HTTP_PORT}/{tar_file}"  # 本机 IP
     # 如果 NAS 在外网，需要使用公网 IP 或内网穿透
 
     ssh_cmd = [
@@ -143,7 +143,7 @@ def load_and_restart(tar_file: str) -> bool:
         "sshpass", "-p", NAS_PASSWORD,
         "ssh", "-o", "StrictHostKeyChecking=no",
         f"{NAS_USER}@{NAS_HOST}",
-        "which docker"
+        "/usr/local/bin/docker --version"
     ]
 
     try:
@@ -161,7 +161,7 @@ def load_and_restart(tar_file: str) -> bool:
         "sshpass", "-p", NAS_PASSWORD,
         "ssh", "-o", "StrictHostKeyChecking=no",
         f"{NAS_USER}@{NAS_HOST}",
-        f"sudo -S docker load -i {NAS_PATH}{tar_file}"
+        f"sudo -S /usr/local/bin/docker load -i {NAS_PATH}{tar_file}"
     ]
 
     # 通过 stdin 传递密码
@@ -211,7 +211,7 @@ def load_and_restart(tar_file: str) -> bool:
 
 
 def sync_to_nas():
-    """使用 rsync 同步代码到 NAS。"""
+    """使用 rsync 同步代码到 NAS（排除配置文件）。"""
     print(f"📦 同步代码到 NAS: {NAS_USER}@{NAS_HOST}...")
 
     rsync_cmd = [
@@ -228,6 +228,8 @@ def sync_to_nas():
         "--exclude", "reports",
         "--exclude", ".venv",
         "--exclude", "venv",
+        "--exclude", "docker-compose.yml",  # 保护 NAS 配置
+        "--exclude", ".env",  # 保护环境变量
         ".",
         f"{NAS_USER}@{NAS_HOST}:{NAS_PATH}",
     ]
