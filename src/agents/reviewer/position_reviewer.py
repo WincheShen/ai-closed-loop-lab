@@ -219,14 +219,25 @@ class PositionReviewAgent:
 
         Args:
             force_review_map: 可选的 {position_id: reason} 映射，对指定持仓注入强制复审上下文。
+
+        说明：默认人格 (short_term_hot_rotation_v1) 会额外接管历史遗留的
+        persona_id IS NULL 持仓，避免旧数据被三个人格集体遗忘（"买了不卖" bug）。
         """
-        positions = self.brain.store.list_open_positions(persona_id=self.persona_id)
+        # 默认人格接管未指派持仓；其他人格严格按自身过滤
+        include_unassigned = self.persona_id == "short_term_hot_rotation_v1"
+        positions = self.brain.store.list_open_positions(
+            persona_id=self.persona_id,
+            include_unassigned=include_unassigned,
+        )
         if not positions:
             logger.info("无持仓，跳过复审")
             return []
 
         force_map = force_review_map or {}
-        logger.info("开始复审 %d 只持仓", len(positions))
+        logger.info(
+            "开始复审 %d 只持仓 (persona=%s, include_unassigned=%s)",
+            len(positions), self.persona_id, include_unassigned,
+        )
         results = []
         for pos in positions:
             try:

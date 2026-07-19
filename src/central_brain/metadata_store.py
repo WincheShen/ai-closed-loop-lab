@@ -1002,13 +1002,35 @@ class MemoryStore:
         )
         self._auto_commit()
 
-    def list_open_positions(self, persona_id: str | None = None) -> list[dict]:
+    def list_open_positions(
+        self,
+        persona_id: str | None = None,
+        include_unassigned: bool = False,
+    ) -> list[dict]:
+        """列出所有 open 状态的持仓。
+
+        Args:
+            persona_id: 按人格过滤。为 None 时返回全部。
+            include_unassigned: 当 persona_id 非空时，是否同时返回 persona_id IS NULL 的
+                历史遗留持仓。默认 False 以避免多人格重复 review 同一持仓。
+                如需回收未指派持仓，应通过数据迁移把 NULL 更新为默认人格，
+                而不是让多个人格并行 review。
+        """
         conn = self._conn()
         if persona_id:
-            rows = conn.execute(
-                "SELECT * FROM positions WHERE status = 'open' AND persona_id = ? ORDER BY entry_date",
-                (persona_id,),
-            ).fetchall()
+            if include_unassigned:
+                rows = conn.execute(
+                    "SELECT * FROM positions WHERE status = 'open' "
+                    "AND (persona_id = ? OR persona_id IS NULL) "
+                    "ORDER BY entry_date",
+                    (persona_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM positions WHERE status = 'open' AND persona_id = ? "
+                    "ORDER BY entry_date",
+                    (persona_id,),
+                ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_date"

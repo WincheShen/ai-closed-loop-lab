@@ -29,7 +29,12 @@ def check_stale_positions(
         被标记为 stale 的持仓列表（包含 hold_days 和 force_review_reason）。
     """
     brain = get_central_brain()
-    positions = brain.store.list_open_positions(persona_id=persona_id)
+    # 默认人格同时接管未指派持仓，避免旧数据 stale 检测漏掉。
+    include_unassigned = persona_id == "short_term_hot_rotation_v1"
+    positions = brain.store.list_open_positions(
+        persona_id=persona_id,
+        include_unassigned=include_unassigned,
+    )
 
     if not positions:
         logger.info("无持仓，跳过 stale position 检查")
