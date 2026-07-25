@@ -226,8 +226,10 @@ async def _check_pending_signals(
             logger.debug("条件单重评估失败 (降级: 正常执行)", exc_info=True)
 
         # 触发 → 执行买入
-        # 保留原始 entry_price 作为下单限价（不用 current_price 覆写）
+        # 用实时市场价作为成交价（更真实的模拟）
         sig["entry_condition"] = "immediate"
+        sig["current_price"] = current_price  # 传递实时价给 executor 的 price guard
+        sig["market_price_at_trigger"] = current_price  # 触发时的真实市场价
         engine = ExecutionEngine(session_id)
         try:
             orders, fills = await engine.monitor_and_execute([sig])

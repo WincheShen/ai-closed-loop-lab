@@ -376,7 +376,7 @@ async def dashboard_stats():
         # 2. Agent 状态（从 CentralBrain 获取最新日志）
         agents = []
         try:
-            recent_logs = brain.get_recent_logs(limit=20)
+            recent_logs = brain.store.query_events(limit=20)
             agent_status = {}
             for log in recent_logs:
                 agent = log.get("agent", "unknown")

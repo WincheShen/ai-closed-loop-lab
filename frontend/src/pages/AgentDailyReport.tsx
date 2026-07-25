@@ -294,7 +294,7 @@ function MarketRegimeSection({ regime }: { regime: MarketRegime | null }) {
             { label: '平盘', value: regime.evidence.flat_count, color: 'text-muted-foreground' },
             { label: '强势', value: regime.evidence.strong_count, color: 'text-bullish' },
             { label: '弱势', value: regime.evidence.weak_count, color: 'text-bearish' },
-            { label: '均涨幅', value: `${regime.evidence.avg_change_pct >= 0 ? '+' : ''}${regime.evidence.avg_change_pct.toFixed(2)}%`, color: regime.evidence.avg_change_pct >= 0 ? 'text-bullish' : 'text-bearish' },
+            { label: '均涨幅', value: regime.evidence.avg_change_pct != null && !isNaN(regime.evidence.avg_change_pct) ? `${regime.evidence.avg_change_pct >= 0 ? '+' : ''}${regime.evidence.avg_change_pct.toFixed(2)}%` : '-', color: regime.evidence.avg_change_pct != null && !isNaN(regime.evidence.avg_change_pct) && regime.evidence.avg_change_pct >= 0 ? 'text-bullish' : 'text-bearish' },
           ].map((item) => (
             <div key={item.label} className="p-2 rounded bg-panel-hover border border-panel-border text-center">
               <div className={cn('text-sm font-bold font-mono', item.color)}>{item.value}</div>

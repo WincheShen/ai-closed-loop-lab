@@ -172,11 +172,12 @@ class ExecutionEngine:
         return self.submitted_orders, self.filled_orders
 
     async def _mock_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:
-        """模拟执行：按信号价格成交，并自动建仓。
+        """模拟执行：按市场价成交，并自动建仓。
 
         P0 安全保证:
         - P0.1: 买入前先检查是否已有同标的持仓，避免重复建仓
         - P0.2: order + fill + position + balance 在同一事务内完成
+        - P0.3: 价格护栏 — 必须有参考价，偏离过大则拒绝或修正
         """
         action = signal.get("action", "")
         symbol = signal["symbol"]
@@ -212,9 +213,12 @@ class ExecutionEngine:
         entry_price = signal["entry_price"]
         target_qty = signal.get("target_qty")
 
-        # --- 价格护栏: 拒绝偏离过大的订单（防止脏数据导致错误交易） ---
+        # --- P0.3: 强化价格护栏 ---
+        # 优先使用 market_price_at_trigger（由 _check_pending_signals 传入的实时价）
+        # 其次用 signal 中的 current_price（信号生成时记录的价格）
+        ref_price = signal.get("market_price_at_trigger") or signal.get("current_price") or 0
+
         if action == "buy" and entry_price > 0:
-            ref_price = signal.get("current_price") or 0
             if ref_price > 0:
                 limit_deviation = abs(entry_price - ref_price) / ref_price
                 if limit_deviation > 0.30:
@@ -236,6 +240,36 @@ class ExecutionEngine:
                         "updated_at": now,
                     }
                     return rejected_order, None
+                elif limit_deviation > 0.10:
+                    # 偏离 10-30%: 修正为参考价，并记录警告
+                    self.logger.warning(
+                        "[MOCK] ⚠️ %s entry_price=%.2f 偏离 ref_price=%.2f 达 %.0f%%，修正为参考价",
+                        symbol, entry_price, ref_price, limit_deviation * 100,
+                    )
+                    entry_price = ref_price
+            else:
+                # 无参考价时拒绝买入（防止脏数据通过）
+                self.logger.error(
+                    "[MOCK] ❌ %s 无参考价可校验 entry_price=%.2f，拒绝下单",
+                    symbol, entry_price,
+                )
+                self.brain.store.update_signal_status(signal["signal_id"], "rejected_no_ref_price")
+                rejected_order: Order = {
+                    "order_id": order_id,
+                    "signal_id": signal["signal_id"],
+                    "symbol": symbol,
+                    "side": "buy",
+                    "quantity": 0,
+                    "order_type": "limit",
+                    "limit_price": entry_price,
+                    "status": "rejected",
+                    "submitted_at": now,
+                    "updated_at": now,
+                }
+                return rejected_order, None
+
+        # Mock 模式用参考价（实时市场价）作为成交价，更真实模拟滑点
+        fill_price = ref_price if (ref_price > 0 and action == "buy") else entry_price
 
         self.logger.info(
             "[_mock_execute] %s %s | target_qty=%s | action=%s",
@@ -256,10 +290,10 @@ class ExecutionEngine:
 
             position_pct = signal.get("position_pct", 0.08)
             allocation = available_cash * position_pct
-            quantity = max(100, int(allocation / entry_price / 100) * 100) if entry_price > 0 else 100
+            quantity = max(100, int(allocation / fill_price / 100) * 100) if fill_price > 0 else 100
             self.logger.info(
                 "[_mock_execute] 动态计算数量: cash=%.0f, pct=%.2f, allocation=%.0f, price=%.2f, qty=%d",
-                available_cash, position_pct, allocation, entry_price, quantity,
+                available_cash, position_pct, allocation, fill_price, quantity,
             )
 
         order: Order = {
@@ -269,7 +303,7 @@ class ExecutionEngine:
             "side": "buy" if action == "buy" else "sell",
             "quantity": quantity,
             "order_type": "limit",
-            "limit_price": entry_price,
+            "limit_price": fill_price,
             "status": "submitted",
             "submitted_at": now,
             "updated_at": now,
@@ -277,7 +311,7 @@ class ExecutionEngine:
 
         self.logger.info(
             "[MOCK] 模拟下单 %s | %s %s | 限价 %.2f | 数量 %d",
-            order_id, symbol, order["side"], entry_price, quantity,
+            order_id, symbol, order["side"], fill_price, quantity,
         )
 
         # --- P0.2: 事务原子性 — 全部成功或全部回滚 ---
@@ -295,8 +329,8 @@ class ExecutionEngine:
                 "symbol": symbol,
                 "side": order["side"],
                 "quantity": quantity,
-                "avg_price": entry_price,
-                "fees": round(quantity * entry_price * 0.0003, 2),
+                "avg_price": fill_price,
+                "fees": round(quantity * fill_price * 0.0003, 2),
                 "filled_at": datetime.now().isoformat(),
             }
             self.brain.store.save_fill(fill)
