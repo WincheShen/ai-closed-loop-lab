@@ -199,6 +199,22 @@ def job_health_check() -> None:
     if not all_ok:
         logger.warning("[HealthCheck] ⚠️ 今日有节点未产出数据！检查 scheduler 日志")
 
+    # AKShare 数据源健康
+    try:
+        from src.stock_analyzer.data_source.akshare_client import get_akshare_health
+        ak_health = get_akshare_health()
+        logger.info(
+            "[HealthCheck] AKShare: success_rate=%.0f%%, sina_fallback=%d, mock_fallback=%d, degraded=%s",
+            ak_health["snapshot_success_rate"] * 100,
+            ak_health["sina_fallback_count"],
+            ak_health["mock_fallback_count"],
+            ak_health["is_degraded"],
+        )
+        if ak_health["is_degraded"]:
+            logger.warning("[HealthCheck] ⚠️ AKShare 数据源降级中！最近错误: %s", ak_health.get("last_error"))
+    except Exception as e:
+        logger.warning("[HealthCheck] AKShare 健康检查异常: %s", e)
+
 
 def job_weekly_feedback() -> None:
     """每周日 20:00 复盘 — 为所有人格分别执行。"""

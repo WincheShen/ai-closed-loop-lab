@@ -406,55 +406,80 @@ class MemoryStore:
             """
         )
         conn.commit()
-        # 兼容旧数据库：为已存在的表补字段
-        self._apply_phase1_migrations(conn)
-        self._apply_multi_persona_migrations(conn)
+        # 版本化迁移系统
+        self._run_migrations(conn)
 
-    def _apply_phase1_migrations(self, conn: sqlite3.Connection) -> None:
-        """为 Phase 1 增加 trade_signals/positions 的认知元数据字段。
+    # ------------------------------------------------------------------
+    # Schema Migration System — 版本化数据库迁移
+    # ------------------------------------------------------------------
 
-        使用 ALTER TABLE ADD COLUMN，每个字段单独 try/except 防止重复执行报错。
+    # 每个迁移是 (name, sql_list)，name 全局唯一，sql_list 按顺序执行。
+    # 新迁移 **只追加** 到列表末尾，已 apply 的不会重跑。
+    _MIGRATIONS: list[tuple[str, list[str]]] = [
+        # --- Phase 1: 认知元数据字段 ---
+        ("001_phase1_cognitive_fields", [
+            "ALTER TABLE trade_signals ADD COLUMN market_regime TEXT",
+            "ALTER TABLE trade_signals ADD COLUMN persona_version TEXT",
+            "ALTER TABLE trade_signals ADD COLUMN risk_decision TEXT",
+            "ALTER TABLE trade_signals ADD COLUMN approved_position_pct REAL",
+            "ALTER TABLE trade_signals ADD COLUMN entry_condition TEXT DEFAULT 'immediate'",
+            "ALTER TABLE trade_signals ADD COLUMN current_price REAL",
+            "ALTER TABLE positions ADD COLUMN market_regime TEXT",
+            "ALTER TABLE positions ADD COLUMN persona_version TEXT",
+            "ALTER TABLE positions ADD COLUMN sector TEXT",
+        ]),
+        # --- Multi-Persona: account_id + persona_id ---
+        ("002_multi_persona", [
+            "ALTER TABLE positions ADD COLUMN account_id TEXT",
+            "ALTER TABLE trade_signals ADD COLUMN account_id TEXT",
+            "ALTER TABLE positions ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'",
+            "ALTER TABLE fills ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'",
+            "ALTER TABLE trade_signals ADD COLUMN persona_id TEXT",
+            "ALTER TABLE risk_decisions ADD COLUMN persona_id TEXT",
+            "ALTER TABLE daily_picks_archive ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'",
+        ]),
+        # --- 未来迁移追加到这里 ---
+    ]
+
+    def _run_migrations(self, conn: sqlite3.Connection) -> None:
+        """执行版本化迁移。
+
+        1. 建 _schema_migrations 表（追踪已应用的迁移）
+        2. 遍历 _MIGRATIONS，跳过已 apply 的
+        3. 每条 SQL 单独 try/except（ALTER TABLE ADD COLUMN 幂等）
         """
-        migrations = [
-            ("trade_signals", "market_regime TEXT"),
-            ("trade_signals", "persona_version TEXT"),
-            ("trade_signals", "risk_decision TEXT"),
-            ("trade_signals", "approved_position_pct REAL"),
-            ("trade_signals", "entry_condition TEXT DEFAULT 'immediate'"),
-            ("trade_signals", "current_price REAL"),
-            ("positions", "market_regime TEXT"),
-            ("positions", "persona_version TEXT"),
-            ("positions", "sector TEXT"),
-        ]
-        for table, col_def in migrations:
-            col_name = col_def.split()[0]
-            try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    logger.debug("ALTER %s.%s skipped: %s", table, col_name, e)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS _schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )"""
+        )
         conn.commit()
 
-    def _apply_multi_persona_migrations(self, conn: sqlite3.Connection) -> None:
-        """为多人格支持添加 account_id 和 persona_id 字段。"""
-        migrations = [
-            ("positions", "account_id TEXT"),
-            ("trade_signals", "account_id TEXT"),
-            ("positions", "persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'"),
-            ("fills", "persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'"),
-            # P1: 选股和风控也需要人格标识
-            ("trade_signals", "persona_id TEXT"),
-            ("risk_decisions", "persona_id TEXT"),
-            # P1: 选股归档表支持多人格
-            ("daily_picks_archive", "persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'"),
-        ]
-        for table, col_def in migrations:
-            col_name = col_def.split()[0]
-            try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    logger.debug("ALTER %s.%s skipped: %s", table, col_name, e)
+        applied = {
+            row[0]
+            for row in conn.execute("SELECT name FROM _schema_migrations").fetchall()
+        }
+
+        for name, sql_list in self._MIGRATIONS:
+            if name in applied:
+                continue
+
+            logger.info("[migration] applying %s (%d statements)", name, len(sql_list))
+            for sql in sql_list:
+                try:
+                    conn.execute(sql)
+                except sqlite3.OperationalError as e:
+                    # ALTER TABLE ADD COLUMN 重复时忽略（幂等）
+                    if "duplicate column" not in str(e).lower():
+                        logger.warning("[migration] %s — skipped: %s", sql[:60], e)
+
+            conn.execute(
+                "INSERT INTO _schema_migrations (name, applied_at) VALUES (?, ?)",
+                (name, datetime.now().isoformat()),
+            )
+            conn.commit()
+            logger.info("[migration] %s applied", name)
         conn.commit()
 
     # ------------------------------------------------------------------

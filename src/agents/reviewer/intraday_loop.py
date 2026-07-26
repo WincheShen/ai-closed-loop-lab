@@ -223,7 +223,11 @@ async def _check_pending_signals(
                         brain.store.update_signal_status(sig["signal_id"], "cancelled_strategy_suspended")
                         continue
         except Exception:
-            logger.debug("条件单重评估失败 (降级: 正常执行)", exc_info=True)
+            logger.warning(
+                "条件单重评估异常 %s，安全起见取消执行", symbol, exc_info=True,
+            )
+            brain.store.update_signal_status(sig["signal_id"], "cancelled_reeval_error")
+            continue
 
         # 触发 → 执行买入
         # 用实时市场价作为成交价（更真实的模拟）

@@ -96,6 +96,69 @@ class ExecutionEngine:
         return False
 
     # ------------------------------------------------------------------
+    # SUSPEND 硬门槛 — 策略暂停过滤
+    # ------------------------------------------------------------------
+
+    def _filter_suspended_signals(self, signals: list[TradeSignal]) -> list[TradeSignal]:
+        """过滤被经验层标记为 SUSPEND 的策略信号（仅阻止买入，卖出放行）。"""
+        try:
+            from src.experience_layer import get_experience
+            exp = get_experience()
+        except Exception:
+            self.logger.debug("无法加载 ExperienceLayer，跳过 SUSPEND 检查")
+            return signals
+
+        latest_regime = self.brain.store.latest_market_regime()
+        regime = latest_regime.get("regime", "") if latest_regime else ""
+
+        filtered = []
+        rejected = 0
+        for sig in signals:
+            # 卖出信号始终放行
+            if sig.get("action") != "buy":
+                filtered.append(sig)
+                continue
+
+            strategy_id = sig.get("strategy_id", "")
+            if not strategy_id or strategy_id == "unknown":
+                filtered.append(sig)
+                continue
+
+            try:
+                stats = exp.get_strategy_stats(strategy_id, regime=regime or None)
+                if stats and stats.get("recommendation") == "SUSPEND":
+                    self.logger.warning(
+                        "SUSPEND REJECT %s %s | 策略 %s 在 %s 下已暂停 "
+                        "(胜率 %.0f%%, 样本 %d)",
+                        sig.get("signal_id", ""), sig["symbol"],
+                        strategy_id, regime or "all",
+                        stats["win_rate"] * 100, stats["total_trades"],
+                    )
+                    self.brain.store.update_signal_status(
+                        sig["signal_id"], "rejected_strategy_suspended",
+                    )
+                    rejected += 1
+                    continue
+            except Exception as e:
+                # SUSPEND 检查失败时，安全侧倒：拒绝信号
+                self.logger.error(
+                    "SUSPEND 检查异常 %s: %s，安全起见拒绝",
+                    sig["symbol"], e,
+                )
+                self.brain.store.update_signal_status(
+                    sig["signal_id"], "rejected_suspend_check_error",
+                )
+                rejected += 1
+                continue
+
+            filtered.append(sig)
+
+        if rejected:
+            self.logger.info("SUSPEND 过滤: %d/%d 信号被拒绝", rejected, len(signals))
+
+        return filtered
+
+    # ------------------------------------------------------------------
     # 主执行循环
     # ------------------------------------------------------------------
 
@@ -109,6 +172,9 @@ class ExecutionEngine:
         - entry_condition=breakout/pullback → 存入观察池(pending), 由盘中循环跟踪
         """
         self.logger.info("开始盯盘 — 模式=%s, 信号数=%d", self.mode, len(signals))
+
+        # SUSPEND 硬门槛 — 过滤掉被暂停策略的买入信号
+        signals = self._filter_suspended_signals(signals)
 
         # 熔断检查 — 仅阻止买入，卖出始终允许
         breaker_tripped = self._check_circuit_breaker()

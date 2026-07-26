@@ -10,8 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import random
+import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import Optional
 
 # 禁用代理，避免 Edge 浏览器代理扩展干扰
@@ -135,8 +137,72 @@ def _infer_industry_from_name(name: str) -> str:
     return ""
 
 
+# =============================================================================
+# AKShare Health Metrics — 进程级单例
+# =============================================================================
+
+class AKShareHealthMetrics:
+    """追踪 AKShare 数据源健康指标。"""
+
+    def __init__(self) -> None:
+        self.snapshot_ok: int = 0
+        self.snapshot_fail: int = 0
+        self.kline_ok: int = 0
+        self.kline_fail: int = 0
+        self.sina_fallback_count: int = 0
+        self.mock_fallback_count: int = 0
+        self.last_snapshot_at: Optional[str] = None
+        self.last_snapshot_is_mock: bool = False
+        self.last_error: Optional[str] = None
+
+    @property
+    def snapshot_success_rate(self) -> float:
+        total = self.snapshot_ok + self.snapshot_fail
+        return self.snapshot_ok / total if total > 0 else 1.0
+
+    @property
+    def is_degraded(self) -> bool:
+        return self.last_snapshot_is_mock or self.snapshot_success_rate < 0.5
+
+    def to_dict(self) -> dict:
+        return {
+            "snapshot_ok": self.snapshot_ok,
+            "snapshot_fail": self.snapshot_fail,
+            "snapshot_success_rate": round(self.snapshot_success_rate, 3),
+            "kline_ok": self.kline_ok,
+            "kline_fail": self.kline_fail,
+            "sina_fallback_count": self.sina_fallback_count,
+            "mock_fallback_count": self.mock_fallback_count,
+            "last_snapshot_at": self.last_snapshot_at,
+            "last_snapshot_is_mock": self.last_snapshot_is_mock,
+            "last_error": self.last_error,
+            "is_degraded": self.is_degraded,
+        }
+
+
+_akshare_metrics = AKShareHealthMetrics()
+
+
+def get_akshare_health() -> dict:
+    """获取 AKShare 数据源健康指标（供 /health/akshare 端点使用）。"""
+    return _akshare_metrics.to_dict()
+
+
 class AkshareClient:
-    """统一的行情入口。"""
+    """统一的行情入口。
+
+    内置 Circuit Breaker：连续失败 N 次后跳过 akshare 层直接走 Sina/mock，
+    超时后自动半开尝试恢复。
+    """
+
+    # Circuit Breaker 参数
+    _CB_FAILURE_THRESHOLD = 5    # 连续失败 N 次后打开
+    _CB_RECOVERY_SEC = 300       # 打开后 5 分钟再试
+
+    class _CBState(Enum):
+        CLOSED = "closed"
+        OPEN = "open"
+        HALF_OPEN = "half_open"
 
     def __init__(self, allow_mock_fallback: bool = True):
         self.allow_mock_fallback = allow_mock_fallback
@@ -146,6 +212,14 @@ class AkshareClient:
         except ImportError:
             logger.warning("akshare 未安装，将使用 mock 数据")
             self._ak_available = False
+
+        # Circuit Breaker state
+        self._cb_state = self._CBState.CLOSED
+        self._cb_failure_count = 0
+        self._cb_last_failure: float = 0.0
+
+        # Health metrics（进程级单例共享）
+        self._metrics = _akshare_metrics
 
         # 复用 HTTP 会话 — 避免每次请求新建 TCP 连接导致 RemoteDisconnected
         import requests as _req
@@ -168,19 +242,74 @@ class AkshareClient:
         self._session.mount("https://", adapter)
         self._session.headers.update(self._SINA_HEADERS)
 
+    # ------------------------------------------------------------------
+    # Circuit Breaker helpers
+    # ------------------------------------------------------------------
+
+    def _cb_can_attempt_ak(self) -> bool:
+        """Circuit Breaker 判断：是否应尝试 akshare 层。"""
+        if self._cb_state == self._CBState.CLOSED:
+            return True
+        if self._cb_state == self._CBState.OPEN:
+            if time.time() - self._cb_last_failure > self._CB_RECOVERY_SEC:
+                self._cb_state = self._CBState.HALF_OPEN
+                logger.info("[CB] half-open → 尝试恢复 akshare")
+                return True
+            return False
+        return True  # HALF_OPEN
+
+    def _cb_record_success(self) -> None:
+        if self._cb_state != self._CBState.CLOSED:
+            logger.info("[CB] akshare 恢复正常 → closed")
+        self._cb_state = self._CBState.CLOSED
+        self._cb_failure_count = 0
+
+    def _cb_record_failure(self, err: str) -> None:
+        self._cb_failure_count += 1
+        self._cb_last_failure = time.time()
+        self._metrics.last_error = err
+        if self._cb_failure_count >= self._CB_FAILURE_THRESHOLD:
+            self._cb_state = self._CBState.OPEN
+            logger.warning(
+                "[CB] akshare 连续失败 %d 次 → open (跳过 akshare %ds)",
+                self._cb_failure_count, self._CB_RECOVERY_SEC,
+            )
+
+    # ------------------------------------------------------------------
+    # fetch_snapshot / fetch_kline — 带 metrics + circuit breaker
+    # ------------------------------------------------------------------
+
     def fetch_snapshot(self) -> MarketSnapshot:
-        if self._ak_available:
+        # Tier 1: akshare (受 circuit breaker 保护)
+        if self._ak_available and self._cb_can_attempt_ak():
             try:
-                return self._fetch_real()
+                snap = self._fetch_real()
+                self._cb_record_success()
+                self._metrics.snapshot_ok += 1
+                self._metrics.last_snapshot_at = datetime.now().isoformat()
+                self._metrics.last_snapshot_is_mock = False
+                return snap
             except Exception as e:  # noqa: BLE001
+                self._cb_record_failure(str(e))
+                self._metrics.snapshot_fail += 1
                 logger.warning("akshare 拉取失败：%s，尝试新浪 API", e)
-        # Sina fallback (push2.eastmoney.com 被封时)
+
+        # Tier 2: Sina fallback
         try:
-            return self._fetch_sina()
+            snap = self._fetch_sina()
+            self._metrics.sina_fallback_count += 1
+            self._metrics.last_snapshot_at = datetime.now().isoformat()
+            self._metrics.last_snapshot_is_mock = False
+            return snap
         except Exception as e:  # noqa: BLE001
             logger.warning("新浪 API 也失败：%s，降级到 mock", e)
+
+        # Tier 3: mock
         if not self.allow_mock_fallback:
             raise RuntimeError("所有数据源均不可用")
+        self._metrics.mock_fallback_count += 1
+        self._metrics.last_snapshot_is_mock = True
+        self._metrics.last_snapshot_at = datetime.now().isoformat()
         return self._fetch_mock()
 
     def fetch_industry_list(self) -> list[str]:
@@ -561,10 +690,15 @@ class AkshareClient:
         Returns:
             按日期升序排列的 KlineBar 列表；失败或 mock 时返回合成数据
         """
-        if self._ak_available:
+        if self._ak_available and self._cb_can_attempt_ak():
             try:
-                return self._fetch_kline_real(symbol, days)
+                bars = self._fetch_kline_real(symbol, days)
+                self._cb_record_success()
+                self._metrics.kline_ok += 1
+                return bars
             except Exception as e:
+                self._cb_record_failure(str(e))
+                self._metrics.kline_fail += 1
                 logger.warning("akshare kline failed for %s: %s，尝试新浪", symbol, e)
         try:
             return self._fetch_kline_sina(symbol, days)

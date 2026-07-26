@@ -476,7 +476,11 @@ class StrategistEngine:
                     )
                     return None
             except Exception:
-                self.logger.debug("SUSPEND 检查失败，降级放行", exc_info=True)
+                self.logger.warning(
+                    "[%s %s] SUSPEND 检查异常，安全起见拒绝信号",
+                    symbol, name, exc_info=True,
+                )
+                return None
 
         current_price = kline.get("current_price", 0)
         entry_price = result.get("entry_price") or current_price

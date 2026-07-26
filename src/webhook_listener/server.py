@@ -140,6 +140,18 @@ def health() -> dict:
     return {"status": "ok", "service": "webhook_listener"}
 
 
+@app.get("/health/akshare")
+def health_akshare() -> dict:
+    """AKShare 数据源健康探针。"""
+    try:
+        from src.stock_analyzer.data_source.akshare_client import get_akshare_health
+        metrics = get_akshare_health()
+        status = "degraded" if metrics.get("is_degraded") else "healthy"
+        return {"status": status, **metrics}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
 @app.post("/webhook/trade", response_model=TradeRecordResponse)
 async def receive_trade(
     text: str = Form(""),
