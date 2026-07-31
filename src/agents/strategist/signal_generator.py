@@ -77,6 +77,7 @@ STRATEGIST_SYSTEM_PROMPT = """\
 ## 推荐策略
 - 热点板块前排回踩: 板块强势 + 龙头回踩支撑 + 量能不萎缩
 - 底部启动: 连跌3日以上 + 放量收阳 + MA5上穿MA10（金叉）
+- 主力吸筹: 龙虎榜机构净买入 + 换手率放大 + 价格未涨（底部建仓形态）
 - 防守蓝筹: 低估值 + 高股息 + 稳定现金流
 - 均值回归: 短期超跌 + 技术支撑位 + 量能萎缩到极致后放量
 
@@ -93,7 +94,7 @@ STRATEGIST_SYSTEM_PROMPT = """\
     "target_price": 目标价,
     "stop_loss": 止损价,
     "position_pct": 建议仓位比例(0.02-0.10),
-    "strategy": "策略名称(如 热点板块前排回踩/底部启动/防守蓝筹/均值回归 等)",
+    "strategy": "策略名称(如 热点板块前排回踩/底部启动/主力吸筹/防守蓝筹/均值回归 等)",
     "confidence": 0.0到1.0,
     "rationale": "完整的买入或不买逻辑(2-3句话, 必须引用 regime/posture)",
     "bull_case": "最大的看多理由",
@@ -157,6 +158,7 @@ STRATEGIST_USER_TEMPLATE = """\
 - 资金面重点：主力净流入、换手率、成交额
 - 结合今日 market_regime 和 posture 判断是否适合交易
 {bottom_reversal_hint}
+{institutional_accumulation_hint}
 
 请基于以上信息，特别是结合 regime 和 persona 给出决策。
 """
@@ -370,6 +372,17 @@ class StrategistEngine:
         else:
             br_hint = ""
 
+        # 主力吸筹形态提示
+        ia_signal = kline.get("institutional_accumulation_signal")
+        if ia_signal:
+            ia_hint = (
+                f"\n🏦 **主力吸筹形态已检测**: "
+                f"{ia_signal['detail']}\n"
+                f"  → 建议策略: 主力吸筹 | 机构底部建仓，价格未涨，关注启动信号"
+            )
+        else:
+            ia_hint = ""
+
         return STRATEGIST_USER_TEMPLATE.format(
             persona_block=self._persona_block(),
             symbol=candidate["symbol"],
@@ -398,6 +411,7 @@ class StrategistEngine:
             turnover_rate=(fund or {}).get("turnover_rate", 0),
             hot_sectors=", ".join(self.hot_sectors) if self.hot_sectors else "无",
             bottom_reversal_hint=br_hint,
+            institutional_accumulation_hint=ia_hint,
             **self._regime_kwargs(),
         )
 

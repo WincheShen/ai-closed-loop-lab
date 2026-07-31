@@ -58,6 +58,18 @@ rules:
       min_appearance: 1           # 最近 3 天内至少上榜 1 次
     description: 近 3 天龙虎榜机构专用席位净买入超过阈值（"聪明钱"信号）
 
+  - id: institutional_accumulation
+    name: 主力吸筹
+    enabled: true
+    weight: 2.0
+    params:
+      # dragon_tiger_map 由 Explorer 运行时动态注入
+      min_inst_net_buy_wan: 3000  # 机构净买入 >= 3000 万
+      min_turnover_rate: 3.0     # 换手率 >= 3%（放大）
+      max_price_change: 2.0      # 涨幅 <= 2%（价未涨）
+      min_appearance: 1          # 最近 3 天内至少上榜 1 次
+    description: 机构在龙虎榜净买入 + 换手率放大 + 价格未涨（底部吸筹形态）
+
   - id: positive_news_catalyst
     name: 正面新闻催化剂
     enabled: true

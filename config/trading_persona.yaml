@@ -26,6 +26,7 @@ personas:
       - 放量突破后第一次确认
       - 强趋势中的缩量调整
       - 低位行业龙头突破
+      - 主力吸筹底部建仓启动
 
     avoid_setups:
       - ST 和流动性差股票
@@ -64,6 +65,10 @@ personas:
         compatible: [bear, neutral, rebound]
         forbidden: []
         degraded: [bull, panic]    # 牛市追底意义不大，恐慌时减半仓
+      institutional_accumulation:
+        compatible: [neutral, bear, rebound]
+        forbidden: []
+        degraded: [bull, panic]    # 主力吸筹适合横盘/弱势环境
       defensive_bluechip:
         compatible: [neutral, bear, rebound]
         forbidden: []

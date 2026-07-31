@@ -116,6 +116,40 @@ def institutional_buying(stock: StockQuote, params: dict) -> bool:
     return inst_net_wan >= min_net_buy_wan and appearance >= min_appearance
 
 
+@register("institutional_accumulation")
+def institutional_accumulation(stock: StockQuote, params: dict) -> bool:
+    """主力吸筹：机构净买入 + 换手率放大 + 价格未涨（底部吸筹形态）。
+
+    params:
+        dragon_tiger_map: dict[str, dict]  动态注入的龙虎榜数据
+        min_inst_net_buy_wan: float        最小机构净买入（万元），默认 3000
+        min_turnover_rate: float           换手率阈值（%），默认 3.0
+        max_price_change: float            最大涨幅（%），默认 2.0（价未涨）
+        min_appearance: int                最小上榜次数，默认 1
+    """
+    dt_map = params.get("dragon_tiger_map") or {}
+    if not dt_map:
+        return False
+
+    record = dt_map.get(stock.symbol)
+    if not record:
+        return False
+
+    min_inst_net_buy_wan = float(params.get("min_inst_net_buy_wan", 3000))
+    min_turnover_rate = float(params.get("min_turnover_rate", 3.0))
+    max_price_change = float(params.get("max_price_change", 2.0))
+    min_appearance = int(params.get("min_appearance", 1))
+
+    inst_net_wan = record.get("institutional_net_buy_wan", 0)
+    appearance = record.get("appearance_count", 0)
+
+    has_inst_buying = inst_net_wan >= min_inst_net_buy_wan and appearance >= min_appearance
+    has_turnover_surge = stock.turnover_rate >= min_turnover_rate
+    price_not_risen = stock.change_pct <= max_price_change
+
+    return has_inst_buying and has_turnover_surge and price_not_risen
+
+
 @register("positive_news_catalyst")
 def positive_news_catalyst(stock: StockQuote, params: dict) -> bool:
     """近期存在正面新闻催化剂。
@@ -189,6 +223,7 @@ BUILTIN_RULES = [
     "market_cap_range",
     "in_hot_sector",
     "institutional_buying",
+    "institutional_accumulation",
     "positive_news_catalyst",
     "high_roe",
     "low_debt",

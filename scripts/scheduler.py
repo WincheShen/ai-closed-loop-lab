@@ -250,6 +250,19 @@ def job_weekly_feedback() -> None:
                 len(result.get("prefer_patterns", [])),
                 result.get("summary", ""),
             )
+            # 自动回写 persona.yaml（去重 + 备份 + 校验）
+            try:
+                from src.experience_layer.persona_updater import PersonaUpdater
+                updater = PersonaUpdater()
+                wb_result = updater.apply_meta_rules(result)
+                if wb_result.get("updated"):
+                    logger.info(
+                        "[MetaRule→Persona] 回写成功: +%d avoid, +%d prefer",
+                        len(wb_result.get("avoid_added", [])),
+                        len(wb_result.get("prefer_added", [])),
+                    )
+            except Exception as e:
+                logger.warning("[MetaRule→Persona] 回写失败 (不影响主流程): %s", e)
     except Exception as e:
         logger.error("[MetaRule] 归纳失败 (不影响主流程): %s", e)
 

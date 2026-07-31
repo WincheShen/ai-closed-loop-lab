@@ -43,6 +43,7 @@ _RULE_TO_STRATEGY: dict[str, str] = {
     "strong_turnover": "放量突破",
     "main_fund_inflow": "热点板块前排回踩",
     "bottom_reversal": "底部启动",
+    "institutional_accumulation": "主力吸筹",
 }
 
 
@@ -58,6 +59,7 @@ class ExplorerScanner:
         self.hot_detector = HotSectorDetector()
         self._snapshot = None
         self._hot_names: list[str] = []
+        self._dragon_tiger_map: dict[str, dict] = {}
         self._persona = load_persona_by_id(persona_id) if persona_id else None
         self._kline_days = self._get_kline_lookback_days()
         self._market_regime = market_regime or {}
@@ -157,7 +159,7 @@ class ExplorerScanner:
                     "turnover": stock.turnover,
                     "turnover_rate": stock.turnover_rate,
                 },
-                "dragon_tiger": None,
+                "dragon_tiger": self._dragon_tiger_map.get(stock.symbol),
             })
 
         # 6. 经验过滤：黑名单 / 冷却期 / 历史胜率降权
@@ -237,12 +239,13 @@ class ExplorerScanner:
             if rule.id == "in_hot_sector":
                 rule.params = {**rule.params, "hot_sectors": self._hot_names}
 
-        # 注入龙虎榜数据（用于 institutional_buying 规则）
+        # 注入龙虎榜数据（用于 institutional_buying / institutional_accumulation 规则）
         # 失败降级：拉取失败时规则自动 miss，不影响主流程
         dragon_tiger_map = self._fetch_dragon_tiger_map()
+        self._dragon_tiger_map = dragon_tiger_map
         if dragon_tiger_map:
             for rule in rules:
-                if rule.id == "institutional_buying":
+                if rule.id in ("institutional_buying", "institutional_accumulation"):
                     rule.params = {**rule.params, "dragon_tiger_map": dragon_tiger_map}
             self.logger.info(
                 "龙虎榜数据已注入: %d 只股票，其中 %d 只有机构净买入",
@@ -506,6 +509,9 @@ class ExplorerScanner:
             # 底部启动形态检测
             bottom_reversal = self._detect_bottom_reversal(bars, avg_vol)
 
+            # 主力吸筹形态检测
+            inst_accumulation = self._detect_institutional_accumulation(symbol, bars, avg_vol)
+
             return {
                 "current_price": current_price,
                 "last_close": round(closes[-1], 2) if closes else current_price,
@@ -525,6 +531,7 @@ class ExplorerScanner:
                 "atr_pct": atr_pct,  # 波动率百分比，如 3.5 表示日均波幅 3.5%
                 "suggested_stop_pct": round(min(max(atr_pct * 2, 3.0), 8.0), 2),  # 2×ATR 且限制在 3-8% 之间
                 "bottom_reversal_signal": bottom_reversal,
+                "institutional_accumulation_signal": inst_accumulation,
             }
         except Exception as e:
             self.logger.warning("K线摘要失败 %s: %s", symbol, e)
@@ -582,6 +589,61 @@ class ExplorerScanner:
             "decline_days": decline_days,
             "vol_ratio": round(vol_ratio, 2),
             "ma_cross": has_ma_cross,
+            "detail": " + ".join(detail_parts),
+        }
+
+    def _detect_institutional_accumulation(self, symbol: str, bars: list, avg_vol: float) -> dict | None:
+        """主力吸筹形态检测：龙虎榜机构净买入 + 换手率放大 + 价未涨。
+
+        与规则引擎的 institutional_accumulation 互补：
+        - 规则引擎用于候选票筛选（粗筛）
+        - 此方法用于 K 线级别的形态确认，输出详情供 LLM 分析
+
+        Returns:
+            None: 不符合形态
+            dict: {"inst_net_buy_wan": X, "turnover_rate": Y, "price_flat": bool, "detail": str}
+        """
+        dt_record = self._dragon_tiger_map.get(symbol)
+        if not dt_record:
+            return None
+
+        inst_net_buy_wan = dt_record.get("institutional_net_buy_wan", 0)
+        if inst_net_buy_wan < 3000:
+            return None
+
+        # 换手率通过 K 线数据确认（最近 3 天平均换手率 vs 20日均值）
+        if len(bars) < 10:
+            return None
+
+        # 价格未明显上涨：最近 5 日涨幅 ≤ 5%
+        closes = [b.close for b in bars]
+        recent_change = (closes[-1] - closes[-5]) / closes[-5] * 100 if len(closes) >= 5 else 0
+        price_flat = recent_change <= 5.0
+
+        if not price_flat:
+            return None
+
+        # 近 3 日量比（相对 20 日均量）
+        recent_avg_vol = sum(b.volume for b in bars[-3:]) / 3
+        vol_ratio_3d = recent_avg_vol / avg_vol if avg_vol > 0 else 1.0
+        has_vol_surge = vol_ratio_3d >= 1.3
+
+        if not has_vol_surge:
+            return None
+
+        detail_parts = [
+            f"机构净买入{inst_net_buy_wan:.0f}万",
+            f"近3日量比{vol_ratio_3d:.1f}",
+            f"5日涨幅{recent_change:.1f}%(价平)",
+        ]
+        if dt_record.get("appearance_count", 0) > 1:
+            detail_parts.append(f"上榜{dt_record['appearance_count']}次")
+
+        return {
+            "inst_net_buy_wan": round(inst_net_buy_wan, 1),
+            "vol_ratio_3d": round(vol_ratio_3d, 2),
+            "recent_5d_change": round(recent_change, 2),
+            "appearance_count": dt_record.get("appearance_count", 0),
             "detail": " + ".join(detail_parts),
         }
 
