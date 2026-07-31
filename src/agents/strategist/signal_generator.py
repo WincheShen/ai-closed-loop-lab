@@ -37,6 +37,9 @@ _STRATEGY_NAME_TO_ID = {
     "高股息": "defensive_bluechip",
     "均值回归": "mean_reversion",
     "超跌反弹": "mean_reversion",
+    "底部启动": "bottom_reversal",
+    "底部放量": "bottom_reversal",
+    "连跌反转": "bottom_reversal",
     "价值投资": "value_investing",
     "优质低估": "value_investing",
     "护城河": "moat_quality",
@@ -68,6 +71,15 @@ STRATEGIST_SYSTEM_PROMPT = """\
 4. 风险收益比 < 1.2 一律 PASS
 5. 弱势市场 (bear/panic) 必须更严格，能不交易就不交易
 
+## 禁用策略（已证明负期望，绝对不要使用）
+- 放量突破 (volume_breakout) — 历史胜率仅 27%，平均亏损 -15%
+
+## 推荐策略
+- 热点板块前排回踩: 板块强势 + 龙头回踩支撑 + 量能不萎缩
+- 底部启动: 连跌3日以上 + 放量收阳 + MA5上穿MA10（金叉）
+- 防守蓝筹: 低估值 + 高股息 + 稳定现金流
+- 均值回归: 短期超跌 + 技术支撑位 + 量能萎缩到极致后放量
+
 ## 决策框架
 - BUY: 技术形态良好 + 资金面支持 + 与当日 posture 匹配 + 风险收益比合理
 - PASS: 任一关键条件不满足，或与 persona 禁忌冲突
@@ -81,7 +93,7 @@ STRATEGIST_SYSTEM_PROMPT = """\
     "target_price": 目标价,
     "stop_loss": 止损价,
     "position_pct": 建议仓位比例(0.02-0.10),
-    "strategy": "策略名称(如 热点板块前排回踩/放量突破/防守蓝筹/均值回归 等)",
+    "strategy": "策略名称(如 热点板块前排回踩/底部启动/防守蓝筹/均值回归 等)",
     "confidence": 0.0到1.0,
     "rationale": "完整的买入或不买逻辑(2-3句话, 必须引用 regime/posture)",
     "bull_case": "最大的看多理由",
@@ -141,9 +153,10 @@ STRATEGIST_USER_TEMPLATE = """\
 
 ## 决策提示
 - 如果热点板块为"无"或为空，说明当前板块数据不可用，请**基于技术面、资金面、市场 regime** 做决策，不要因为"无板块支撑"而拒绝所有标的
-- 技术面重点：放量突破、趋势形态、量价配合
+- 技术面重点：底部启动形态（连跌后放量收阳+金叉）、趋势形态、量价配合
 - 资金面重点：主力净流入、换手率、成交额
 - 结合今日 market_regime 和 posture 判断是否适合交易
+{bottom_reversal_hint}
 
 请基于以上信息，特别是结合 regime 和 persona 给出决策。
 """
@@ -346,6 +359,17 @@ class StrategistEngine:
 
     def _build_short_term_msg(self, candidate: StockCandidate, kline: dict, fund: dict) -> str:
         """构建短线人格的 user message（技术面+资金面为主）。"""
+        # 底部启动形态提示
+        br_signal = kline.get("bottom_reversal_signal")
+        if br_signal:
+            br_hint = (
+                f"\n⚡ **底部启动形态已检测** (得分 {br_signal['score']}/3): "
+                f"{br_signal['detail']}\n"
+                f"  → 建议策略: 底部启动 | entry_condition: immediate"
+            )
+        else:
+            br_hint = ""
+
         return STRATEGIST_USER_TEMPLATE.format(
             persona_block=self._persona_block(),
             symbol=candidate["symbol"],
@@ -373,6 +397,7 @@ class StrategistEngine:
             turnover_yi=round((fund or {}).get("turnover", 0) / 1e8, 2),
             turnover_rate=(fund or {}).get("turnover_rate", 0),
             hot_sectors=", ".join(self.hot_sectors) if self.hot_sectors else "无",
+            bottom_reversal_hint=br_hint,
             **self._regime_kwargs(),
         )
 

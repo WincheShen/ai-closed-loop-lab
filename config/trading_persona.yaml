@@ -57,9 +57,13 @@ personas:
         forbidden: []                 # 不强制禁
         degraded: [bear, panic]       # 弱市场减半仓位但允许做
       volume_breakout:
-        compatible: [bull, rebound]
-        forbidden: [panic]            # 只在恐慌完全禁
-        degraded: [bear, neutral]
+        compatible: []
+        forbidden: [bull, neutral, bear, panic, rebound]  # 永久禁用：历史胜率 27%，负期望
+        degraded: []
+      bottom_reversal:
+        compatible: [bear, neutral, rebound]
+        forbidden: []
+        degraded: [bull, panic]    # 牛市追底意义不大，恐慌时减半仓
       defensive_bluechip:
         compatible: [neutral, bear, rebound]
         forbidden: []
@@ -171,8 +175,8 @@ personas:
         degraded: [bear, panic, rebound]
       volume_breakout:
         compatible: []
-        forbidden: [bull, neutral, bear]
-        degraded: [panic, rebound]
+        forbidden: [bull, neutral, bear, panic, rebound]  # 永久禁用
+        degraded: []
 
     # 选股规则（P1 多人格差异化选股）
     stock_selection_rules:
@@ -283,8 +287,8 @@ personas:
         degraded: [panic, rebound]
       volume_breakout:
         compatible: []
-        forbidden: [bull, neutral, bear, panic]
-        degraded: [rebound]
+        forbidden: [bull, neutral, bear, panic, rebound]  # 永久禁用
+        degraded: []
 
     # 选股规则（P1 多人格差异化选股）
     stock_selection_rules:

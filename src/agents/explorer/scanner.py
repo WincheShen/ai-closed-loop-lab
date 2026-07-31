@@ -42,6 +42,7 @@ _RULE_TO_STRATEGY: dict[str, str] = {
     "volume_breakout": "放量突破",
     "strong_turnover": "放量突破",
     "main_fund_inflow": "热点板块前排回踩",
+    "bottom_reversal": "底部启动",
 }
 
 
@@ -502,6 +503,9 @@ class ExplorerScanner:
                 atr = sum(window) / len(window) if window else 0.0
                 atr_pct = round(atr / current_price * 100, 2) if current_price > 0 else 0.0
 
+            # 底部启动形态检测
+            bottom_reversal = self._detect_bottom_reversal(bars, avg_vol)
+
             return {
                 "current_price": current_price,
                 "last_close": round(closes[-1], 2) if closes else current_price,
@@ -520,10 +524,66 @@ class ExplorerScanner:
                 "atr": round(atr, 2),
                 "atr_pct": atr_pct,  # 波动率百分比，如 3.5 表示日均波幅 3.5%
                 "suggested_stop_pct": round(min(max(atr_pct * 2, 3.0), 8.0), 2),  # 2×ATR 且限制在 3-8% 之间
+                "bottom_reversal_signal": bottom_reversal,
             }
         except Exception as e:
             self.logger.warning("K线摘要失败 %s: %s", symbol, e)
             return {"current_price": current_price, "trend": "error"}
+
+    def _detect_bottom_reversal(self, bars: list, avg_vol: float) -> dict | None:
+        """底部启动形态检测：连跌 + 放量收阳 + MA5 上穿 MA10。
+
+        Returns:
+            None: 不符合形态
+            dict: {"score": 0-3, "decline_days": N, "vol_ratio": X, "ma_cross": bool, "detail": str}
+        """
+        if len(bars) < 11:
+            return None
+
+        closes = [b.close for b in bars]
+        n = len(closes)
+
+        # 条件1: 连跌 — 最近一根之前连续 N 天下跌
+        decline_days = 0
+        for i in range(n - 2, -1, -1):
+            if bars[i].change_pct < 0:
+                decline_days += 1
+            else:
+                break
+        has_decline = decline_days >= 3
+
+        # 条件2: 放量收阳 — 最后一根 K 线阳线 + 量比 > 1.5
+        latest = bars[-1]
+        vol_ratio = latest.volume / avg_vol if avg_vol > 0 else 0
+        has_volume_yang = latest.change_pct > 0 and vol_ratio >= 1.5
+
+        # 条件3: MA5 上穿 MA10（金叉）
+        ma5_now = sum(closes[-5:]) / 5
+        ma10_now = sum(closes[-10:]) / 10
+        ma5_prev = sum(closes[-6:-1]) / 5
+        ma10_prev = sum(closes[-11:-1]) / 10
+        has_ma_cross = ma5_now > ma10_now and ma5_prev <= ma10_prev
+
+        # 评分 (0-3)
+        score = int(has_decline) + int(has_volume_yang) + int(has_ma_cross)
+        if score < 2:
+            return None
+
+        detail_parts = []
+        if has_decline:
+            detail_parts.append(f"连跌{decline_days}日")
+        if has_volume_yang:
+            detail_parts.append(f"放量收阳(量比{vol_ratio:.1f})")
+        if has_ma_cross:
+            detail_parts.append("MA5上穿MA10")
+
+        return {
+            "score": score,
+            "decline_days": decline_days,
+            "vol_ratio": round(vol_ratio, 2),
+            "ma_cross": has_ma_cross,
+            "detail": " + ".join(detail_parts),
+        }
 
 
 def run_discovery_node(state: TradingState) -> dict[str, Any]:
