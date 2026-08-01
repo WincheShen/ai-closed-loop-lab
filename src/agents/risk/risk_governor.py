@@ -70,9 +70,15 @@ class RiskGovernor:
                 self.persona.max_total_position_for(self.regime),
             )
         )
-        # 缓存当前持仓状态
-        self._positions = self.brain.store.list_open_positions()
-        self._capital = float(cfg().get("initial_capital", 300000))
+        # 缓存当前持仓状态（只统计当前人格的持仓，避免跨人格误判）
+        self._persona_id = getattr(self.persona, "id", None)
+        self._positions = self.brain.store.list_open_positions(
+            persona_id=self._persona_id,
+        )
+        self._capital = float(
+            self.persona.capital if hasattr(self.persona, "capital") and self.persona.capital
+            else cfg().get("initial_capital", 300000)
+        )
 
     # ----------------------------------------------------------------------
     # 公共入口
