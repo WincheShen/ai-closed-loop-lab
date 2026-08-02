@@ -480,7 +480,37 @@ class PositionReviewAgent:
                 if pnl_pct > 20.0:
                     return result
 
-                # 常规赢家 (5-20%): 允许持有 10 天
+                # 价值投资持仓: 使用长周期阈值（不适用短线规则）
+                strategy = position.get("original_strategy", "")
+                persona_id = position.get("persona_id", "")
+                is_value_position = (
+                    any(k in (persona_id or "") for k in ("duan", "buffett", "value"))
+                    or any(k in (strategy or "") for k in ("价值投资", "护城河", "ROE", "分红"))
+                )
+
+                if is_value_position:
+                    # 价值投资: 持仓 90 天内不触发超期
+                    # 90天后浮亏才减仓（正常波动不干预）
+                    if days_held <= 90:
+                        return result
+                    if pnl_pct > 0:
+                        # 盈利中的价值持仓: 180天才考虑减仓
+                        if days_held <= 180:
+                            return result
+                    # 90天+ 且浮亏: REDUCE
+                    logger.info(
+                        "[%s] Rule Override: 价值投资持仓 %d 天浮盈 %.1f%% → REDUCE",
+                        symbol, days_held, pnl_pct,
+                    )
+                    return {
+                        **result,
+                        "action": "REDUCE",
+                        "reason": f"价值投资持仓{days_held}天浮盈{pnl_pct:.1f}%（超90天阈值），减仓释放部分资金",
+                        "risk_flag": "stale_position",
+                        "rule_override": True,
+                    }
+
+                # 短线持仓: 使用原有分级阈值
                 stale_threshold = None
                 if pnl_pct > 5.0:
                     stale_threshold = 10
