@@ -45,7 +45,11 @@ _STRATEGY_NAME_TO_ID = {
     "护城河": "moat_quality",
     "高ROE": "value_investing",
     "分红稳定": "value_investing",
+    "主力吸筹": "institutional_accumulation",
 }
+
+# 绝对禁用策略黑名单 — 无论 LLM 输出什么，含有这些关键词的信号一律拦截
+_BANNED_STRATEGY_KEYWORDS = {"放量突破", "volume_breakout"}
 
 
 def _infer_strategy_id(strategy_name: str) -> str:
@@ -60,6 +64,30 @@ def _infer_strategy_id(strategy_name: str) -> str:
     return "unknown"
 
 
+def _normalize_strategy_name(raw: str) -> str:
+    """将 LLM 输出的策略名规范化到标准名称，减少 40+ 变体。
+
+    例：
+    - "价值投资/高ROE/护城河/分红稳定" → "价值投资"
+    - "护城河+高ROE+合理估值" → "价值投资"
+    - "热点板块前排回踩" → "热点板块前排回踩" (保留)
+    """
+    if not raw:
+        return raw
+    sid = _infer_strategy_id(raw)
+    _ID_TO_CANONICAL = {
+        "hot_sector_pullback": "热点板块前排回踩",
+        "volume_breakout": "放量突破",
+        "defensive_bluechip": "防守蓝筹",
+        "mean_reversion": "均值回归",
+        "bottom_reversal": "底部启动",
+        "value_investing": "价值投资",
+        "moat_quality": "价值投资",
+        "institutional_accumulation": "主力吸筹",
+    }
+    return _ID_TO_CANONICAL.get(sid, raw)
+
+
 STRATEGIST_SYSTEM_PROMPT = """\
 你是一位 Cognitive Agent 的交易决策者。你必须严格遵守"投资人格"约束，
 并根据"当日市场作战指令"调整决策。不要每只票都给 BUY，宁可错过不要做错。
@@ -72,12 +100,14 @@ STRATEGIST_SYSTEM_PROMPT = """\
 5. 弱势市场 (bear/panic) 必须更严格，能不交易就不交易
 
 ## 禁用策略（已证明负期望，绝对不要使用）
-- 放量突破 (volume_breakout) — 历史胜率仅 27%，平均亏损 -15%
+- 放量突破 (volume_breakout) — 历史胜率仅 11%，平均亏损 -25%，累计亏损 ¥28,052
+- ⚠️ 任何策略名包含「放量突破」「突破前高」「追涨」的，一律禁止！
+- 如果你想推荐的标的只适合放量突破，请直接 PASS
 
-## 推荐策略
-- 热点板块前排回踩: 板块强势 + 龙头回踩支撑 + 量能不萎缩
-- 底部启动: 连跌3日以上 + 放量收阳 + MA5上穿MA10（金叉）
+## 推荐策略（只能从以下策略中选择）
+- 热点板块前排回踩: 板块强势 + 龙头回踩支撑 + 量能不萎缩（历史胜率最高）
 - 主力吸筹: 龙虎榜机构净买入 + 换手率放大 + 价格未涨（底部建仓形态）
+- 底部启动: 连跌3日以上 + 放量收阳 + MA5上穿MA10（金叉）
 - 防守蓝筹: 低估值 + 高股息 + 稳定现金流
 - 均值回归: 短期超跌 + 技术支撑位 + 量能萎缩到极致后放量
 
@@ -94,7 +124,7 @@ STRATEGIST_SYSTEM_PROMPT = """\
     "target_price": 目标价,
     "stop_loss": 止损价,
     "position_pct": 建议仓位比例(0.02-0.10),
-    "strategy": "策略名称(如 热点板块前排回踩/底部启动/主力吸筹/防守蓝筹/均值回归 等)",
+    "strategy": "策略名称(只能从推荐策略中选: 热点板块前排回踩/主力吸筹/底部启动/防守蓝筹/均值回归，禁止使用放量突破)",
     "confidence": 0.0到1.0,
     "rationale": "完整的买入或不买逻辑(2-3句话, 必须引用 regime/posture)",
     "bull_case": "最大的看多理由",
@@ -192,7 +222,7 @@ VALUE_INVESTING_SYSTEM_PROMPT = """\
     "entry_price": 建议入场价,
     "target_price": 目标价(基于内在价值估算),
     "stop_loss": 止损价(基于安全边际下限),
-    "position_pct": 建议仓位比例(价值投资可重仓,0.05-0.30),
+    "position_pct": 建议仓位比例(价值投资应重仓,0.08-0.30,不要低于0.08),
     "strategy": "策略名称(如 价值投资/优质低估/护城河/高ROE/分红稳定)",
     "confidence": 0.0到1.0,
     "rationale": "完整的投资逻辑(2-3句话,必须引用基本面指标)",
@@ -497,9 +527,17 @@ class StrategistEngine:
             )
             return None
 
+        # ── P1 硬拦截: 绝对禁用策略（无论 LLM 怎么说都拒绝）──
+        strategy_name = result.get("strategy", "")
+        if any(kw in strategy_name for kw in _BANNED_STRATEGY_KEYWORDS):
+            self.logger.warning(
+                "[%s %s] BLOCKED — LLM 输出被禁策略「%s」，强制 PASS",
+                symbol, name, strategy_name,
+            )
+            return None
+
         # 硬门槛：若 LLM 选择的策略在当前 regime 下被 ExperienceLayer 标记为 SUSPEND
         # 直接拒绝，不由 LLM 判断（数据说话）
-        strategy_name = result.get("strategy", "")
         strategy_id_check = _infer_strategy_id(strategy_name)
         current_regime = self.market_regime.get("regime", "")
         if strategy_id_check and strategy_id_check != "unknown" and current_regime:
@@ -578,12 +616,16 @@ class StrategistEngine:
                 result.get("stop_loss") or entry_price * (1 - stop_loss_pct), 2,
             ),
             "position_pct": min(
-                result.get("position_pct", 0.08),
+                max(
+                    result.get("position_pct", 0.08),
+                    # P5: 价值投资最低仓位 8%（防止 LLM 给出过保守的 3-5%）
+                    0.08 if self._is_value_persona() else 0.02,
+                ),
                 self.persona.max_single_position_pct if hasattr(
                     self.persona, 'max_single_position_pct'
                 ) else self.config.get("max_position_pct", 0.10),
             ),
-            "strategy": result.get("strategy", "LLM综合分析"),
+            "strategy": _normalize_strategy_name(result.get("strategy", "LLM综合分析")),
             "rationale": result.get("rationale", ""),
             "timestamp": datetime.now().isoformat(),
             "expiry": (datetime.now() + timedelta(
@@ -702,6 +744,22 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
         persona=persona,
         market_regime=market_regime,
     )
+
+    # ── P4: 短线人格在 bear/panic 下跳过信号生成（节省 LLM 调用）──
+    regime_label = market_regime.get("regime", "")
+    posture = market_regime.get("recommended_posture", "")
+    if not engine._is_value_persona() and regime_label in ("bear", "panic"):
+        logger.info(
+            "[Strategist] 短线人格在 %s/%s 市场下跳过信号生成 (节省 LLM 调用)",
+            regime_label, posture,
+        )
+        return {
+            "trade_signals": [],
+            "risk_assessment": {"skipped": f"short_term_skip_{regime_label}"},
+            "logs": state.get("logs", []) + [
+                f"[Strategist] regime={regime_label} 短线人格跳过 (bear/panic 下不生成信号)"
+            ],
+        }
 
     candidates = list(state.get("target_stocks", []))
 
