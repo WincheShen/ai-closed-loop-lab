@@ -611,6 +611,8 @@ class AkshareClient:
         )
         resp.raise_for_status()
         data = resp.json()
+        if not data:
+            return []
 
         bars: list[KlineBar] = []
         prev_close = 0.0
@@ -681,7 +683,7 @@ class AkshareClient:
     def fetch_kline(self, symbol: str, days: int = 60) -> list[KlineBar]:
         """拉取单只股票的日K线（最近 N 个交易日）。
 
-        数据源优先级：akshare(eastmoney) → 新浪财经 → mock
+        数据源优先级：akshare(eastmoney) → 腾讯财经 → 新浪财经 → mock
 
         Args:
             symbol: 6位股票代码，如 "600519"
@@ -699,7 +701,13 @@ class AkshareClient:
             except Exception as e:
                 self._cb_record_failure(str(e))
                 self._metrics.kline_fail += 1
-                logger.warning("akshare kline failed for %s: %s，尝试新浪", symbol, e)
+                logger.warning("akshare kline failed for %s: %s，尝试腾讯", symbol, e)
+        # Tier 2: 腾讯财经
+        try:
+            return self._fetch_kline_tencent(symbol, days)
+        except Exception as e:
+            logger.warning("腾讯 kline 也失败 %s: %s，尝试新浪", symbol, e)
+        # Tier 3: 新浪财经
         try:
             return self._fetch_kline_sina(symbol, days)
         except Exception as e:
@@ -737,6 +745,52 @@ class AkshareClient:
                     turnover_rate=float(row.get("换手率", 0) or 0),
                     change_pct=float(row.get("涨跌幅", 0) or 0),
                 ))
+            except Exception:
+                continue
+        return bars
+
+    def _fetch_kline_tencent(self, symbol: str, days: int) -> list[KlineBar]:
+        """通过腾讯财经 API (ak.stock_zh_a_daily) 拉取日K线。
+
+        腾讯源稳定性高于东方财富，但不支持分钟K线。
+        字段: date/open/high/low/close/volume/turnover/outstanding_share/turnover
+        """
+        import akshare as ak  # type: ignore
+
+        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+        tx_symbol = f"{prefix}{symbol}"
+        end = date.today()
+        start = end - timedelta(days=int(days * 1.8))
+        start_str = start.strftime("%Y%m%d")
+        end_str = end.strftime("%Y%m%d")
+
+        df = ak.stock_zh_a_daily(
+            symbol=tx_symbol,
+            start_date=start_str,
+            end_date=end_str,
+            adjust="qfq",
+        )
+        bars: list[KlineBar] = []
+        prev_close = 0.0
+        for _, row in df.tail(days).iterrows():
+            try:
+                close = float(row.get("close", 0) or 0)
+                change_pct = (
+                    round((close / prev_close - 1) * 100, 2)
+                    if prev_close > 0 else 0
+                )
+                bars.append(KlineBar(
+                    date=date.fromisoformat(str(row.get("date", ""))[:10]),
+                    open=float(row.get("open", 0) or 0),
+                    high=float(row.get("high", 0) or 0),
+                    low=float(row.get("low", 0) or 0),
+                    close=close,
+                    volume=float(row.get("volume", 0) or 0) / 100,  # 股→手
+                    turnover=float(row.get("amount", 0) or 0),
+                    turnover_rate=float(row.get("turnover", 0) or 0) * 100,  # 小数→百分比
+                    change_pct=change_pct,
+                ))
+                prev_close = close
             except Exception:
                 continue
         return bars

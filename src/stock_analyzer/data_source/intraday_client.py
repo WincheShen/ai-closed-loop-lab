@@ -243,6 +243,9 @@ class IntradayClient:
         )
         resp.raise_for_status()
         data = resp.json()
+        if not data:
+            # 新浪对 period=1 的部分股票返回 null
+            return []
 
         bars: list[MinuteBar] = []
         prev_close = 0.0
