@@ -111,22 +111,45 @@ STRATEGIST_SYSTEM_PROMPT = """\
 - 防守蓝筹: 低估值 + 高股息 + 稳定现金流
 - 均值回归: 短期超跌 + 技术支撑位 + 量能萎缩到极致后放量
 
-## 决策框架
-- BUY: 技术形态良好 + 资金面支持 + 与当日 posture 匹配 + 风险收益比合理
-- PASS: 任一关键条件不满足，或与 persona 禁忌冲突
+## 5-Gate 结构化检查清单（必须逐项评估）
+在给出 BUY/PASS 之前，你必须先对以下 5 道关卡逐项打分:
+- **pass**: 该条件明确满足（2分）
+- **conditional**: 勉强满足或有保留（1分）
+- **fail**: 明确不满足（0分）
+
+| Gate | 检查项 | 评判标准 |
+|------|--------|----------|
+| G1 趋势确认 | MA排列+价格位置+趋势方向 | pass: MA5>MA10>MA20多头排列或底部金叉; fail: 均线空头下行 |
+| G2 量价配合 | 量比+换手率+资金流向 | pass: 量比>1.2且主力净流入; fail: 缩量或主力大幅流出 |
+| G3 板块共振 | 所属板块是否在热点+板块强度 | pass: 在当日Top5热点板块; conditional: 板块数据缺失(可跳过); fail: 板块明显走弱 |
+| G4 风险收益比 | (目标价-入场价)/(入场价-止损价) | pass: >=2.0; conditional: 1.2-2.0; fail: <1.2 |
+| G5 时机匹配 | 与regime/posture是否兼容 | pass: posture=attack/selective_attack; conditional: observe但个股极强; fail: exit/defend |
+
+**硬规则**:
+- 任何一项 = fail → 必须 PASS，不买
+- 总分 <= 5 → 仓位不超过 3%
+- 总分 6-7 → 仓位 3%-5%
+- 总分 8-10 → 仓位 5%-10%
 
 ## 输出格式（严格 JSON）
 ```json
 {
     "action": "BUY 或 PASS",
-    "entry_condition": "immediate(当前价可直接买入) 或 breakout(需等待突破某价位) 或 pullback(需等待回调到某价位)",
+    "checklist": {
+        "G1_trend": "pass/conditional/fail",
+        "G2_volume": "pass/conditional/fail",
+        "G3_sector": "pass/conditional/fail",
+        "G4_risk_reward": "pass/conditional/fail",
+        "G5_timing": "pass/conditional/fail"
+    },
+    "entry_condition": "immediate/breakout/pullback",
     "entry_price": 建议入场价,
     "target_price": 目标价,
     "stop_loss": 止损价,
-    "position_pct": 建议仓位比例(0.02-0.10),
+    "position_pct": 建议仓位比例(0.02-0.10, 必须符合上面的总分仓位约束),
     "strategy": "策略名称(只能从推荐策略中选: 热点板块前排回踩/主力吸筹/底部启动/防守蓝筹/均值回归，禁止使用放量突破)",
     "confidence": 0.0到1.0,
-    "rationale": "完整的买入或不买逻辑(2-3句话, 必须引用 regime/posture)",
+    "rationale": "完整的买入或不买逻辑(2-3句话, 必须引用 regime/posture 和 checklist 结果)",
     "bull_case": "最大的看多理由",
     "bear_case": "最大的风险点"
 }
@@ -214,18 +237,45 @@ VALUE_INVESTING_SYSTEM_PROMPT = """\
 - **BUY**: 企业质量优秀 + 估值合理/低估 + 有安全边际 + 符合 persona 偏好
 - **PASS**: 基本面不达标 / 估值偏高 / 商业模式看不懂 / 管理层不可信
 
+## 5-Gate 结构化检查清单（必须逐项评估）
+在给出 BUY/PASS 之前，你必须先对以下 5 道关卡逐项打分:
+- **pass**: 该条件明确满足（2分）
+- **conditional**: 勉强满足或有保留（1分）
+- **fail**: 明确不满足（0分）
+
+| Gate | 检查项 | 评判标准 |
+|------|--------|----------|
+| G1 好生意 | ROE+毛利率+现金流 | pass: ROE>15%且稳定,FCF为正; conditional: ROE 10-15%或周期性波动; fail: ROE<10%或FCF持续为负 |
+| G2 护城河 | 品牌/转换成本/网络效应/规模 | pass: 至少2项护城河且在加宽; conditional: 1项但稳定; fail: 无明显护城河或正在被侵蚀 |
+| G3 安全边际 | PE/PB历史分位+股息率 | pass: PE<历史中位数且股息率>2%; conditional: PE合理但无明显折价; fail: PE明显高估 |
+| G4 管理层 | 诚信度+资本配置+利益一致性 | pass: 有增持/回购记录,资本配置理性; conditional: 中性,无明显加减分; fail: 有减持/财务疑点/治理问题 |
+| G5 确定性 | 商业模式可理解+10年可预测 | pass: 一句话说清生意,10年不会被颠覆; conditional: 生意可理解但有不确定性; fail: 看不懂或变化太快 |
+
+**硬规则**:
+- 任何一项 = fail → 必须 PASS，不买
+- 总分 <= 5 → 仓位 8%（最低底仓）
+- 总分 6-7 → 仓位 8%-15%
+- 总分 8-10 → 仓位 15%-30%（重仓优质标的）
+
 ## 输出格式（严格 JSON）
 ```json
 {
     "action": "BUY 或 PASS",
+    "checklist": {
+        "G1_business": "pass/conditional/fail",
+        "G2_moat": "pass/conditional/fail",
+        "G3_margin_of_safety": "pass/conditional/fail",
+        "G4_management": "pass/conditional/fail",
+        "G5_certainty": "pass/conditional/fail"
+    },
     "entry_condition": "immediate(估值已进入安全区) 或 pullback(等待回调到更安全价位)",
     "entry_price": 建议入场价,
     "target_price": 目标价(基于内在价值估算),
     "stop_loss": 止损价(基于安全边际下限),
-    "position_pct": 建议仓位比例(价值投资应重仓,0.08-0.30,不要低于0.08),
+    "position_pct": 建议仓位比例(0.08-0.30, 必须符合上面的总分仓位约束),
     "strategy": "策略名称(如 价值投资/优质低估/护城河/高ROE/分红稳定)",
     "confidence": 0.0到1.0,
-    "rationale": "完整的投资逻辑(2-3句话,必须引用基本面指标)",
+    "rationale": "完整的投资逻辑(2-3句话,必须引用基本面指标和 checklist 结果)",
     "bull_case": "最核心的投资价值",
     "bear_case": "最大的风险点"
 }
@@ -571,6 +621,58 @@ class StrategistEngine:
                 "[%s %s] PASS — %s", symbol, name, result.get("rationale", "")[:80],
             )
             return None
+
+        # ── Checklist Gate 硬拦截 ──
+        checklist = result.get("checklist") or {}
+        if checklist:
+            gate_scores = {"pass": 2, "conditional": 1, "fail": 0}
+            has_fail = False
+            total_score = 0
+            gate_details = []
+            for gate_key, gate_val in checklist.items():
+                val = str(gate_val).lower().strip()
+                score = gate_scores.get(val, 1)  # 未知值视为 conditional
+                total_score += score
+                gate_details.append(f"{gate_key}={val}")
+                if val == "fail":
+                    has_fail = True
+
+            if has_fail:
+                self.logger.warning(
+                    "[%s %s] CHECKLIST REJECT — 存在 fail 项: %s",
+                    symbol, name, ", ".join(gate_details),
+                )
+                return None
+
+            # 根据总分限制仓位
+            is_value = self._is_value_persona()
+            llm_pct = result.get("position_pct", 0.05)
+            if is_value:
+                if total_score <= 5:
+                    max_pct = 0.08
+                elif total_score <= 7:
+                    max_pct = 0.15
+                else:
+                    max_pct = 0.30
+            else:
+                if total_score <= 5:
+                    max_pct = 0.03
+                elif total_score <= 7:
+                    max_pct = 0.05
+                else:
+                    max_pct = 0.10
+
+            if llm_pct > max_pct:
+                self.logger.info(
+                    "[%s] Checklist 总分=%d，仓位 %.0f%% → %.0f%% (上限约束)",
+                    symbol, total_score, llm_pct * 100, max_pct * 100,
+                )
+                result["position_pct"] = max_pct
+
+            self.logger.info(
+                "[%s %s] Checklist: %s | 总分=%d/10",
+                symbol, name, ", ".join(gate_details), total_score,
+            )
 
         # ── P1 硬拦截: 绝对禁用策略（无论 LLM 怎么说都拒绝）──
         strategy_name = result.get("strategy", "")
