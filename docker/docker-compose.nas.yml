@@ -24,6 +24,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./config:/app/config
     env_file:
       - .env
     environment:
@@ -48,6 +51,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./config:/app/config
     env_file:
       - .env
     environment:
@@ -70,6 +76,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./config:/app/config
     env_file:
       - .env
     environment:
