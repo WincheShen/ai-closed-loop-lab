@@ -29,6 +29,7 @@ logger = get_agent_logger("executioner", "init")
 MIN_SHARE_UNIT = 100
 DAILY_LOSS_LIMIT_PCT = -0.03       # 日亏损 3% 熔断
 MAX_CONSECUTIVE_LOSSES = 5         # 连续亏损 5 笔熔断
+CIRCUIT_BREAKER_WINDOW_DAYS = 14   # 熔断只看最近 N 天内的平仓记录
 
 
 class ExecutionEngine:
@@ -48,8 +49,18 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
 
     def _check_circuit_breaker(self) -> bool:
-        """检查是否应触发熔断。返回 True 表示应停止交易。"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        """检查是否应触发熔断。返回 True 表示应停止交易。
+
+        设计原则:
+        - 日亏损检查: 当天已实现亏损超过资金的 3%
+        - 连续亏损检查: 最近 14 天内连续亏损 >= 5 笔
+          (超过 14 天的历史亏损不再计入，避免永久锁死)
+        """
+        from datetime import timedelta
+
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        window_start = (now - timedelta(days=CIRCUIT_BREAKER_WINDOW_DAYS)).isoformat()
 
         # 1) 日内已实现亏损检查
         closed_positions = self.brain.store.list_positions(
@@ -77,8 +88,12 @@ class ExecutionEngine:
             )
             return True
 
-        # 2) 连续亏损检查
-        recent = sorted(closed_positions, key=lambda p: p.get("closed_at", ""), reverse=True)
+        # 2) 连续亏损检查 — 只看最近 CIRCUIT_BREAKER_WINDOW_DAYS 天
+        recent_in_window = [
+            p for p in closed_positions
+            if (p.get("closed_at") or "") >= window_start
+        ]
+        recent = sorted(recent_in_window, key=lambda p: p.get("closed_at", ""), reverse=True)
         consecutive_losses = 0
         for p in recent[:MAX_CONSECUTIVE_LOSSES + 2]:
             if (p.get("realized_pnl") or 0) < 0:
@@ -88,8 +103,8 @@ class ExecutionEngine:
 
         if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
             self.logger.warning(
-                "⚠️ CIRCUIT BREAKER: 连续亏损 %d 笔(限制 %d)，停止买入",
-                consecutive_losses, MAX_CONSECUTIVE_LOSSES,
+                "⚠️ CIRCUIT BREAKER: 最近%d天内连续亏损 %d 笔(限制 %d)，停止买入",
+                CIRCUIT_BREAKER_WINDOW_DAYS, consecutive_losses, MAX_CONSECUTIVE_LOSSES,
             )
             return True
 
