@@ -59,6 +59,18 @@ class Config:
             "max_position_pct": float(os.getenv("MAX_POSITION_PCT", "0.10")),
             "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.05")),
 
+            # --- miniQMT Bridge ---
+            "xtquant_bridge_url": os.getenv("XTQUANT_BRIDGE_URL"),
+            "xtquant_bridge_token": os.getenv("XTQUANT_BRIDGE_TOKEN", ""),
+            "xtquant_account_id": os.getenv("XTQUANT_ACCOUNT_ID", ""),
+
+            # --- Safety Guardrails (shadow/live mode) ---
+            "max_single_order_amount": float(os.getenv("MAX_SINGLE_ORDER_AMOUNT", "10000")),
+            "max_daily_buy_amount": float(os.getenv("MAX_DAILY_BUY_AMOUNT", "30000")),
+            "max_total_position_value": float(os.getenv("MAX_TOTAL_POSITION_VALUE", "50000")),
+            "max_daily_orders": int(os.getenv("MAX_DAILY_ORDERS", "10")),
+            "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "1000")),
+
             # --- Market Data ---
             "tushare_token": os.getenv("TUSHARE_TOKEN"),
             "eastmoney_token": os.getenv("EASTMONEY_TOKEN"),

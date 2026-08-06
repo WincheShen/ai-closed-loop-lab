@@ -311,6 +311,51 @@ class StrategistEngine:
         pid = self.persona.id.lower()
         return any(k in pid for k in ("duan", "buffett", "value"))
 
+    def _calculate_position_pct(
+        self, strategy_name: str, llm_suggestion: float,
+    ) -> float:
+        """基于 Kelly Criterion 动态计算仓位比例。
+
+        优先级: Kelly (有足够样本时) > LLM suggestion > 默认值
+        始终受 persona max_single_position_pct 和 min floor 约束。
+        """
+        is_value = self._is_value_persona()
+        min_floor = 0.08 if is_value else 0.02
+        max_cap = (
+            self.persona.max_single_position_pct
+            if hasattr(self.persona, 'max_single_position_pct')
+            else self.config.get("max_position_pct", 0.10)
+        )
+
+        # 尝试 Kelly 计算
+        try:
+            from src.agents.strategist.kelly_sizer import get_kelly_sizer
+            sizer = get_kelly_sizer()
+            regime = self.market_regime.get("regime")
+            kelly_result = sizer.calculate(
+                strategy_id=strategy_name, regime=regime, is_value=is_value,
+            )
+            if kelly_result.method == "kelly":
+                # Kelly 有效：使用 Kelly 仓位
+                position_pct = kelly_result.final_fraction
+                self.logger.info(
+                    "[Kelly] 策略=%s regime=%s → %.1f%% (WR=%.0f%% b=%.2f)",
+                    strategy_name, regime,
+                    position_pct * 100,
+                    kelly_result.stats.get("win_rate", 0) * 100,
+                    kelly_result.stats.get("avg_win_pct", 0)
+                    / abs(kelly_result.stats.get("avg_loss_pct", 1) or 1),
+                )
+            else:
+                # Kelly 样本不足：用 LLM 建议作为参考
+                position_pct = llm_suggestion
+        except Exception as e:
+            self.logger.debug("Kelly 计算失败，使用 LLM 建议: %s", e)
+            position_pct = llm_suggestion
+
+        # 约束: [min_floor, max_cap]
+        return round(min(max(position_pct, min_floor), max_cap), 4)
+
     def _lessons_block(self) -> str:
         regime = self.market_regime.get("regime")
         try:
@@ -615,15 +660,9 @@ class StrategistEngine:
             "stop_loss": round(
                 result.get("stop_loss") or entry_price * (1 - stop_loss_pct), 2,
             ),
-            "position_pct": min(
-                max(
-                    result.get("position_pct", 0.08),
-                    # P5: 价值投资最低仓位 8%（防止 LLM 给出过保守的 3-5%）
-                    0.08 if self._is_value_persona() else 0.02,
-                ),
-                self.persona.max_single_position_pct if hasattr(
-                    self.persona, 'max_single_position_pct'
-                ) else self.config.get("max_position_pct", 0.10),
+            "position_pct": self._calculate_position_pct(
+                strategy_name=_normalize_strategy_name(result.get("strategy", "LLM综合分析")),
+                llm_suggestion=result.get("position_pct", 0.08),
             ),
             "strategy": _normalize_strategy_name(result.get("strategy", "LLM综合分析")),
             "rationale": result.get("rationale", ""),

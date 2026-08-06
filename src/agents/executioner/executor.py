@@ -3,12 +3,12 @@
 职责：
 1. 接收 TradeSignal，按交易模式执行下单
 2. 成交后自动创建 Position 记录（fills → positions 桥接）
-3. 严格隔离：mock / paper / live
+3. 严格隔离：mock / shadow / live
 
 ⚠️ 安全设计：
 - TRADING_MODE=mock 时只记录到数据库，不对接券商
-- TRADING_MODE=paper 时对接模拟盘（待实现，降级为 mock）
-- TRADING_MODE=live 时才走真实接口，且单笔仓位严格限制
+- TRADING_MODE=shadow 时双轨执行：mock + 实盘同时运行，对比结果
+- TRADING_MODE=live 时只走真实接口，且由安全护栏严格限制
 - Circuit Breaker: 日亏损超限或连续亏损过多时自动停盘
 """
 
@@ -221,10 +221,14 @@ class ExecutionEngine:
             # 立即执行（包括 mock 模式下的条件单）
             if self.mode == "mock":
                 order, fill = await self._mock_execute(sig)
-            elif self.mode == "paper":
-                order, fill = await self._paper_execute(sig)
-            else:
+            elif self.mode == "shadow":
+                order, fill = await self._shadow_execute(sig)
+            elif self.mode == "live":
                 order, fill = await self._live_execute(sig)
+            else:
+                # 未知模式，安全降级到 mock
+                self.logger.warning("未知交易模式 '%s'，降级为 mock", self.mode)
+                order, fill = await self._mock_execute(sig)
 
             self.submitted_orders.append(order)
             if fill:
@@ -545,15 +549,201 @@ class ExecutionEngine:
         except Exception:
             self.logger.warning("[WATCHLIST] 加入自选股失败: %s", symbol, exc_info=True)
 
-    async def _paper_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:
-        """模拟盘执行：对接券商模拟盘接口（待实现）。"""
-        self.logger.warning("Paper trading 接口尚未接入，降级为 mock 模式")
-        return await self._mock_execute(signal)
+    async def _shadow_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:
+        """影子模式执行：双轨运行 mock + 实盘，对比结果。
+
+        1. mock 照常记录到数据库（保持系统一致性）
+        2. 同时发送真实订单到券商（通过 BrokerAdapter）
+        3. 记录差异到日志和数据库，供后续分析
+        """
+        # 先执行 mock（保证数据库状态一致）
+        order, fill = await self._mock_execute(signal)
+
+        # 同时发送到实盘券商
+        try:
+            adapter = await self._get_broker_adapter()
+            if adapter and adapter.is_connected():
+                from src.agents.executioner.broker_adapter import OrderSide, OrderType
+
+                side = OrderSide.BUY if signal.get("action") == "buy" else OrderSide.SELL
+                quantity = fill["quantity"] if fill else 100
+                price = signal["entry_price"]
+
+                broker_result = await adapter.place_order(
+                    symbol=signal["symbol"],
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    order_type=OrderType.LIMIT,
+                )
+
+                self.logger.info(
+                    "[SHADOW] 实盘下单结果 | %s %s | 状态=%s | broker_order_id=%s",
+                    signal["symbol"], side.value,
+                    broker_result.status.value, broker_result.order_id,
+                )
+
+                # 记录 shadow 对比到数据库
+                self._record_shadow_comparison(signal, fill, broker_result)
+
+                if broker_result.reject_reason:
+                    self.logger.warning(
+                        "[SHADOW] 实盘被拒绝: %s", broker_result.reject_reason,
+                    )
+            else:
+                self.logger.warning("[SHADOW] Broker 未连接，仅执行 mock")
+        except Exception as e:
+            self.logger.error("[SHADOW] 实盘下单异常（mock 不受影响）: %s", e)
+
+        return order, fill
 
     async def _live_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:
-        """实盘执行：对接真实券商接口（⚠️ 高风险，需充分测试后开启）。"""
-        self.logger.error("实盘模式已配置但接口尚未接入 — 拒绝执行")
-        raise RuntimeError("Live trading API not implemented yet. Set TRADING_MODE=mock or paper.")
+        """实盘执行：通过 BrokerAdapter 对接真实券商。
+
+        ⚠️ 高风险模式 — 仅在 shadow 模式验证充分后开启。
+        与 mock 模式的区别：
+        1. 订单由真实券商执行
+        2. 成交回报驱动（而非模拟立即成交）
+        3. 仓位和资金由券商数据同步
+        """
+        from src.agents.executioner.broker_adapter import OrderSide, OrderStatus, OrderType
+
+        adapter = await self._get_broker_adapter()
+        if not adapter or not adapter.is_connected():
+            self.logger.error("[LIVE] Broker 未连接，拒绝执行。请检查 XTQUANT_BRIDGE_URL 配置")
+            raise RuntimeError("Broker adapter not connected. Cannot execute in live mode.")
+
+        action = signal.get("action", "")
+        symbol = signal["symbol"]
+        side = OrderSide.BUY if action == "buy" else OrderSide.SELL
+
+        # 计算下单数量
+        if action == "sell" and signal.get("target_qty"):
+            quantity = signal["target_qty"]
+        else:
+            account = self.brain.store.get_account_by_persona(self.persona_id)
+            available_cash = account["available_cash"] if account else 10000
+            position_pct = signal.get("position_pct", 0.08)
+            entry_price = signal["entry_price"]
+            allocation = available_cash * position_pct
+            quantity = max(100, int(allocation / entry_price / 100) * 100) if entry_price > 0 else 100
+
+        # 发送到券商
+        broker_result = await adapter.place_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=signal["entry_price"],
+            order_type=OrderType.LIMIT,
+        )
+
+        order_id = f"ORD-{broker_result.order_id or uuid.uuid4().hex[:8].upper()}"
+        now = datetime.now().isoformat()
+
+        order: Order = {
+            "order_id": order_id,
+            "signal_id": signal["signal_id"],
+            "symbol": symbol,
+            "side": side.value,
+            "quantity": quantity,
+            "order_type": "limit",
+            "limit_price": signal["entry_price"],
+            "status": "submitted" if broker_result.status == OrderStatus.SUBMITTED else "rejected",
+            "submitted_at": now,
+            "updated_at": now,
+        }
+        self.brain.store.save_order(order)
+
+        fill: Fill | None = None
+        if broker_result.status in (OrderStatus.FILLED, OrderStatus.SUBMITTED):
+            # 实盘模式下，成交回报由后台轮询确认（非立即成交）
+            # 这里先标记为 submitted，由 _poll_live_orders 定时检查成交
+            self.logger.info(
+                "[LIVE] ✅ 委托已提交 | %s %s %s | %d × %.2f | broker_id=%s",
+                order_id, side.value, symbol, quantity,
+                signal["entry_price"], broker_result.order_id,
+            )
+            # 存储 broker order id 用于后续轮询
+            self.brain.store.update_signal_status(signal["signal_id"], "live_submitted")
+        else:
+            self.logger.warning(
+                "[LIVE] ❌ 委托被拒 | %s %s | 原因: %s",
+                symbol, side.value, broker_result.reject_reason,
+            )
+            self.brain.store.update_signal_status(signal["signal_id"], "live_rejected")
+
+        return order, fill
+
+    # ------------------------------------------------------------------
+    # Broker Adapter 管理
+    # ------------------------------------------------------------------
+
+    _broker_adapter_instance = None
+
+    async def _get_broker_adapter(self):
+        """获取或创建 BrokerAdapter 实例（单例）。"""
+        if ExecutionEngine._broker_adapter_instance is not None:
+            return ExecutionEngine._broker_adapter_instance
+
+        mode = self.mode
+        if mode not in ("shadow", "live"):
+            return None
+
+        try:
+            from src.agents.executioner.broker_adapter import SafeBrokerAdapter, SafetyConfig
+            from src.agents.executioner.xtquant_client import XtQuantHttpAdapter
+
+            # 创建底层 adapter
+            raw_adapter = XtQuantHttpAdapter()
+
+            # 从配置加载安全参数
+            safety_config = SafetyConfig(
+                max_single_order_amount=float(cfg().get("max_single_order_amount", 10000)),
+                max_daily_buy_amount=float(cfg().get("max_daily_buy_amount", 30000)),
+                max_total_position_value=float(cfg().get("max_total_position_value", 50000)),
+                max_daily_orders=int(cfg().get("max_daily_orders", 10)),
+                max_daily_loss=float(cfg().get("max_daily_loss", 1000)),
+            )
+
+            # 包装安全层
+            safe_adapter = SafeBrokerAdapter(raw_adapter, safety_config)
+
+            # 连接
+            connected = await safe_adapter.connect()
+            if connected:
+                ExecutionEngine._broker_adapter_instance = safe_adapter
+                self.logger.info("BrokerAdapter 初始化成功")
+            else:
+                self.logger.warning("BrokerAdapter 连接失败，实盘功能不可用")
+                return None
+
+            return ExecutionEngine._broker_adapter_instance
+
+        except ImportError as e:
+            self.logger.error("BrokerAdapter 依赖缺失: %s", e)
+            return None
+        except Exception as e:
+            self.logger.error("BrokerAdapter 初始化异常: %s", e)
+            return None
+
+    def _record_shadow_comparison(self, signal, mock_fill, broker_result) -> None:
+        """记录 shadow 模式下 mock 与实盘的对比数据。"""
+        try:
+            comparison = {
+                "signal_id": signal["signal_id"],
+                "symbol": signal["symbol"],
+                "action": signal.get("action", ""),
+                "mock_fill_price": mock_fill["avg_price"] if mock_fill else 0,
+                "mock_fill_qty": mock_fill["quantity"] if mock_fill else 0,
+                "live_status": broker_result.status.value,
+                "live_order_id": broker_result.order_id,
+                "live_reject_reason": broker_result.reject_reason,
+                "timestamp": datetime.now().isoformat(),
+            }
+            # 写入日志（后续可扩展为写入专门的 shadow_comparisons 表）
+            self.logger.info("[SHADOW COMPARE] %s", comparison)
+        except Exception as e:
+            self.logger.debug("Shadow 对比记录失败: %s", e)
 
     def get_portfolio_snapshot(self) -> dict:
         """获取当前持仓快照（优先从 positions 表读取，按 persona 过滤）。"""

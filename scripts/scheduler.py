@@ -118,14 +118,43 @@ def job_market_brain_only() -> None:
 
 
 @skip_if_weekend
+def job_regime_drift_check() -> None:
+    """盘中每 5 分钟 regime drift 快速检测（纯量化，无 LLM）。"""
+    try:
+        from src.agents.cio.regime_drift import detect_regime_drift
+        result = detect_regime_drift()
+        if result.get("drifted"):
+            logger.warning(
+                "⚠️ REGIME DRIFT: %s → %s (severity=%d) | action=%s",
+                result["from_regime"], result["to_regime"],
+                result["severity"], result.get("action_taken"),
+            )
+        elif result.get("severity", 0) > 0:
+            logger.info(
+                "Drift 信号 (待确认): %s → %s (severity=%d)",
+                result.get("from_regime"), result.get("to_regime"),
+                result.get("severity"),
+            )
+    except Exception as e:
+        logger.debug("Regime drift 检测异常: %s", e)
+
+
+@skip_if_weekend
 def job_closing_analysis() -> None:
-    """每日 15:05 收盘分析 + 生成发帖内容。"""
+    """每日 15:05 收盘分析 + 生成发帖内容 + 自动发布到社交平台。"""
     logger.info("⏰ 定时任务触发: 收盘分析")
     try:
         from src.agents.reviewer.closing_analysis import run_closing_analysis
-        asyncio.run(run_closing_analysis())
+        result = asyncio.run(run_closing_analysis(dry_run=False))
+        dispatched = result.get("dispatched", False)
+        if dispatched:
+            logger.info("✅ 收盘分析已发布到社交平台")
+        else:
+            logger.info("收盘分析已生成，未发布（检查 social_accounts.yaml 配置）")
     except ImportError:
         logger.warning("closing_analysis 模块尚未实现，跳过")
+    except Exception as e:
+        logger.error("收盘分析异常: %s", e)
 
 
 @skip_if_weekend
@@ -279,6 +308,70 @@ def job_watchlist_check() -> None:
         logger.warning("Watchlist 检查失败: %s", e)
 
 
+@skip_if_weekend
+def job_sync_sma_status() -> None:
+    """每日 15:45 同步 SMA 发帖状态 — 更新 social_posts 表。"""
+    logger.info("⏰ 定时任务触发: SMA 状态同步")
+    try:
+        from src.social_media_dispatcher.client import SmaClient
+        from src.central_brain import get_central_brain
+
+        brain = get_central_brain()
+        conn = brain.store._conn()
+
+        # 查找所有未完成的 social_posts
+        pending_posts = conn.execute(
+            "SELECT * FROM social_posts WHERE status NOT IN ('published', 'failed', 'error') "
+            "AND dispatched_at > datetime('now', '-3 days')"
+        ).fetchall()
+
+        if not pending_posts:
+            logger.info("无待同步的社交帖子")
+            return
+
+        client = SmaClient()
+        updated = 0
+        for post in pending_posts:
+            post = dict(post)
+            task_id = post.get("sma_task_id")
+            if not task_id:
+                continue
+            try:
+                resp = client.health()  # 先确认 SMA 可达
+                if not resp:
+                    break
+
+                import httpx
+                resp = httpx.get(
+                    f"{client.base_url}/api/tasks/{task_id}",
+                    timeout=10.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    new_status = data.get("status", "")
+                    post_url = data.get("post_url", "")
+                    if new_status and new_status != post.get("status"):
+                        conn.execute(
+                            "UPDATE social_posts SET status = ?, post_url = ?, updated_at = datetime('now') "
+                            "WHERE sma_task_id = ?",
+                            (new_status, post_url or "", task_id),
+                        )
+                        conn.commit()
+                        updated += 1
+                        logger.info(
+                            "SMA 状态更新: task=%s, %s → %s",
+                            task_id, post.get("status"), new_status,
+                        )
+            except Exception as e:
+                logger.debug("SMA 状态查询失败 task=%s: %s", task_id, e)
+
+        logger.info("SMA 状态同步完成: %d/%d 已更新", updated, len(pending_posts))
+    except ImportError:
+        logger.debug("SMA 客户端未配置，跳过状态同步")
+    except Exception as e:
+        logger.warning("SMA 状态同步异常: %s", e)
+
+
 def job_backfill_attributions() -> None:
     """每日 15:15 补跑缺失归因 — 保底机制。
 
@@ -362,6 +455,18 @@ def setup_schedule() -> None:
             t = f"{hour:02d}:{minute:02d}"
             schedule.every().day.at(t).do(job_intraday_review)
 
+    # 盘中每 5 分钟 regime drift 快速检测 (9:35 - 14:55)
+    for hour in range(9, 15):
+        for minute in range(0, 60, 5):
+            if hour == 9 and minute < 35:
+                continue
+            if hour >= 12 and hour < 13:
+                continue
+            if hour == 14 and minute > 55:
+                continue
+            t = f"{hour:02d}:{minute:02d}"
+            schedule.every().day.at(t).do(job_regime_drift_check)
+
     schedule.every().day.at("09:35").do(job_market_brain_only)
     schedule.every().day.at("11:35").do(job_market_brain_only)
     schedule.every().day.at("14:00").do(job_market_brain_only)
@@ -370,6 +475,7 @@ def setup_schedule() -> None:
     schedule.every().day.at("15:15").do(job_backfill_attributions)
     schedule.every().day.at("15:35").do(job_daily_pipeline)
     schedule.every().day.at("15:40").do(job_watchlist_check)
+    schedule.every().day.at("15:45").do(job_sync_sma_status)
     schedule.every().day.at("15:50").do(job_stale_position_check)
     schedule.every().day.at("16:00").do(job_health_check)
 
