@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STALE_THRESHOLD_DAYS = 5
 
+# 人格级别的 stale 阈值 — 价值投资允许更长持仓期
+_PERSONA_STALE_THRESHOLDS: dict[str, int] = {
+    "short_term_hot_rotation_v1": 5,    # 短线: 5 天
+    "warren_buffett_v1": 90,            # 巴菲特: 90 天
+    "duan_yongping_v1": 90,             # 段永平: 90 天
+}
+
+
+def _get_threshold_for_persona(persona_id: str | None, default: int) -> int:
+    """根据人格 ID 返回 stale 阈值天数。"""
+    if persona_id and persona_id in _PERSONA_STALE_THRESHOLDS:
+        return _PERSONA_STALE_THRESHOLDS[persona_id]
+    return default
+
 
 def check_stale_positions(
     threshold_days: int = DEFAULT_STALE_THRESHOLD_DAYS,
@@ -23,11 +37,15 @@ def check_stale_positions(
 
     Args:
         threshold_days: 持仓天数阈值（交易日近似为自然日），超过则标记为 stale。
+                        如果指定了 persona_id，会自动使用人格对应阈值覆盖此值。
         persona_id: 可选人格ID过滤，为None时检查所有持仓。
 
     Returns:
         被标记为 stale 的持仓列表（包含 hold_days 和 force_review_reason）。
     """
+    # 人格级别阈值覆盖
+    threshold_days = _get_threshold_for_persona(persona_id, threshold_days)
+
     brain = get_central_brain()
     # 默认人格同时接管未指派持仓，避免旧数据 stale 检测漏掉。
     include_unassigned = persona_id == "short_term_hot_rotation_v1"
