@@ -44,21 +44,14 @@
 #### 1-1 收紧策略暂停阈值 + 强制 regime 硬门槛
 - **文件**：`src/experience_layer/strategy_ledger.py`, `src/agents/strategist/signal_generator.py`
 - **改动**：
-  - `_SUSPEND_WIN_RATE: 0.30 → 0.40`（让 `放量突破` 立即被暂停）
-  - `_MIN_SAMPLE: 3 → 5`（防止过拟合）
-  - 在 Strategist 增加硬门槛：`若 strategy × 当前regime 胜率 < 40%，直接 PASS`
+  - [x] `_SUSPEND_WIN_RATE: 0.30 → 0.40`（让 `放量突破` 立即被暂停）
+  - [x] `_MIN_SAMPLE: 3 → 5`（防止过拟合）
+  - [x] 在 Strategist 增加硬门槛：`若 strategy × 当前regime 胜率 < 40%，直接 PASS`
 - **依据**：`放量突破` 33% 胜率仍在跑；`bear + 热点回踩` 60% 应重点押注
 
 #### 1-2 分级 held_too_long 规则（保护赢家）
-- **文件**：`src/agents/reviewer/intraday_loop.py`
-- **改动**：
-  ```python
-  if pnl_pct > 20% and days_held > 5:
-      # 继续持有，趋势未破就不砍
-  elif pnl_pct < 2% and days_held > 5:
-      reduce  # 保留现有逻辑
-  ```
-- **依据**：6+ 天持仓平均 +201%，5 天强制出场正在杀最大赢家
+- **文件**：`src/agents/reviewer/position_reviewer.py`
+- [x] **已实现**：大赢家(>20%)不限时，价值票90/180天阈值，短线3/5/10天分级
 
 #### 1-3 提升入场质量
 - **文件**：`src/agents/explorer/scanner.py` 或 `src/agents/reviewer/intraday_loop.py`
@@ -71,30 +64,30 @@
 **预期效果：50% → 60%**
 
 #### 2-4 龙虎榜数据源
-- **新文件**：`src/stock_analyzer/data_source/dragon_tiger_client.py`
+- [x] **已实现**：`src/stock_analyzer/data_source/dragon_tiger_client.py`
 - **API**：`akshare.stock_lhb_detail_em`（现成）
 - **接入点**：
-  - Explorer 新规则 `institutional_buying`（机构净买入 > 5000 万 → weight +1.5）
-  - StockCandidate.dragon_tiger 字段填充
-  - RiskGovernor 加分项
+  - [x] Explorer 新规则 `institutional_buying`（机构净买入 > 5000 万 → weight +1.5）
+  - [x] StockCandidate.dragon_tiger 字段填充
+  - [x] RiskGovernor 加分项
 - **依据**：机构动向是最直接的"聪明钱"信号
 
 #### 2-5 新闻/公告数据源
-- **新文件**：`src/stock_analyzer/data_source/news_client.py`
+- [x] **已实现**：`src/stock_analyzer/data_source/news_client.py`
 - **API**：`akshare.news_cctv` 或东财新闻 API
 - **接入点**：
-  - LLM 提取 catalyst（业绩预告、政策、重组、订单）
-  - 匹配当日候选股加分
-  - 填充 TradingState.social_sentiment
+  - [x] LLM 提取 catalyst（业绩预告、政策、重组、订单）
+  - [x] 匹配当日候选股加分
+  - [x] 填充 TradingState.social_sentiment
 - **依据**：情绪面/事件驱动是短线核心，纯技术+资金无法预知
 
 #### 2-6 元规则归纳器
-- **新文件**：`src/experience_layer/meta_rule_synthesizer.py`
+- [x] **已实现**：`src/experience_layer/meta_rule_synthesizer.py`
 - **触发**：每 20 笔平仓
 - **机制**：
-  - LLM 读 `lessons` + `trade_attributions` 表
-  - 输出「近期我总在哪种情境下亏」的元规则
-  - 写入 `rules.yaml`（新规则）或 `trading_persona.yaml.avoid_setups`（禁忌）
+  - [x] LLM 读 `lessons` + `trade_attributions` 表
+  - [x] 输出「近期我总在哪种情境下亏」的元规则
+  - [x] 写入 `rules.yaml`（新规则）或 `trading_persona.yaml.avoid_setups`（禁忌）
 - **依据**：目前 10 条教训全单次出现，缺"从模式识别到规则化"这一环
 
 ### 🎯 阶段 3：真正的"自主"（1 个月）
@@ -102,24 +95,22 @@
 **预期效果：稳定 60%+**
 
 #### 3-7 实盘接入（最重要的一步）
-- **候选**：
-  - `easytrader`（同花顺/华泰/银河，个人友好）
-  - QMT/迅投（专业级但需券商 API 权限）
+- [x] **已实现**：miniQMT bridge (`scripts/miniQMT_bridge.py`)
 - **步骤**：
-  1. 先接 paper trading endpoint，稳定 2 周
-  2. 加账户对账、部分成交、订单撤改
-  3. 灰度切实盘（先 10% 资金，再逐步放开）
+  1. [x] 先接 paper trading endpoint，稳定 2 周
+  2. [ ] 加账户对账、部分成交、订单撤改
+  3. [ ] 灰度切实盘（先 10% 资金，再逐步放开）
 - **依据**：当前所有努力都是纸上谈兵，未接实盘 = 未验证
 
 #### 3-8 盘中 regime drift 检测
-- **文件**：`src/agents/cio/market_brain.py`
+- [x] **已实现**：`src/agents/cio/regime_drift.py`
 - **机制**：
-  - 每 5 分钟检查关键指标漂移 > 20%
-  - 立即重算 regime → 触发 posture 调整
+  - [x] 每 5 分钟检查关键指标漂移 > 20%
+  - [x] 立即重算 regime → 触发 posture 调整
 - **依据**：当前 regime 固定在 9:35/11:35/14:00 判定，错过盘中反转
 
 #### 3-9 动态仓位（简化 Kelly）
-- **文件**：`src/agents/strategist/signal_generator.py`
+- [x] **已实现**：`src/agents/strategist/signal_generator.py`
 - **改动**：`position_pct = base × (win_rate / 0.5)`
   - 胜率 70% → 1.4x 仓位
   - 胜率 30% → 0.6x 仓位
