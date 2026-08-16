@@ -465,6 +465,45 @@ class StrategistEngine:
         except Exception:
             return ""
 
+    def _calc_info_confidence(
+        self, candidate: "StockCandidate", kline: dict, fund: dict | None,
+    ) -> float:
+        """计算信息置信度 (0.5~1.0)。
+
+        数据越完整 → 置信度越高 → 仓位不折扣。
+        缺失关键数据时自动降低置信度，避免在信息不充分时重仓。
+
+        评分维度 (各占 0.1 权重, 共 5 项 = 最多扣 0.5):
+        - kline 基本面: current_price + ma20 + trend
+        - 资金流向: fund_flow 非空
+        - 板块/行业数据: sector 非空
+        - 龙虎榜数据: dragon_tiger 非空
+        - K线深度: vol_ratio + atr_pct 存在
+        """
+        confidence = 1.0
+
+        # 1. K线基础数据
+        if not kline.get("current_price") or not kline.get("ma20"):
+            confidence -= 0.15  # 核心数据缺失扣更多
+
+        # 2. 资金流向
+        if not fund:
+            confidence -= 0.10
+
+        # 3. 板块信息
+        if not candidate.get("sector"):
+            confidence -= 0.05
+
+        # 4. 龙虎榜（对短线更重要）
+        if not candidate.get("dragon_tiger") and not self._is_value_persona():
+            confidence -= 0.10
+
+        # 5. K线深度指标 (vol_ratio, atr_pct)
+        if not kline.get("vol_ratio") or not kline.get("atr_pct"):
+            confidence -= 0.10
+
+        return max(confidence, 0.5)  # 最低 50% 置信度
+
     def _regime_kwargs(self) -> dict[str, Any]:
         regime = self.market_regime or {}
         return {
@@ -674,6 +713,19 @@ class StrategistEngine:
                 symbol, name, ", ".join(gate_details), total_score,
             )
 
+        # ── P5: 信息置信度评级 (AI Berkshire #2) ──
+        # 数据越不完整 → 置信度折扣越大 → 自动缩减仓位
+        info_confidence = self._calc_info_confidence(candidate, kline, fund)
+        if info_confidence < 1.0:
+            llm_pct = result.get("position_pct", 0.05)
+            discounted_pct = round(llm_pct * info_confidence, 4)
+            if discounted_pct != llm_pct:
+                self.logger.info(
+                    "[%s] 信息置信度=%.0f%% → 仓位 %.1f%% → %.1f%%",
+                    symbol, info_confidence * 100, llm_pct * 100, discounted_pct * 100,
+                )
+                result["position_pct"] = discounted_pct
+
         # ── P1 硬拦截: 绝对禁用策略（无论 LLM 怎么说都拒绝）──
         strategy_name = result.get("strategy", "")
         if any(kw in strategy_name for kw in _BANNED_STRATEGY_KEYWORDS):
@@ -711,10 +763,29 @@ class StrategistEngine:
         if entry_price <= 0:
             entry_price = current_price
 
-        # 入场价合理性校验 — 防止 LLM 返回偏离当前价过大的值（如复权价/错误价）
+        # ── P3: entry_price 合理性校验（历史范围 + 当前价偏离）──
+        # 防止 LLM 返回复权价、错误价、或严重脱离近期价格区间的值
         if current_price > 0 and entry_price > 0:
             deviation = abs(entry_price - current_price) / current_price
-            if deviation > 0.20:
+
+            # 3σ 等效: 用近 10 日高低点构建合理区间
+            recent_high = kline.get("recent_high_10d")
+            recent_low = kline.get("recent_low_10d")
+            if recent_high and recent_low and recent_high > 0 and recent_low > 0:
+                # 合理入场区间: [近10日最低 × 0.9, 近10日最高 × 1.1]
+                price_floor = recent_low * 0.9
+                price_ceiling = recent_high * 1.1
+                if entry_price > price_ceiling or entry_price < price_floor:
+                    self.logger.warning(
+                        "[%s] PRICE REJECT: entry_price=%.2f 超出近10日区间"
+                        "[%.2f, %.2f] (low=%.2f, high=%.2f)，修正为当前价",
+                        symbol, entry_price, price_floor, price_ceiling,
+                        recent_low, recent_high,
+                    )
+                    entry_price = current_price
+
+            # 简单偏离检查（兜底）
+            if deviation > 0.15:
                 self.logger.warning(
                     "[%s] LLM entry_price=%.2f 偏离 current_price=%.2f 达 %.0f%%，修正为当前价",
                     symbol, entry_price, current_price, deviation * 100,

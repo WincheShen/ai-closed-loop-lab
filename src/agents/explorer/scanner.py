@@ -90,6 +90,13 @@ class ExplorerScanner:
                 len(self._snapshot.stocks), len(self._snapshot.sectors),
             )
 
+        # ── P8: AKShare 健康探针 — mock 数据不产出信号 ──
+        if self._snapshot.is_mock:
+            self.logger.warning(
+                "⚠️ 数据源全部不可用，使用 mock 数据。跳过今日扫描（不基于假数据生成信号）"
+            )
+            return []
+
         # 2. 热点板块 Top 5（优先使用传入的 hot_sectors，否则独立检测）
         if hot_sectors is not None:
             self._hot_names = hot_sectors

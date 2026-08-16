@@ -411,14 +411,21 @@ def job_backfill_attributions() -> None:
 
 @skip_if_weekend
 def job_stale_position_check() -> None:
-    """每日 15:50 长期持仓预警 — 检查超期持仓并触发强制复审。"""
-    logger.info("⏰ 定时任务触发: 长期持仓预警")
+    """每日 14:50 超期持仓强制复审 — 检测超期持仓并触发带卖出倾向的复审。
+
+    与普通 intraday_review 的区别：
+    - 对超期持仓注入 force_review_reason，使 LLM 更积极建议卖出
+    - 在收盘前 10 分钟执行，确保卖出指令还能在当日完成
+    """
+    logger.info("⏰ 定时任务触发: 超期持仓强制复审")
 
     personas = list_personas()
     if not personas:
         stale = check_stale_positions()
         if stale:
-            logger.warning("发现 %d 只超期持仓，建议关注", len(stale))
+            force_map = {p["position_id"]: p["force_review_reason"] for p in stale}
+            logger.warning("发现 %d 只超期持仓，触发强制复审", len(stale))
+            asyncio.run(run_intraday_review(force=True, force_review_map=force_map))
         return
 
     total_stale = 0
@@ -427,16 +434,24 @@ def job_stale_position_check() -> None:
         persona_name = p.get("name", persona_id)
         try:
             stale = check_stale_positions(persona_id=persona_id)
-            if stale:
-                logger.warning(
-                    "人格 %s 有 %d 只超期持仓", persona_name, len(stale),
-                )
-                total_stale += len(stale)
+            if not stale:
+                continue
+            force_map = {s["position_id"]: s["force_review_reason"] for s in stale}
+            logger.warning(
+                "人格 %s 有 %d 只超期持仓，触发强制复审", persona_name, len(stale),
+            )
+            results = asyncio.run(
+                run_intraday_review(force=True, persona_id=persona_id, force_review_map=force_map)
+            )
+            actions = [r for r in results if r.get("action") not in ("HOLD", None)]
+            if actions:
+                logger.info("人格 %s 强制复审执行 %d 个卖出动作", persona_name, len(actions))
+            total_stale += len(stale)
         except Exception as e:
-            logger.error("人格 %s 超期检查失败: %s", persona_name, e)
+            logger.error("人格 %s 超期强制复审失败: %s", persona_name, e)
 
     if total_stale > 0:
-        logger.warning("总计 %d 只超期持仓需要关注", total_stale)
+        logger.warning("总计 %d 只超期持仓已触发强制复审", total_stale)
 
 
 # --- 调度配置 ---
@@ -476,7 +491,7 @@ def setup_schedule() -> None:
     schedule.every().day.at("15:35").do(job_daily_pipeline)
     schedule.every().day.at("15:40").do(job_watchlist_check)
     schedule.every().day.at("15:45").do(job_sync_sma_status)
-    schedule.every().day.at("15:50").do(job_stale_position_check)
+    schedule.every().day.at("14:50").do(job_stale_position_check)
     schedule.every().day.at("16:00").do(job_health_check)
 
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)

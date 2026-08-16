@@ -469,6 +469,46 @@ class PositionReviewAgent:
                 "rule_override": True,
             }
 
+        # 规则 3.5: 论点漂移检测 (AI Berkshire #3)
+        # 如果 LLM 判断 thesis 已失效但仍建议 HOLD，强制 REDUCE/EXIT
+        thesis_status = result.get("thesis_status", "intact")
+        if thesis_status == "invalidated" and result["action"] in ("HOLD", "ADD"):
+            # thesis 失效 + 浮亏 → EXIT; thesis 失效 + 浮盈 → REDUCE(锁利)
+            if pnl_pct <= 0:
+                logger.info(
+                    "[%s] Thesis Drift: 论点失效+浮亏%.1f%% → EXIT", symbol, pnl_pct,
+                )
+                return {
+                    **result,
+                    "action": "EXIT",
+                    "reason": f"买入论点已失效(thesis=invalidated)且浮亏{pnl_pct:.1f}%，清仓止损",
+                    "risk_flag": "thesis_invalidated",
+                    "rule_override": True,
+                }
+            else:
+                logger.info(
+                    "[%s] Thesis Drift: 论点失效+浮盈%.1f%% → REDUCE", symbol, pnl_pct,
+                )
+                return {
+                    **result,
+                    "action": "REDUCE",
+                    "reason": f"买入论点已失效(thesis=invalidated)，浮盈{pnl_pct:.1f}%减仓锁利",
+                    "risk_flag": "thesis_invalidated",
+                    "rule_override": True,
+                }
+        elif thesis_status == "weakened" and result["action"] == "ADD":
+            # thesis 弱化时禁止加仓
+            logger.info(
+                "[%s] Thesis Drift: 论点弱化(weakened)，拒绝加仓 → HOLD", symbol,
+            )
+            return {
+                **result,
+                "action": "HOLD",
+                "reason": f"论点弱化(thesis=weakened)，不宜加仓，维持现有仓位观察",
+                "risk_flag": "thesis_weakened",
+                "rule_override": True,
+            }
+
         # 规则 4: 分级 held_too_long（保护赢家）
         # 依据: 历史数据显示 6+ 天持仓平均 +201%，机械 5 天减仓正在砍最大赢家
         if entry_date and result["action"] == "HOLD":
