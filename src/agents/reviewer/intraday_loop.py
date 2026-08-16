@@ -230,11 +230,30 @@ async def _check_pending_signals(
             continue
 
         # 触发 → 执行买入
+        # 轻量级仓位上限检查 — 弥补条件单路径不经过 RiskGovernor 的缺口
+        if persona_id and sig.get("action", "buy") == "buy":
+            try:
+                from src.agents.risk.risk_governor import RiskGovernor
+                from src.agents.cio.trading_persona import get_persona
+                persona_obj = get_persona(persona_id=persona_id)
+                latest_regime = brain.store.latest_market_regime() or {}
+                gov = RiskGovernor(session_id, persona=persona_obj, market_regime=latest_regime)
+                used_pct = gov._current_used_pct()
+                if used_pct >= gov.max_total_position_pct:
+                    logger.info(
+                        "[CANCEL] %s 条件单触发但人格 %s 仓位已达上限 (%.0f%% >= %.0f%%)，取消执行",
+                        symbol, persona_id, used_pct * 100, gov.max_total_position_pct * 100,
+                    )
+                    brain.store.update_signal_status(sig["signal_id"], "cancelled_position_limit")
+                    continue
+            except Exception as e:
+                logger.debug("仓位检查异常(非致命): %s", e)
+
         # 用实时市场价作为成交价（更真实的模拟）
         sig["entry_condition"] = "immediate"
         sig["current_price"] = current_price  # 传递实时价给 executor 的 price guard
         sig["market_price_at_trigger"] = current_price  # 触发时的真实市场价
-        engine = ExecutionEngine(session_id)
+        engine = ExecutionEngine(session_id, persona_id=persona_id)
         try:
             orders, fills = await engine.monitor_and_execute([sig])
             if fills:
