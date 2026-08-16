@@ -65,6 +65,11 @@ services:
       - DB_PATH=/app/data/central_brain.db
     restart: unless-stopped
     command: ["python", "scripts/run_trading_agent_service.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ═══════════════════════════════════════════
   # 定时调度器 (盘中复审 / 收盘扫描 / 周复盘)
