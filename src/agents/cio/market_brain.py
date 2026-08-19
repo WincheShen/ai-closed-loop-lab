@@ -154,6 +154,31 @@ class MarketBrain:
         self.logger.info("MarketBrain 启动 — 抓取行情并形成 regime")
 
         self._last_snapshot = self.akshare.fetch_snapshot()  # 保存供 Explorer 复用
+
+        # ── P0: mock 数据不参与 regime 判定 ──
+        # 当数据源全部不可用降级到 mock 时，沿用 DB 中最近一次「真实数据」的 regime，
+        # 避免基于 50 只随机模拟股票做出错误的市场判断。
+        if self._last_snapshot.is_mock:
+            prev = self._load_last_real_regime()
+            if prev is not None:
+                self.logger.warning(
+                    "⚠️ 数据源降级为 mock，沿用上次真实 regime: %s (posture=%s, date=%s)",
+                    prev.regime, prev.recommended_posture, prev.trade_date,
+                )
+                # 更新时间戳但保留原始判定
+                prev.snapshot_id = f"REG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+                prev.is_mock_data = True
+                prev.created_at = datetime.now().isoformat()
+                prev.evidence["reused_from_mock_fallback"] = True
+                self.brain.store.save_market_regime(self.session_id, prev.to_dict())
+                self.brain.log_agent_event(
+                    self.session_id, "market_brain", "regime_reused_mock",
+                    {"regime": prev.regime, "posture": prev.recommended_posture, "original_date": prev.trade_date},
+                )
+                return prev
+            else:
+                self.logger.warning("⚠️ 数据源降级为 mock 且无历史真实 regime，将基于 mock 数据生成（不推荐）")
+
         base_regime, evidence = self._compute_base_regime(self._last_snapshot)
 
         # 热点板块检测：优先用传统方式，如果板块数据为空则用 emappdata
@@ -232,6 +257,44 @@ class MarketBrain:
         )
         self.logger.info("Summary: %s", result.summary)
         return result
+
+    # ----------------------------------------------------------------------
+    # mock fallback — 沿用上一次真实 regime
+    # ----------------------------------------------------------------------
+
+    def _load_last_real_regime(self) -> MarketRegimeSnapshot | None:
+        """从 DB 中加载最近一条 is_mock_data=0 的 regime 快照。"""
+        try:
+            conn = self.brain.store._conn()
+            row = conn.execute(
+                "SELECT * FROM market_regime_snapshots "
+                "WHERE is_mock_data = 0 "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            row = dict(row)
+            return MarketRegimeSnapshot(
+                snapshot_id=row["snapshot_id"],
+                trade_date=row["trade_date"],
+                regime=row["regime"],
+                risk_appetite=row.get("risk_appetite", "medium"),
+                recommended_posture=row.get("recommended_posture", "selective_attack"),
+                max_total_position_pct=row.get("max_total_position_pct", 0.4),
+                hot_sectors=json.loads(row.get("hot_sectors_json", "[]")),
+                dominant_styles=json.loads(row.get("dominant_styles_json", "[]")),
+                avoid_styles=json.loads(row.get("avoid_styles_json", "[]")),
+                strategy_bias=json.loads(row.get("strategy_bias_json", "{}")),
+                daily_questions=json.loads(row.get("daily_questions_json", "[]")),
+                summary=row.get("summary", ""),
+                evidence=json.loads(row.get("evidence_json", "{}")),
+                persona_version=row.get("persona_version", ""),
+                is_mock_data=False,
+                created_at=row.get("created_at", ""),
+            )
+        except Exception as e:
+            self.logger.warning("加载历史 regime 失败: %s", e)
+            return None
 
     # ----------------------------------------------------------------------
     # 量化基础 regime

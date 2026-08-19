@@ -208,30 +208,23 @@ class ExecutionEngine:
             condition = sig.get("entry_condition", "immediate")
 
             if condition in ("breakout", "pullback"):
-                # mock 模式下条件单也立即执行（因为没有盘中循环监控）
-                if self.mode == "mock":
-                    self.logger.info(
-                        "[MOCK] %s %s | 条件=%s → mock模式立即执行",
-                        sig["symbol"], sig.get("name", ""), condition
-                    )
-                    # 继续执行，不标记为 pending
-                else:
-                    # real/paper 模式下条件单 → 不立即执行，标记为 pending 等待盘中触发
-                    self.brain.store.update_signal_status(sig["signal_id"], "pending")
-                    # 同步加入自选股池，附带入场条件
-                    self._add_to_watchlist_from_signal(sig, condition)
-                    pending_count += 1
-                    condition_desc = (
-                        f"突破{sig['entry_price']:.2f}" if condition == "breakout"
-                        else f"回调{sig['entry_price']:.2f}"
-                    )
-                    self.logger.info(
-                        "[PENDING] %s %s | 条件=%s | 当前=%.2f → 等待 %s → 已加入自选股",
-                        sig["symbol"], sig.get("name", ""),
-                        condition, sig.get("current_price", 0),
-                        condition_desc,
-                    )
-                    continue
+                # 所有模式下条件单都标记为 pending，由 intraday_loop 盘中检查触发
+                # 此前 mock 模式直接以 current_price 成交，导致 pullback 信号买在高位
+                self.brain.store.update_signal_status(sig["signal_id"], "pending")
+                # 同步加入自选股池，附带入场条件
+                self._add_to_watchlist_from_signal(sig, condition)
+                pending_count += 1
+                condition_desc = (
+                    f"突破{sig['entry_price']:.2f}" if condition == "breakout"
+                    else f"回调{sig['entry_price']:.2f}"
+                )
+                self.logger.info(
+                    "[PENDING] %s %s | 条件=%s | 当前=%.2f → 等待 %s → 已加入自选股",
+                    sig["symbol"], sig.get("name", ""),
+                    condition, sig.get("current_price", 0),
+                    condition_desc,
+                )
+                continue
 
             # 立即执行（包括 mock 模式下的条件单）
             if self.mode == "mock":

@@ -228,6 +228,35 @@ class PositionReviewAgent:
         # 6.5 Rule Override: 止盈/止损硬约束（优先于 LLM 判断）
         result = self._apply_rule_override(result, position, current_price, pnl_pct)
 
+        # 6.6 最低持仓期保护 — 短线持仓入场当天 LLM REDUCE 过早，降级为 HOLD
+        # 仅对 LLM 主动 REDUCE 生效，不影响规则层触发的 EXIT/REDUCE（止损、目标价等）
+        if (
+            result["action"] == "REDUCE"
+            and not result.get("rule_override")
+            and entry_date
+        ):
+            from datetime import date as date_cls
+            days_held = (date_cls.today() - date_cls.fromisoformat(entry_date)).days
+            strategy = position.get("original_strategy", "")
+            persona_id_val = position.get("persona_id", "")
+            is_value = any(
+                k in (persona_id_val or "") for k in ("duan", "buffett", "value")
+            ) or any(
+                k in (strategy or "") for k in ("价值投资", "护城河", "ROE", "分红")
+            )
+            min_hold = 2 if not is_value else 5
+            if days_held < min_hold:
+                logger.info(
+                    "[%s] Min-hold gate: LLM REDUCE 被拦截 (持仓%d天 < %d天最低期)，降级为 HOLD",
+                    symbol, days_held, min_hold,
+                )
+                result = {
+                    **result,
+                    "action": "HOLD",
+                    "reason": f"持仓{days_held}天未达最低持仓期{min_hold}天，LLM减仓建议暂缓 (原因: {result.get('reason', '')})",
+                    "risk_flag": "min_hold_gate",
+                }
+
         # 7. Persist review
         review_id = f"REV-{uuid.uuid4().hex[:8].upper()}"
         tokens = getattr(response, "usage_metadata", {}).get("total_tokens", 0) if "response" in dir() else 0

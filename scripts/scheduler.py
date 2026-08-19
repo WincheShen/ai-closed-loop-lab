@@ -321,7 +321,7 @@ def job_sync_sma_status() -> None:
 
         # 查找所有未完成的 social_posts
         pending_posts = conn.execute(
-            "SELECT * FROM social_posts WHERE status NOT IN ('published', 'failed', 'error') "
+            "SELECT * FROM social_posts WHERE sma_status NOT IN ('published', 'failed', 'error') "
             "AND dispatched_at > datetime('now', '-3 days')"
         ).fetchall()
 
@@ -350,9 +350,9 @@ def job_sync_sma_status() -> None:
                     data = resp.json()
                     new_status = data.get("status", "")
                     post_url = data.get("post_url", "")
-                    if new_status and new_status != post.get("status"):
+                    if new_status and new_status != post.get("sma_status"):
                         conn.execute(
-                            "UPDATE social_posts SET status = ?, post_url = ?, updated_at = datetime('now') "
+                            "UPDATE social_posts SET sma_status = ?, post_url = ?, updated_at = datetime('now') "
                             "WHERE sma_task_id = ?",
                             (new_status, post_url or "", task_id),
                         )
@@ -360,7 +360,7 @@ def job_sync_sma_status() -> None:
                         updated += 1
                         logger.info(
                             "SMA 状态更新: task=%s, %s → %s",
-                            task_id, post.get("status"), new_status,
+                            task_id, post.get("sma_status"), new_status,
                         )
             except Exception as e:
                 logger.debug("SMA 状态查询失败 task=%s: %s", task_id, e)
