@@ -219,8 +219,12 @@
 
 ## 7. 已知技术债
 
-1. **两套管线并存** — `DailyScanPipeline` (老) 与 LangGraph pipeline (新) 共存
-2. **数据库分散** — cache.sqlite / events.sqlite / trade_records.sqlite / central_brain.db 未完全统一
-3. **热点板块瘸腿** — NAS 上 eastmoney 被封，需走 Sina + Emappdata fallback
-4. **Influencer 模板化** — 内容创作深度不够，需 SMA 项目配合
+> 处理顺序与分期见 [architecture_refactor_and_winrate_plan.md](architecture_refactor_and_winrate_plan.md)（2026-08-22）。不要在还债之前继续往 `src/ai_platform/` 加功能。
+
+1. **两套管线并存** — 生产入口已切 LangGraph；`DailyScanPipeline` 仅 `--legacy`（Phase 3 部分拆除）
+2. **数据库分散** — `ai_platform` EventBus / strategy_metrics **已停写**；cache / webhook 库仍在（只读或旁路）
+3. **热点板块瘸腿** — NAS 上 eastmoney 被封，需走 Sina + Emappdata fallback（Phase 1 做成可观测开仓闸）
+4. **Influencer 模板化** — 内容创作深度不够，需 SMA 项目配合（本轮不做）
 5. **测试覆盖** — 端到端测试覆盖不完整
+6. **决策权在 LLM** — Strategist 自由生成策略/价格，代码事后拦截（Phase 2 SignalFactory）
+7. **无同源历史回测** — `backtest_engine.py` 是周复盘器（Phase 2 strategy_lab）

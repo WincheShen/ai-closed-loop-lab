@@ -7,46 +7,28 @@ from pathlib import Path
 from typing import Dict, Any
 
 
+# 兼容测试 monkeypatch。生产不再创建/增长 strategy_metrics.sqlite。
 DB_DIR = Path("data/strategy_feedback")
-DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / "strategy_metrics.sqlite"
 
 
 class StrategyFeedbackAgent:
-    """
-    Agent responsible for collecting simple strategy performance signals
-    from system events.
-
-    This is the first step toward a full feedback loop.
-    """
+    """收集策略事件。默认只转发到 central_brain，不写独立库。"""
 
     def __init__(self):
-        self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategy_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT,
-                payload_json TEXT,
-                created_at TEXT
-            )
-            """
-        )
-
-        self.conn.commit()
+        self.conn = None
 
     def _record_event(self, event_type: str, payload: Dict[str, Any]):
-        self.conn.execute(
-            "INSERT INTO strategy_events (event_type, payload_json, created_at) VALUES (?, ?, ?)",
-            (
+        try:
+            from src.central_brain import get_central_brain
+            get_central_brain().log_agent_event(
+                payload.get("session_id", ""),
+                "strategy_feedback",
                 event_type,
-                json.dumps(payload, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
-            ),
-        )
-
-        self.conn.commit()
+                payload,
+            )
+        except Exception:
+            pass
 
     def handle_daily_picks(self, event: Dict[str, Any]):
         """

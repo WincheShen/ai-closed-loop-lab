@@ -64,8 +64,9 @@ async def run_intraday_review(
     # 1. Review all open positions (按persona过滤)
     reviews = reviewer.review_all_positions(force_review_map=force_review_map)
     if not reviews:
-        logger.info("无持仓或无复审结果")
-        return reviews
+        logger.info("无持仓或无复审结果 — 仍检查 pending 条件单")
+        triggered = await _check_pending_signals(brain, session_id, force=force)
+        return triggered
 
     # 2. Execute actions for non-HOLD results
     action_results = []
@@ -156,6 +157,10 @@ async def _check_pending_signals(
             current_price = snapshot.current_price or 0
         except Exception as e:
             logger.warning("获取 %s 实时价格失败（数据源不可用）: %s", symbol, e)
+            continue
+
+        if getattr(snapshot, "is_mock", False):
+            logger.warning("[SKIP] %s 行情为 mock，禁止触发条件单", symbol)
             continue
 
         if current_price <= 0:
@@ -271,24 +276,16 @@ async def _check_pending_signals(
         except Exception as e:
             logger.error("条件单执行异常 %s: %s", symbol, e)
 
-    # 清理过期的 pending signals
-    _expire_stale_pending_signals(brain)
+    from src.agents.reviewer.hard_scan import expire_stale_signals
+    expire_stale_signals(brain)
 
     return triggered_results
 
 
 def _expire_stale_pending_signals(brain) -> None:
-    """将超过有效期的 pending signal 标记为 expired。"""
-    conn = brain.store._conn()
-    expired = conn.execute(
-        """SELECT signal_id, symbol FROM trade_signals
-        WHERE status = 'pending'
-          AND timestamp IS NOT NULL
-          AND datetime(timestamp, '+5 days') < datetime('now')""",
-    ).fetchall()
-    for row in expired:
-        brain.store.update_signal_status(row["signal_id"], "expired")
-        logger.info("[EXPIRED] %s 条件单超过5天有效期，已过期", row["symbol"])
+    """兼容旧调用：转交给 hard_scan.expire_stale_signals。"""
+    from src.agents.reviewer.hard_scan import expire_stale_signals
+    expire_stale_signals(brain)
 
 
 async def _execute_review_action(

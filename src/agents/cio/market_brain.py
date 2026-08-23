@@ -64,6 +64,8 @@ class MarketRegimeSnapshot:
     evidence: dict[str, Any] = field(default_factory=dict)
     persona_version: str = ""
     is_mock_data: bool = False
+    data_quality: str = "full"
+    hot_sectors_source: str = "eastmoney"
     created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -168,8 +170,11 @@ class MarketBrain:
                 # 更新时间戳但保留原始判定
                 prev.snapshot_id = f"REG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
                 prev.is_mock_data = True
+                prev.data_quality = "mock"
+                prev.hot_sectors_source = "none"
                 prev.created_at = datetime.now().isoformat()
                 prev.evidence["reused_from_mock_fallback"] = True
+                prev.evidence["data_quality"] = "mock"
                 self.brain.store.save_market_regime(self.session_id, prev.to_dict())
                 self.brain.log_agent_event(
                     self.session_id, "market_brain", "regime_reused_mock",
@@ -204,6 +209,19 @@ class MarketBrain:
                 self.logger.warning("emappdata 推断也失败，热点板块为空")
 
         hot_sectors = [h.sector.name for h in hot_results]
+        from src.infra.data_quality import classify_market_quality
+        from src.stock_analyzer.data_source.akshare_client import get_akshare_health
+        ak = get_akshare_health()
+        quality = classify_market_quality(
+            is_mock=self._last_snapshot.is_mock,
+            has_sectors=bool(self._last_snapshot.sectors),
+            hot_sectors=hot_sectors,
+            ak_degraded=bool(ak.get("is_degraded")),
+            hot_source=(
+                "none" if not hot_sectors
+                else ("emappdata" if not self._last_snapshot.sectors else "eastmoney")
+            ),
+        )
 
         # LLM 综合判断
         llm_result = self._llm_judge(self._last_snapshot, base_regime, hot_results, evidence)
@@ -231,9 +249,11 @@ class MarketBrain:
             strategy_bias=dict(llm_result.get("strategy_bias", {})),
             daily_questions=list(llm_result.get("daily_questions", [])),
             summary=llm_result.get("summary", ""),
-            evidence=evidence,
+            evidence={**evidence, **quality},
             persona_version=self.persona.persona_version,
             is_mock_data=self._last_snapshot.is_mock,
+            data_quality=quality["data_quality"],
+            hot_sectors_source=quality["hot_sectors_source"],
             created_at=datetime.now().isoformat(),
         )
 
@@ -246,6 +266,8 @@ class MarketBrain:
                 "max_position_pct": result.max_total_position_pct,
                 "hot_sectors": result.hot_sectors,
                 "is_mock": result.is_mock_data,
+                "data_quality": result.data_quality,
+                "hot_sectors_source": result.hot_sectors_source,
             },
         )
 

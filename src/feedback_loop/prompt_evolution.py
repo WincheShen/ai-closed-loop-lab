@@ -63,7 +63,11 @@ class PromptEvolution:
         ]
 
     def save_weights(self, weights: list[PromptWeight]) -> None:
-        """保存策略权重。"""
+        """保存策略权重。默认不落盘（PROMPT_WEIGHTS_AUTO_SAVE=1 才写）。"""
+        import os
+        if os.getenv("PROMPT_WEIGHTS_AUTO_SAVE", "0") not in {"1", "true", "TRUE"}:
+            self.logger.info("PROMPT_WEIGHTS_AUTO_SAVE 未开启，权重只返回不落盘")
+            return
         self.weights_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.weights_path, "w", encoding="utf-8") as f:
             json.dump(weights, f, ensure_ascii=False, indent=2)

@@ -897,23 +897,19 @@ async def attribution_stats(days: int = 30):
 
 @app.get("/api/events/recent")
 async def recent_events(limit: int = 20):
-    """返回最近的事件记录（用于工作流监控）。"""
+    """返回最近的事件记录（central_brain.db.events）。"""
     try:
-        event_db_path = Path("data/event_bus/events.sqlite")
-        if not event_db_path.exists():
-            return []
-
-        conn = sqlite3.connect(str(event_db_path))
+        brain = _get_central_brain()
+        conn = brain.store._conn()
         rows = conn.execute(
             """
-            SELECT id, event_type, payload_json, created_at
+            SELECT event_id, event_type, payload, created_at
             FROM events
-            ORDER BY id DESC
+            ORDER BY created_at DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
-        conn.close()
 
         events = []
         for r in rows:

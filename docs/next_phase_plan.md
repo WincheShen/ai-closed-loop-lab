@@ -2,7 +2,7 @@
 
 > 作者：总架构师  
 > 日期：2026-05-01  
-> 状态：待审阅  
+> 状态：⚠️ **2026-08-22 起过期，不再按本文 Sprint 开工。** 现行计划见 [architecture_refactor_and_winrate_plan.md](architecture_refactor_and_winrate_plan.md)  
 > 前置文档：`cognitive_agent_design.md`, `phase1_assessment.md`
 
 ---

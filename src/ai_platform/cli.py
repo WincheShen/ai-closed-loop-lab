@@ -20,14 +20,17 @@ def main():
         _run(["uvicorn", "webhook_listener.server:app", "--host", "0.0.0.0", "--port", "8002"])
 
     elif cmd == "workflow":
+        print("deprecated: use python -m src.graph.workflow --mode mock", file=sys.stderr)
         from scripts.run_daily_workflow import main as workflow_main
 
         workflow_main()
 
     elif cmd == "monitor":
+        print("deprecated: events live in central_brain.db", file=sys.stderr)
         _run(["uvicorn", "ai_platform.central_brain.event_bus.event_monitor_api:app", "--host", "0.0.0.0", "--port", "8010"])
 
     elif cmd == "metrics":
+        print("deprecated: strategy metrics should read central_brain.db", file=sys.stderr)
         _run(["uvicorn", "ai_platform.feedback_system.strategy_optimizer.strategy_metrics_api:app", "--host", "0.0.0.0", "--port", "8011"])
 
     elif cmd == "dev":

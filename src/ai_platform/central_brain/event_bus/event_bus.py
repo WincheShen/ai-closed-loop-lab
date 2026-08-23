@@ -1,20 +1,18 @@
+"""兼容层：旧 ai_platform.EventBus 不再写 events.sqlite。
+
+生产事件只进 central_brain.db。本类只做进程内 pub/sub，供尚未迁移的测试使用。
+新代码请用 ``src.central_brain.EventBus`` / ``get_central_brain().bus``。
+"""
 from __future__ import annotations
 
-import json
+import logging
 import threading
-import sqlite3
-from datetime import datetime
-from pathlib import Path
-from typing import Callable, Dict, List, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryEventBus:
-    """
-    Simple in-memory pub/sub bus.
-
-    Used as a fallback when Redis is not available.
-    """
-
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
         self._lock = threading.Lock()
@@ -29,100 +27,33 @@ class InMemoryEventBus:
             handler(payload)
 
 
-class RedisStreamEventBus:
-    """
-    Redis Streams based event bus.
-
-    NOTE: Minimal prototype. Consumer groups and persistence
-    management will be added later.
-    """
-
-    def __init__(self, redis_client, stream_prefix: str = "acl:"):
-        self.redis = redis_client
-        self.stream_prefix = stream_prefix
-
-    def _stream(self, event_type: str) -> str:
-        return f"{self.stream_prefix}{event_type}"
-
-    def publish(self, event_type: str, payload: Dict[str, Any]):
-        stream = self._stream(event_type)
-        self.redis.xadd(stream, {"data": json.dumps(payload)})
-
-    def subscribe(self, event_type: str, handler: Callable[[Dict[str, Any]], None]):
-        raise NotImplementedError(
-            "Redis stream consumer not implemented yet."
-        )
-
-
 class EventBus:
-    """
-    Unified EventBus abstraction with SQLite event log.
-
-    Events are persisted before dispatching to subscribers.
-    """
+    """进程内转发。不再创建 data/event_bus/events.sqlite。"""
 
     def __init__(self, redis_client: Optional[Any] = None):
         if redis_client:
-            self.impl = RedisStreamEventBus(redis_client)
-        else:
-            self.impl = InMemoryEventBus()
-
-        db_dir = Path("data/event_bus")
-        db_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path = db_dir / "events.sqlite"
-
-        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        self._conn.commit()
-
-    def _log_event(self, event_type: str, payload: Dict[str, Any]):
-        self._conn.execute(
-            "INSERT INTO events (event_type, payload_json, created_at) VALUES (?, ?, ?)",
-            (
-                event_type,
-                json.dumps(payload, ensure_ascii=False),
-                datetime.utcnow().isoformat(),
-            ),
-        )
-        self._conn.commit()
+            logger.warning("ai_platform EventBus Redis 路径已废弃，回退进程内总线")
+        self.impl = InMemoryEventBus()
+        self._db_path = None
 
     def publish(self, event_type: str, payload: Dict[str, Any]):
-        self._log_event(event_type, payload)
+        # 顺带写入 central_brain（失败不挡内存分发）
+        try:
+            from src.central_brain import get_central_brain
+            get_central_brain().bus.publish(event_type, payload)
+        except Exception:
+            logger.debug("central_brain publish skipped", exc_info=True)
         self.impl.publish(event_type, payload)
 
     def subscribe(self, event_type: str, handler: Callable[[Dict[str, Any]], None]):
-        if hasattr(self.impl, "subscribe"):
-            self.impl.subscribe(event_type, handler)
+        self.impl.subscribe(event_type, handler)
 
 
-# ---------------------------------------------------------------------------
-# Singleton accessor
-# ---------------------------------------------------------------------------
-
-_instance: Optional["EventBus"] = None
+_instance: Optional[EventBus] = None
 _instance_lock = threading.Lock()
 
 
-def get_event_bus(redis_client: Optional[Any] = None) -> "EventBus":
-    """Return the process-wide EventBus singleton.
-
-    All producers (webhook_listener, daily_workflow, ...) and consumers
-    (TopicGeneratorAgent, StrategyFeedbackAgent, ...) must share one bus
-    instance, otherwise subscribe/publish happen on different objects and
-    no handler ever fires.
-
-    The ``redis_client`` argument is only honoured on the first call; later
-    calls return the existing singleton regardless of arguments.
-    """
+def get_event_bus(redis_client: Optional[Any] = None) -> EventBus:
     global _instance
     if _instance is None:
         with _instance_lock:
@@ -132,7 +63,6 @@ def get_event_bus(redis_client: Optional[Any] = None) -> "EventBus":
 
 
 def reset_event_bus() -> None:
-    """Drop the singleton. Intended for tests only."""
     global _instance
     with _instance_lock:
         _instance = None

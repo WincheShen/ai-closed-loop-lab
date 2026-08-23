@@ -56,6 +56,11 @@ class PersonaUpdater:
         if not avoid_patterns and not prefer_patterns:
             return result
 
+        import os
+        if os.getenv("PERSONA_AUTO_UPDATE", "0") not in {"1", "true", "TRUE"}:
+            logger.info("PERSONA_AUTO_UPDATE 未开启，跳过回写 persona.yaml")
+            return result
+
         # 1. 备份
         self._backup()
 

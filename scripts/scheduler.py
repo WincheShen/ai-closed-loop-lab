@@ -36,10 +36,12 @@ import schedule
 
 from src.agents.cio.market_brain import MarketBrain
 from src.agents.cio.trading_persona import get_persona, list_personas
+from src.agents.reviewer.hard_scan import run_hard_scan
 from src.agents.reviewer.intraday_loop import run_intraday_review
 from src.agents.reviewer.stale_position_check import check_stale_positions
 from src.graph.workflow import run_daily_pipeline, run_weekly_feedback
 from src.infra.logger import setup_logging
+from src.infra.notify import notify_ops
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,24 @@ def skip_if_weekend(func):
 
 
 # --- 定时任务 ---
+
+@skip_if_weekend
+def job_hard_scan() -> None:
+    """盘中每 5 分钟：硬止损 + pending 触发。零 LLM。"""
+    logger.info("⏰ 定时任务触发: hard_scan")
+    personas = list_personas()
+    targets = personas or [{"id": None, "name": "default"}]
+    for p in targets:
+        persona_id = p.get("id") if isinstance(p, dict) else None
+        try:
+            results = asyncio.run(run_hard_scan(persona_id=persona_id))
+            actions = [r for r in results if r.get("action") in ("EXIT", "REDUCE", "BUY")]
+            if actions:
+                logger.info("hard_scan %s 产生 %d 个动作", persona_id or "default", len(actions))
+        except Exception as e:
+            logger.error("hard_scan 人格 %s 失败: %s", persona_id, e)
+            notify_ops("hard_scan 失败", f"persona={persona_id} err={e}")
+
 
 @skip_if_weekend
 def job_intraday_review() -> None:
@@ -227,6 +247,28 @@ def job_health_check() -> None:
 
     if not all_ok:
         logger.warning("[HealthCheck] ⚠️ 今日有节点未产出数据！检查 scheduler 日志")
+        notify_ops(
+            "日管线健康检查失败",
+            f"date={today} market_regime={checks['market_regime']} pipeline_ran={checks['pipeline_ran']}",
+        )
+
+    # hard_scan 是否覆盖今日持仓
+    try:
+        open_n = conn.execute(
+            "SELECT COUNT(*) as cnt FROM positions WHERE status='open'"
+        ).fetchone()["cnt"]
+        hard_n = conn.execute(
+            """SELECT COUNT(*) as cnt FROM events
+            WHERE agent='hard_scan' AND created_at LIKE ?""",
+            (f"{today}%",),
+        ).fetchone()["cnt"]
+        checks["hard_scan_count"] = hard_n
+        checks["open_positions"] = open_n
+        logger.info("[HealthCheck] hard_scan_count: %s open_positions: %s", hard_n, open_n)
+        if open_n > 0 and hard_n == 0:
+            notify_ops("持仓当日零硬扫描", f"date={today} open={open_n}")
+    except Exception as e:
+        logger.warning("[HealthCheck] hard_scan 检查异常: %s", e)
 
     # AKShare 数据源健康
     try:
@@ -241,6 +283,10 @@ def job_health_check() -> None:
         )
         if ak_health["is_degraded"]:
             logger.warning("[HealthCheck] ⚠️ AKShare 数据源降级中！最近错误: %s", ak_health.get("last_error"))
+            notify_ops(
+                "AKShare 数据源降级",
+                f"success_rate={ak_health['snapshot_success_rate']:.0%} last_error={ak_health.get('last_error')}",
+            )
     except Exception as e:
         logger.warning("[HealthCheck] AKShare 健康检查异常: %s", e)
 
@@ -481,6 +527,7 @@ def setup_schedule() -> None:
                 continue
             t = f"{hour:02d}:{minute:02d}"
             schedule.every().day.at(t).do(job_regime_drift_check)
+            schedule.every().day.at(t).do(job_hard_scan)
 
     schedule.every().day.at("09:35").do(job_market_brain_only)
     schedule.every().day.at("11:35").do(job_market_brain_only)
@@ -528,7 +575,7 @@ def run_scheduler() -> None:
             last_heartbeat = now
             try:
                 heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-                heartbeat_path.touch()
+                heartbeat_path.write_text(datetime.now().isoformat(), encoding="utf-8")
             except OSError:
                 pass
 

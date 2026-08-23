@@ -2,6 +2,8 @@
 
 > 起点：2026-06-28 实盘数据 17 笔已完成交易，41.2% 胜率
 > 目标：稳定 60%+ 胜率的自主 AI 投资平台
+>
+> ⚠️ **2026-08-22 起路径改版。** 阶段 1/2 代码项多已勾选但胜率未达；现行执行计划见 [architecture_refactor_and_winrate_plan.md](architecture_refactor_and_winrate_plan.md)。60% / 100 笔总目标仍有效，不再按本文周历推进。
 
 ## 目标定义
 

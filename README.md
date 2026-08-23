@@ -129,11 +129,13 @@ ai-closed-loop-lab/
 
 ## 📚 文档
 
-> ⚠️ **当前代码实现仍是 v0.1 架构**（四 Agent 簇：Explorer/Strategist/Executioner/Influencer）。
-> **v0.2 文档**基于 2026-04-26 需求澄清，重构为三模块架构（股票分析平台 / TradingAgent 服务 / Social Media），代码重构尚未开始。
+> **运行时入口只有一条：** `scripts/scheduler.py` → `src.graph.workflow.run_daily_pipeline` → `data/central_brain.db`。
+> 现行计划：[docs/architecture_refactor_and_winrate_plan.md](docs/architecture_refactor_and_winrate_plan.md) · 审计：[docs/phase0_audit.md](docs/phase0_audit.md)
 
 - [📋 需求文档 v0.2](docs/requirements.md) — 三大模块完整功能需求 + 优先级 + 风险边界
 - [🏗 架构设计 v0.2](docs/architecture.md) — 新架构：模块化、服务化、Cache、知识星球同步
+- [🧭 架构重整与胜率计划](docs/architecture_refactor_and_winrate_plan.md) — 现行分期：止血 → 决策反转 → 还债
+- [🔎 Phase 0 审计](docs/phase0_audit.md) — 2026-08-22 生产库/调度对照（NAS 为准）
 
 ## 避坑指南
 

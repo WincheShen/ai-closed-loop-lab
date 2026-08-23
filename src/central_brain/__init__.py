@@ -8,5 +8,12 @@ from .metadata_store import (
     MemoryStore,
     get_central_brain,
 )
+from .signal_repo import SignalRepoMixin
 
-__all__ = ["CentralBrain", "EventBus", "MemoryStore", "get_central_brain"]
+__all__ = [
+    "CentralBrain",
+    "EventBus",
+    "MemoryStore",
+    "SignalRepoMixin",
+    "get_central_brain",
+]

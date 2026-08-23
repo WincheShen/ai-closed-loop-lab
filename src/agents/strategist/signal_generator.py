@@ -49,13 +49,17 @@ _STRATEGY_NAME_TO_ID = {
 }
 
 # 绝对禁用策略黑名单 — 无论 LLM 输出什么，含有这些关键词的信号一律拦截
-_BANNED_STRATEGY_KEYWORDS = {"放量突破", "volume_breakout"}
+_BANNED_STRATEGY_KEYWORDS = {"放量突破", "volume_breakout", "突破前高", "追涨"}
+_BANNED_STRATEGY_IDS = {"volume_breakout"}
 
 
 def _infer_strategy_id(strategy_name: str) -> str:
     if not strategy_name:
         return "unknown"
     name = strategy_name.strip()
+    # 禁用策略优先：避免「放量突破后回踩」被归到 hot_sector_pullback
+    if any(kw in name for kw in _BANNED_STRATEGY_KEYWORDS):
+        return "volume_breakout"
     if name in _STRATEGY_NAME_TO_ID:
         return _STRATEGY_NAME_TO_ID[name]
     for key, sid in _STRATEGY_NAME_TO_ID.items():
@@ -726,18 +730,36 @@ class StrategistEngine:
                 )
                 result["position_pct"] = discounted_pct
 
-        # ── P1 硬拦截: 绝对禁用策略（无论 LLM 怎么说都拒绝）──
-        strategy_name = result.get("strategy", "")
-        if any(kw in strategy_name for kw in _BANNED_STRATEGY_KEYWORDS):
+        # ── P1 硬拦截: 先 normalize 再按 strategy_id 拒绝（防变体绕过）──
+        strategy_name = _normalize_strategy_name(result.get("strategy", "") or "")
+        result["strategy"] = strategy_name
+        strategy_id_check = _infer_strategy_id(strategy_name)
+        if (
+            strategy_id_check in _BANNED_STRATEGY_IDS
+            or any(kw in (result.get("strategy") or "") for kw in _BANNED_STRATEGY_KEYWORDS)
+        ):
             self.logger.warning(
-                "[%s %s] BLOCKED — LLM 输出被禁策略「%s」，强制 PASS",
-                symbol, name, strategy_name,
+                "[%s %s] BLOCKED — 被禁策略「%s」id=%s，强制 PASS",
+                symbol, name, strategy_name, strategy_id_check,
+            )
+            return None
+
+        from src.infra.data_quality import strategy_blocked_by_quality, blocks_new_entries
+        if blocks_new_entries(self.market_regime):
+            self.logger.warning(
+                "[%s %s] PASS — 数据质量=%s，禁止新开仓",
+                symbol, name, (self.market_regime or {}).get("data_quality"),
+            )
+            return None
+        if strategy_blocked_by_quality(strategy_id_check, self.market_regime):
+            self.logger.warning(
+                "[%s %s] PASS — 策略 %s 被数据质量闸拦截",
+                symbol, name, strategy_id_check,
             )
             return None
 
         # 硬门槛：若 LLM 选择的策略在当前 regime 下被 ExperienceLayer 标记为 SUSPEND
         # 直接拒绝，不由 LLM 判断（数据说话）
-        strategy_id_check = _infer_strategy_id(strategy_name)
         current_regime = self.market_regime.get("regime", "")
         if strategy_id_check and strategy_id_check != "unknown" and current_regime:
             try:
@@ -957,10 +979,26 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
         market_regime=market_regime,
     )
 
-    # ── P4: 短线人格在 bear/panic 下跳过信号生成（节省 LLM 调用）──
+    from src.infra.data_quality import blocks_new_entries
+    if blocks_new_entries(market_regime):
+        logger.warning(
+            "[Strategist] 数据质量=%s，跳过全部信号生成",
+            market_regime.get("data_quality"),
+        )
+        return {
+            "trade_signals": [],
+            "risk_assessment": {"skipped": "data_quality_block"},
+            "logs": state.get("logs", []) + [
+                f"[Strategist] data_quality={market_regime.get('data_quality')} 禁止开仓"
+            ],
+        }
+
+    # ── P4: 短线人格在 bear/panic / defend/exit 下跳过信号生成──
     regime_label = market_regime.get("regime", "")
     posture = market_regime.get("recommended_posture", "")
-    if not engine._is_value_persona() and regime_label in ("bear", "panic"):
+    if not engine._is_value_persona() and (
+        regime_label in ("bear", "panic") or posture in ("defend", "exit")
+    ):
         logger.info(
             "[Strategist] 短线人格在 %s/%s 市场下跳过信号生成 (节省 LLM 调用)",
             regime_label, posture,
@@ -984,6 +1022,28 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
             "trade_signals": [],
             "risk_assessment": {"error": "无候选票输入"},
             "logs": state.get("logs", []) + ["[Strategist] 无候选票，跳过"],
+        }
+
+    from src.agents.strategist.signal_factory import (
+        detect_hits,
+        hits_to_signals,
+        signal_factory_enabled,
+    )
+    if signal_factory_enabled():
+        hits = detect_hits(
+            candidates,
+            persona=persona,
+            market_regime=market_regime,
+            hot_sectors=hot_sectors,
+        )
+        signals = hits_to_signals(hits[:MAX_LLM_ANALYSIS])
+        risk = engine.risk_assessment(signals)
+        return {
+            "trade_signals": signals,
+            "risk_assessment": risk,
+            "logs": state.get("logs", []) + [
+                f"[SignalFactory] hits={len(hits)} signals={len(signals)}"
+            ],
         }
 
     signals = engine.generate_signals(candidates)

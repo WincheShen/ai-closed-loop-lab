@@ -1,34 +1,23 @@
+"""旧 ai_platform WorkflowEngine 入口已废弃，转发到 LangGraph 日管线。"""
 from __future__ import annotations
 
+import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from ai_platform.central_brain.event_bus.event_bus import get_event_bus
-from ai_platform.central_brain.workflow_engine.workflow_engine import WorkflowEngine
-from ai_platform.central_brain.workflow_engine.daily_market_workflow import workflow
+from src.graph.workflow import run_daily_pipeline
 
 logging.basicConfig(level=logging.INFO)
 
 
 def main():
-    event_bus = get_event_bus()
-
-    engine = WorkflowEngine()
-
-    engine.register(workflow)
-
-    engine.run(
-        "daily_market_workflow",
-        {
-            "event_bus": event_bus,
-            "trading_agent_url": os.getenv("TRADING_AGENT_URL", "http://localhost:8001"),
-        },
+    logging.getLogger(__name__).warning(
+        "run_daily_workflow 已废弃，转发 run_daily_pipeline(mock)"
     )
+    asyncio.run(run_daily_pipeline("mock"))
 
 
 if __name__ == "__main__":

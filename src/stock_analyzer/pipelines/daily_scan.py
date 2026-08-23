@@ -62,10 +62,12 @@ class DailyPicks:
 
 
 class DailyScanPipeline:
+    """已废弃：生产请用 ``src.graph.workflow.run_daily_pipeline``。"""
+
     def __init__(
         self,
         rules_yaml: Path | str = "config/rules.yaml",
-        trading_agent_url: Optional[str] = "http://localhost:8001",
+        trading_agent_url: Optional[str] = None,
         output_dir: Path | str = "data/daily_picks",
         candidate_top_k: int = 30,
         max_agent_calls: int = 8,

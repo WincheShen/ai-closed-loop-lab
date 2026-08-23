@@ -1,26 +1,11 @@
-import sqlite3
-from pathlib import Path
-
 from ai_platform.central_brain.event_bus.event_bus import EventBus
 
 
-def test_event_log_written(tmp_path, monkeypatch):
-    db_dir = tmp_path / "event_bus"
-    db_dir.mkdir()
-
-    monkeypatch.setattr(
-        "ai_platform.central_brain.event_bus.event_bus.Path",
-        lambda p="": db_dir if p == "data/event_bus" else Path(p),
-    )
-
+def test_legacy_event_bus_does_not_create_sidecar_db(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     bus = EventBus()
-
+    received = {}
+    bus.subscribe("test.integration", lambda p: received.update(p))
     bus.publish("test.integration", {"value": 1})
-
-    db = db_dir / "events.sqlite"
-
-    conn = sqlite3.connect(db)
-
-    rows = conn.execute("SELECT event_type FROM events").fetchall()
-
-    assert rows[0][0] == "test.integration"
+    assert received["value"] == 1
+    assert not (tmp_path / "data" / "event_bus" / "events.sqlite").exists()

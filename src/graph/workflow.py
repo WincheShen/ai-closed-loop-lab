@@ -20,6 +20,8 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
+from src.graph.enums import POSTURE_EXIT
+
 from src.agents.cio.market_brain import run_market_brain_node
 from src.agents.explorer.scanner import run_discovery_node
 from src.agents.executioner.executor import run_execution_node
@@ -28,8 +30,8 @@ from src.agents.risk.risk_governor import run_risk_governor_node
 from src.agents.strategist.signal_generator import run_strategy_node
 from src.central_brain import get_central_brain
 from src.feedback_loop.backtest_engine import run_weekly_feedback_node
+from src.graph.guards import node_guard
 from src.graph.state import TradingState, create_empty_state
-from src.infra.config import cfg
 from src.infra.logger import get_agent_logger, setup_logging
 
 logger = get_agent_logger("workflow", "init")
@@ -40,13 +42,18 @@ logger = get_agent_logger("workflow", "init")
 # =============================================================================
 
 def _route_after_market_brain(state: TradingState) -> str:
-    """MarketBrain 后路由：posture=exit 时不开新仓，直接结束。"""
+    """MarketBrain 后路由：posture=exit / 数据不可用时不开新仓。"""
+    if state.get("errors") and any(
+        e.get("node") == "market_brain" for e in (state.get("errors") or [])
+    ):
+        logger.warning("MarketBrain 节点失败，禁止开新仓")
+        return END
     regime = state.get("market_regime") or {}
     posture = regime.get("recommended_posture", "")
-    if posture == "exit":
+    if posture == POSTURE_EXIT or regime.get("data_quality") == "unavailable":
         logger.warning(
-            "MarketBrain posture=exit (regime=%s)，禁止开新仓，流程提前结束",
-            regime.get("regime"),
+            "MarketBrain posture=%s (regime=%s quality=%s)，禁止开新仓，流程提前结束",
+            posture, regime.get("regime"), regime.get("data_quality"),
         )
         return END
     return "explorer"
@@ -101,12 +108,12 @@ def build_daily_graph() -> StateGraph:
     graph = StateGraph(TradingState)
 
     # 注册节点
-    graph.add_node("market_brain", run_market_brain_node)
-    graph.add_node("explorer", run_discovery_node)
-    graph.add_node("strategist", run_strategy_node)
-    graph.add_node("risk_governor", run_risk_governor_node)
-    graph.add_node("executioner", run_execution_node)
-    graph.add_node("influencer", run_influencer_node)
+    graph.add_node("market_brain", node_guard("market_brain")(run_market_brain_node))
+    graph.add_node("explorer", node_guard("explorer")(run_discovery_node))
+    graph.add_node("strategist", node_guard("strategist")(run_strategy_node))
+    graph.add_node("risk_governor", node_guard("risk_governor")(run_risk_governor_node))
+    graph.add_node("executioner", node_guard("executioner")(run_execution_node))
+    graph.add_node("influencer", node_guard("influencer")(run_influencer_node))
 
     # 入口
     graph.set_entry_point("market_brain")
@@ -155,9 +162,16 @@ async def run_daily_pipeline(
     initial_state["persona_id"] = persona_id or "short_term_hot_rotation_v1"
     graph = build_daily_graph()
 
-    result = await graph.ainvoke(initial_state)
+    try:
+        result = await graph.ainvoke(initial_state)
+    except Exception as exc:
+        logger.exception("日常交易流未捕获异常")
+        initial_state.setdefault("errors", []).append(
+            {"node": "pipeline", "error": str(exc)}
+        )
+        result = initial_state
 
-    # 持久化最终状态
+    # 持久化最终状态（失败也要落库）
     get_central_brain().persist_state(session_id, run_mode, result)
 
     logger.info("=" * 60)

@@ -47,10 +47,10 @@ class Config:
             "trading_mode": os.getenv("TRADING_MODE", "mock"),
             "trading_agent_url": os.getenv(
                 "TRADING_AGENT_URL",
-                # 本地开发默认 localhost:8004（临时改端口避免 OrbStack 占用 8001）
-                # Docker 环境由 docker-compose 覆盖为 http://ai-lab-web:8002
-                "http://localhost:8004"
+                "http://127.0.0.1:8004",
             ),
+            "sma_base_url": os.getenv("SMA_BASE_URL", "http://127.0.0.1:8003"),
+            "ops_webhook_url": os.getenv("OPS_WEBHOOK_URL", ""),
             "broker_api_url": os.getenv("BROKER_API_URL"),
             "broker_api_key": os.getenv("BROKER_API_KEY"),
             "broker_secret": os.getenv("BROKER_SECRET"),

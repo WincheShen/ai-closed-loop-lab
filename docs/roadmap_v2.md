@@ -3,6 +3,8 @@
 > 起草日期：2026-07-15  
 > 起草人：总架构师视角  
 > 上一版：docs/roadmap_to_60pct.md（阶段 1、2 已完成）
+>
+> ⚠️ **2026-08-22 起过期，不再按本文排期。** 现行计划见 [architecture_refactor_and_winrate_plan.md](architecture_refactor_and_winrate_plan.md)。本文仅作历史快照（当时胜率 22.2%、空转 68%）。
 
 ## 目标（不变）
 

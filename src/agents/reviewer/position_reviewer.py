@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
+from src.agents.reviewer.hard_rules import evaluate_hard_exit
 from src.central_brain import get_central_brain
 from src.infra.model_adapter import get_llm
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
@@ -370,52 +371,9 @@ class PositionReviewAgent:
     def _pre_llm_hard_check(
         self, position: dict, current_price: float, pnl_pct: float,
     ) -> dict | None:
-        """Pre-LLM 硬规则检查 — 确定性结果直接返回，跳过 LLM 调用省钱。
-
-        Returns:
-            决策 dict if 硬规则触发, None if 需要 LLM 判断
-        """
-        symbol = position.get("symbol", "")
-        stop_loss = position.get("stop_loss") or 0
-        target_price = position.get("target_price") or 0
-
-        # 硬止损: 当前价 <= stop_loss → EXIT
-        if stop_loss > 0 and current_price <= stop_loss:
-            return {
-                "action": "EXIT",
-                "confidence": 1.0,
-                "reason": f"价格{current_price:.2f}已跌破止损价{stop_loss:.2f}，规则引擎强制清仓",
-                "thesis_status": "invalidated",
-                "key_observation": f"跌破止损: {current_price:.2f} <= {stop_loss:.2f}",
-                "risk_flag": "stop_loss_triggered",
-                "rule_override": True,
-            }
-
-        # 浮亏超 -8% → EXIT
-        if pnl_pct <= -8.0:
-            return {
-                "action": "EXIT",
-                "confidence": 1.0,
-                "reason": f"浮亏{pnl_pct:.1f}%超过-8%硬止损线，规则引擎强制清仓",
-                "thesis_status": "invalidated",
-                "key_observation": f"浮亏过大: {pnl_pct:.1f}%",
-                "risk_flag": "max_loss_exceeded",
-                "rule_override": True,
-            }
-
-        # 达到目标价 → REDUCE (确定性结果，不需要 LLM)
-        if target_price > 0 and current_price >= target_price:
-            return {
-                "action": "REDUCE",
-                "confidence": 0.9,
-                "reason": f"价格{current_price:.2f}已达目标价{target_price:.2f}，规则引擎减仓锁利",
-                "thesis_status": "intact",
-                "key_observation": f"达到目标: {current_price:.2f} >= {target_price:.2f}",
-                "risk_flag": "",
-                "rule_override": True,
-            }
-
-        return None
+        """Pre-LLM 硬规则检查 — 与 hard_scan / 回测共用 evaluate_hard_exit。"""
+        del pnl_pct  # 由 evaluate_hard_exit 内部重算，签名保持兼容
+        return evaluate_hard_exit(position, current_price)
 
     def _apply_rule_override(
         self, result: dict, position: dict, current_price: float, pnl_pct: float,

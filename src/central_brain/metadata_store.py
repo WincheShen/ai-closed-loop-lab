@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from src.central_brain.position_repo import PositionRepoMixin
+from src.central_brain.signal_repo import SignalRepoMixin
 from src.infra.config import cfg
 from src.infra.logger import get_logger
 
@@ -82,7 +84,7 @@ class EventBus:
 # MemoryStore — SQLite 向量记忆
 # =============================================================================
 
-class MemoryStore:
+class MemoryStore(SignalRepoMixin, PositionRepoMixin):
     """基于 SQLite 的记忆存储，支持向量化检索 (sqlite-vec)。"""
 
     def __init__(self, db_path: str | None = None) -> None:
