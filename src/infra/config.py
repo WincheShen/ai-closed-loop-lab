@@ -94,6 +94,8 @@ class Config:
         # 加载 YAML 配置（覆盖 .env）
         config_dir = _PROJECT_ROOT / "config"
         for yaml_file in sorted(config_dir.glob("*.yaml")):
+            if yaml_file.name.startswith("._"):
+                continue
             with open(yaml_file, "r", encoding="utf-8") as f:
                 yaml_data = yaml.safe_load(f) or {}
                 data.update(yaml_data)

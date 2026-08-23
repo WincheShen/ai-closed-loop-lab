@@ -152,6 +152,25 @@ def health_akshare() -> dict:
         return {"status": "error", "detail": str(e)}
 
 
+@app.get("/health/scheduler")
+def health_scheduler() -> dict:
+    """调度器心跳。stale/missing → 503，供 watchdog / 人工巡检。"""
+    from src.infra.heartbeat import heartbeat_status
+
+    status = heartbeat_status()
+    if status["status"] != "ok":
+        raise HTTPException(status_code=503, detail=status)
+    return status
+
+
+@app.get("/api/ops/alerts")
+def ops_alerts(limit: int = 50) -> dict:
+    """最近运维告警（不依赖外部 IM）。"""
+    from src.infra.notify import recent_alerts
+
+    return {"alerts": recent_alerts(limit=min(max(limit, 1), 200))}
+
+
 @app.post("/webhook/trade", response_model=TradeRecordResponse)
 async def receive_trade(
     text: str = Form(""),

@@ -194,3 +194,43 @@ NAS (192.168.3.73)
 镜像: ghcr.io/wincheshen/ai-closed-loop-lab/ai-lab:latest
 数据目录: /volume1/docker/ai-lab-web/data/
 ```
+
+## 生产热更新（2026-08-22 起）
+
+生产目录是 **`/volume1/docker/ai-lab/`**（不是 `ai-lab-web`）。`src` / `scripts` / `config` 已 bind-mount，改代码不必重建镜像。
+
+```bash
+# 本机
+./scripts/deploy_nas.sh
+```
+
+脚本会：`COPYFILE_DISABLE=1` 打包（避免 macOS `._*.yaml` 打挂 Config）、传到 NAS 家目录、解压、删 `._*`、`docker-compose --profile scheduler up -d`、核对 heartbeat。
+
+### 调度器自愈
+
+Docker healthcheck 变 unhealthy **不会**自动重启容器（2026-08-21 scheduler 卡死 5 天就是这个）。部署脚本会尝试写 `/etc/cron.d/ai-lab-watchdog`：
+
+```
+*/5 * * * * root python3 /volume1/docker/ai-lab/scripts/scheduler_watchdog.py
+```
+
+心跳文件 `/volume1/docker/ai-lab/data/scheduler.heartbeat` 超过 10 分钟则 `docker-compose --profile scheduler up -d`，并 `notify_ops`。
+
+手工巡检：
+
+```bash
+curl -sf http://192.168.3.73:8002/health/scheduler
+curl -sf http://192.168.3.73:8002/api/ops/alerts
+```
+
+### 告警通道
+
+NAS `.env` 增加（容器重启后生效，不必重建镜像）：
+
+```
+OPS_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
+# 或飞书 / 钉钉 / https://api.day.app/<bark-key>
+OPS_WEBHOOK_KIND=auto
+```
+
+不配 URL 时告警只落 `data/logs/ops_alerts.log`，Web 可读 `/api/ops/alerts`。

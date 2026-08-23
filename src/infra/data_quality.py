@@ -1,6 +1,7 @@
 """行情数据质量 — 开仓闸的唯一判定入口。"""
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 QUALITY_FULL = "full"
@@ -15,6 +16,9 @@ SOURCE_SINA_INFER = "sina_infer"
 SOURCE_NONE = "none"
 
 HOT_SECTOR_STRATEGIES = frozenset({"hot_sector_pullback"})
+
+# mock 沿用真实 regime 的最长间隔（交易日）。超过则强制 defend，禁止再当作战计划。
+REGIME_REUSE_MAX_TRADING_DAYS = 2
 
 
 def classify_market_quality(
@@ -69,3 +73,38 @@ def strategy_blocked_by_quality(strategy_id: str, regime: dict[str, Any] | None)
     ):
         return True
     return False
+
+
+def trading_days_between(start: date, end: date) -> int:
+    """start 之后到 end（含）的工作日数。周末不计。"""
+    if end <= start:
+        return 0
+    n = 0
+    cur = start + timedelta(days=1)
+    while cur <= end:
+        if cur.weekday() < 5:
+            n += 1
+        cur += timedelta(days=1)
+    return n
+
+
+def parse_trade_date(raw: str | None) -> date | None:
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+def regime_reuse_expired(
+    trade_date: str | None,
+    today: date | None = None,
+    *,
+    max_trading_days: int = REGIME_REUSE_MAX_TRADING_DAYS,
+) -> bool:
+    """沿用的真实 regime 是否超过 TTL。日期无法解析视为过期。"""
+    src = parse_trade_date(trade_date)
+    if src is None:
+        return True
+    return trading_days_between(src, today or date.today()) > max_trading_days

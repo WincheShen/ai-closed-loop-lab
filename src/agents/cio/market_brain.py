@@ -162,27 +162,26 @@ class MarketBrain:
         # 避免基于 50 只随机模拟股票做出错误的市场判断。
         if self._last_snapshot.is_mock:
             prev = self._load_last_real_regime()
-            if prev is not None:
-                self.logger.warning(
-                    "⚠️ 数据源降级为 mock，沿用上次真实 regime: %s (posture=%s, date=%s)",
-                    prev.regime, prev.recommended_posture, prev.trade_date,
-                )
-                # 更新时间戳但保留原始判定
-                prev.snapshot_id = f"REG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-                prev.is_mock_data = True
-                prev.data_quality = "mock"
-                prev.hot_sectors_source = "none"
-                prev.created_at = datetime.now().isoformat()
-                prev.evidence["reused_from_mock_fallback"] = True
-                prev.evidence["data_quality"] = "mock"
-                self.brain.store.save_market_regime(self.session_id, prev.to_dict())
-                self.brain.log_agent_event(
-                    self.session_id, "market_brain", "regime_reused_mock",
-                    {"regime": prev.regime, "posture": prev.recommended_posture, "original_date": prev.trade_date},
-                )
-                return prev
-            else:
-                self.logger.warning("⚠️ 数据源降级为 mock 且无历史真实 regime，将基于 mock 数据生成（不推荐）")
+            from src.infra.data_quality import regime_reuse_expired
+            if prev is None or regime_reuse_expired(prev.trade_date):
+                return self._halt_for_stale_mock(prev)
+            self.logger.warning(
+                "⚠️ 数据源降级为 mock，沿用上次真实 regime: %s (posture=%s, date=%s)",
+                prev.regime, prev.recommended_posture, prev.trade_date,
+            )
+            prev.snapshot_id = f"REG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+            prev.is_mock_data = True
+            prev.data_quality = "mock"
+            prev.hot_sectors_source = "none"
+            prev.created_at = datetime.now().isoformat()
+            prev.evidence["reused_from_mock_fallback"] = True
+            prev.evidence["data_quality"] = "mock"
+            self.brain.store.save_market_regime(self.session_id, prev.to_dict())
+            self.brain.log_agent_event(
+                self.session_id, "market_brain", "regime_reused_mock",
+                {"regime": prev.regime, "posture": prev.recommended_posture, "original_date": prev.trade_date},
+            )
+            return prev
 
         base_regime, evidence = self._compute_base_regime(self._last_snapshot)
 
@@ -317,6 +316,42 @@ class MarketBrain:
         except Exception as e:
             self.logger.warning("加载历史 regime 失败: %s", e)
             return None
+
+    def _halt_for_stale_mock(self, prev: MarketRegimeSnapshot | None) -> MarketRegimeSnapshot:
+        """mock 且无近期真实 regime → defend，禁止当作可交易作战计划。"""
+        reason = "no_real_regime" if prev is None else f"reuse_ttl:{prev.trade_date}"
+        self.logger.error("⚠️ mock 数据且无法沿用真实 regime (%s)，强制 defend", reason)
+        now = datetime.now()
+        result = MarketRegimeSnapshot(
+            snapshot_id=f"REG-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
+            trade_date=str(date.today()),
+            regime="bear",
+            risk_appetite="low",
+            recommended_posture="defend",
+            max_total_position_pct=0.0,
+            summary=f"数据源 mock 且真实 regime 不可沿用 ({reason})",
+            evidence={
+                "regime_reuse_expired": True,
+                "original_date": prev.trade_date if prev else None,
+                "data_quality": "unavailable",
+            },
+            persona_version=self.persona.persona_version,
+            is_mock_data=True,
+            data_quality="unavailable",
+            hot_sectors_source="none",
+            created_at=now.isoformat(),
+        )
+        self.brain.store.save_market_regime(self.session_id, result.to_dict())
+        self.brain.log_agent_event(
+            self.session_id, "market_brain", "regime_reuse_expired",
+            {"reason": reason, "original_date": prev.trade_date if prev else None},
+        )
+        try:
+            from src.infra.notify import notify_ops
+            notify_ops("mock regime 强制防守", f"reason={reason}")
+        except Exception:
+            pass
+        return result
 
     # ----------------------------------------------------------------------
     # 量化基础 regime

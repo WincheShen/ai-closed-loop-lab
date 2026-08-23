@@ -40,6 +40,7 @@ from src.agents.reviewer.hard_scan import run_hard_scan
 from src.agents.reviewer.intraday_loop import run_intraday_review
 from src.agents.reviewer.stale_position_check import check_stale_positions
 from src.graph.workflow import run_daily_pipeline, run_weekly_feedback
+from src.infra.heartbeat import write_heartbeat
 from src.infra.logger import setup_logging
 from src.infra.notify import notify_ops
 
@@ -563,7 +564,6 @@ def run_scheduler() -> None:
     signal_mod.signal(signal_mod.SIGTERM, _signal_handler)
     signal_mod.signal(signal_mod.SIGINT, _signal_handler)
 
-    heartbeat_path = Path("/app/data/scheduler.heartbeat" if os.getenv("DB_PATH") else "data/scheduler.heartbeat")
     last_heartbeat = 0
 
     while not shutdown_requested:
@@ -574,8 +574,7 @@ def run_scheduler() -> None:
             logger.info("scheduler heartbeat — alive")
             last_heartbeat = now
             try:
-                heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
-                heartbeat_path.write_text(datetime.now().isoformat(), encoding="utf-8")
+                write_heartbeat()
             except OSError:
                 pass
 

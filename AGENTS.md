@@ -19,6 +19,14 @@
 6. `SIGNAL_FACTORY=1` 才走检测器出信号；默认仍走旧 LLM 生成（过渡期）。
 7. 生产库在 NAS `/volume1/docker/ai-lab/`；本机库已分叉。
 
+## 部署
+
+- 热更新：`./scripts/deploy_nas.sh`（`COPYFILE_DISABLE=1 tar`，远端清 `._*`，compose up，不重建镜像）。
+- 禁止往 `/volume1/docker/ai-lab-web/` 部署。
+- mock regime 沿用真实快照最多 2 个交易日，超时强制 `defend` + `data_quality=unavailable`。
+- 调度器自愈：NAS cron 每 5 分钟跑 `scripts/scheduler_watchdog.py`；心跳超时 10 分钟重启 `ai-lab-scheduler`。
+- 告警：`OPS_WEBHOOK_URL` 填企业微信/飞书/钉钉/Bark；空则读 `GET /api/ops/alerts` 或 `logs/ops_alerts.log`。
+
 ## 验证
 
 - 策略对错先走回测（待 `src/strategy_lab/`），不要靠「改 Prompt 等下周 3 笔成交」。
