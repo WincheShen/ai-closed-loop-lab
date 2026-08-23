@@ -1,23 +1,36 @@
-"""最小日线回放引擎。撮合假设见 docs/architecture_refactor_and_winrate_plan.md §2.3。"""
+"""日线回放引擎。撮合假设见 docs/architecture_refactor_and_winrate_plan.md §2.3。
+
+- immediate：次日开盘成交，滑点 0.2%
+- pullback：信号日后 5 日内最低价 ≤ entry 则按 entry 成交，否则过期
+- breakout：5 日内最高价 ≥ entry 则按 entry×1.002 成交，否则过期
+- 止损：成交后日线最低价触及则当日收盘出（偏乐观，fill_quality=daily_approx）
+- 硬顶 -8%、目标价减半仓：与线上 evaluate_hard_exit 同一函数
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 from src.agents.reviewer.hard_rules import evaluate_hard_exit
 from src.stock_analyzer.data_source.akshare_client import KlineBar
-from src.stock_analyzer.detectors import DETECTORS, BarContext
+from src.stock_analyzer.detectors import DETECTORS, BarContext, DetectorHit
+
+SLIPPAGE = 0.002
+FILL_WINDOW = 5
 
 
 @dataclass
 class FillRecord:
     symbol: str
     strategy_id: str
+    signal_date: str
     entry_date: str
     exit_date: str
     entry: float
     exit: float
     pnl_pct: float
     win: bool
+    entry_condition: str
     fill_quality: str = "daily_approx"
 
 
@@ -31,10 +44,75 @@ class BacktestReport:
     profit_factor: float
     avg_pnl_pct: float
     max_drawdown_pct: float
+    oos_n: int = 0
+    oos_win_rate: float = 0.0
+    expired: int = 0
     fills: list[FillRecord] = field(default_factory=list)
+    assumptions: str = (
+        "immediate=next_open*1.002; pullback=5d_low<=entry; "
+        "breakout=5d_high>=entry*1.002; stop=daily_low then close; "
+        "hard_exit=evaluate_hard_exit; hold<=10d"
+    )
 
     def passed_gates(self, *, min_n: int = 200, min_wr: float = 0.48, min_pf: float = 1.2) -> bool:
-        return self.n >= min_n and self.win_rate >= min_wr and self.profit_factor >= min_pf
+        from src.strategy_lab.gates import gates_passed
+        return gates_passed(self)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["fills"] = [asdict(f) for f in self.fills]
+        return d
+
+
+def _bar_date(bar: KlineBar) -> str:
+    return str(bar.date)
+
+
+def _try_fill(hit: DetectorHit, future: list[KlineBar]) -> tuple[KlineBar, float] | None:
+    cond = hit.entry_condition
+    window = future[:FILL_WINDOW]
+    if not window:
+        return None
+    if cond == "immediate":
+        nxt = window[0]
+        return nxt, nxt.open * (1.0 + SLIPPAGE)
+    if cond == "pullback":
+        for bar in window:
+            if bar.low <= hit.entry_price:
+                return bar, hit.entry_price
+        return None
+    if cond == "breakout":
+        trigger = hit.entry_price
+        for bar in window:
+            if bar.high >= trigger:
+                return bar, trigger * (1.0 + SLIPPAGE)
+        return None
+    nxt = window[0]
+    return nxt, nxt.open * (1.0 + SLIPPAGE)
+
+
+def _exit_trade(
+    entry: float,
+    hit: DetectorHit,
+    bars_after_fill: list[KlineBar],
+    *,
+    hold_days: int,
+) -> tuple[str, float]:
+    pos = {"entry_price": entry, "stop_loss": hit.stop_loss, "target_price": hit.target_price}
+    window = bars_after_fill[:hold_days] or bars_after_fill
+    exit_px = window[-1].close
+    exit_date = _bar_date(window[-1])
+    for bar in window:
+        hard_low = evaluate_hard_exit(pos, bar.low)
+        if hard_low and hard_low["action"] == "EXIT":
+            # 触及止损用当日收盘出（文档：偏乐观，报告标注）
+            return _bar_date(bar), bar.close
+        hard_high = evaluate_hard_exit(pos, bar.high)
+        if hard_high and hard_high["action"] == "REDUCE":
+            return _bar_date(bar), hit.target_price
+        exit_px = bar.close
+        exit_date = _bar_date(bar)
+    return exit_date, exit_px
 
 
 def _replay_one(
@@ -44,63 +122,74 @@ def _replay_one(
     *,
     sector: str = "",
     hot_by_date: dict[str, tuple[str, ...]] | None = None,
+    pe_ttm: float = 0.0,
     hold_days: int = 10,
-) -> list[FillRecord]:
+) -> tuple[list[FillRecord], int]:
     detect = DETECTORS[strategy_id]
     fills: list[FillRecord] = []
+    expired = 0
     i = 30
     while i < len(bars) - 2:
         window = bars[: i + 1]
-        day = str(bars[i].date)
+        day = _bar_date(bars[i])
         hot = (hot_by_date or {}).get(day, (sector,) if sector else ())
-        ctx = BarContext(symbol=symbol, bars=window, sector=sector, hot_sectors=hot)
+        ctx = BarContext(
+            symbol=symbol,
+            bars=window,
+            sector=sector,
+            hot_sectors=hot,
+            pe_ttm=pe_ttm,
+        )
         hit = detect(ctx)
         if not hit:
             i += 1
             continue
-        # 次日开盘成交 + 0.2% 滑点
-        nxt = bars[i + 1]
-        entry = nxt.open * 1.002
-        exit_px = nxt.close
-        exit_date = str(nxt.date)
-        pos = {"entry_price": entry, "stop_loss": hit.stop_loss, "target_price": hit.target_price}
-        closed = False
-        for j in range(i + 1, min(i + 1 + hold_days, len(bars))):
-            bar = bars[j]
-            # 用最低价近似止损触及（偏乐观，报告标注 daily_approx）
-            hard = evaluate_hard_exit(pos, bar.low)
-            if hard and hard["action"] == "EXIT":
-                exit_px = min(bar.open, hit.stop_loss)
-                exit_date = str(bar.date)
-                closed = True
-                break
-            hard_t = evaluate_hard_exit(pos, bar.high)
-            if hard_t and hard_t["action"] == "REDUCE":
-                exit_px = hit.target_price
-                exit_date = str(bar.date)
-                closed = True
-                break
-            exit_px = bar.close
-            exit_date = str(bar.date)
-        if not closed:
-            last = bars[min(i + hold_days, len(bars) - 1)]
-            exit_px = last.close
-            exit_date = str(last.date)
+        filled = _try_fill(hit, bars[i + 1 :])
+        if filled is None:
+            expired += 1
+            i += 1
+            continue
+        fill_bar, entry = filled
+        fill_idx = next(j for j, b in enumerate(bars) if b.date == fill_bar.date)
+        exit_date, exit_px = _exit_trade(entry, hit, bars[fill_idx + 1 :], hold_days=hold_days)
+        if not exit_date:
+            last = bars[min(fill_idx + hold_days, len(bars) - 1)]
+            exit_date, exit_px = _bar_date(last), last.close
         pnl = (exit_px / entry - 1.0) if entry else 0.0
         fills.append(
             FillRecord(
                 symbol=symbol,
                 strategy_id=strategy_id,
-                entry_date=str(nxt.date),
+                signal_date=day,
+                entry_date=_bar_date(fill_bar),
                 exit_date=exit_date,
                 entry=round(entry, 3),
                 exit=round(exit_px, 3),
                 pnl_pct=round(pnl * 100, 3),
                 win=pnl > 0,
+                entry_condition=hit.entry_condition,
             )
         )
-        i += hold_days  # 避免重叠持仓
-    return fills
+        i = fill_idx + hold_days
+    return fills, expired
+
+
+def _summarize(fills: list[FillRecord]) -> tuple[int, int, float, float, float, float]:
+    n = len(fills)
+    wins = sum(1 for f in fills if f.win)
+    gp = sum(f.pnl_pct for f in fills if f.pnl_pct > 0)
+    gl = abs(sum(f.pnl_pct for f in fills if f.pnl_pct < 0))
+    pf = (gp / gl) if gl > 0 else (float("inf") if gp > 0 else 0.0)
+    avg = (sum(f.pnl_pct for f in fills) / n) if n else 0.0
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for f in fills:
+        equity += f.pnl_pct
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity - peak)
+    wr = (wins / n) if n else 0.0
+    return n, wins, wr, pf, avg, max_dd
 
 
 def run_backtest(
@@ -109,37 +198,44 @@ def run_backtest(
     *,
     sector_of: dict[str, str] | None = None,
     hot_by_date: dict[str, tuple[str, ...]] | None = None,
+    pe_of: dict[str, float] | None = None,
+    oos_start: str | None = None,
 ) -> BacktestReport:
     all_fills: list[FillRecord] = []
+    expired = 0
     for symbol, bars in series.items():
-        all_fills.extend(
-            _replay_one(
-                symbol, bars, strategy_id,
-                sector=(sector_of or {}).get(symbol, ""),
-                hot_by_date=hot_by_date,
-            )
+        fills, exp = _replay_one(
+            symbol,
+            bars,
+            strategy_id,
+            sector=(sector_of or {}).get(symbol, ""),
+            hot_by_date=hot_by_date,
+            pe_ttm=(pe_of or {}).get(symbol, 0.0),
         )
-    n = len(all_fills)
-    wins = sum(1 for f in all_fills if f.win)
-    losses = n - wins
-    gp = sum(f.pnl_pct for f in all_fills if f.pnl_pct > 0)
-    gl = abs(sum(f.pnl_pct for f in all_fills if f.pnl_pct < 0))
-    pf = (gp / gl) if gl > 0 else (float("inf") if gp > 0 else 0.0)
-    equity = 0.0
-    peak = 0.0
-    max_dd = 0.0
-    for f in all_fills:
-        equity += f.pnl_pct
-        peak = max(peak, equity)
-        max_dd = min(max_dd, equity - peak)
+        all_fills.extend(fills)
+        expired += exp
+    all_fills.sort(key=lambda f: (f.entry_date, f.symbol))
+    n, wins, wr, pf, avg, max_dd = _summarize(all_fills)
+    oos_fills = all_fills
+    if oos_start:
+        oos_fills = [f for f in all_fills if f.entry_date >= oos_start]
+    else:
+        unique_days = sorted({f.entry_date for f in all_fills})
+        if len(unique_days) > 60:
+            cut = unique_days[-60]
+            oos_fills = [f for f in all_fills if f.entry_date >= cut]
+    oos_n, _ow, oos_wr, *_ = _summarize(oos_fills)
     return BacktestReport(
         strategy_id=strategy_id,
         n=n,
         wins=wins,
-        losses=losses,
-        win_rate=(wins / n) if n else 0.0,
+        losses=n - wins,
+        win_rate=wr,
         profit_factor=round(pf, 3) if pf != float("inf") else 99.0,
-        avg_pnl_pct=round(sum(f.pnl_pct for f in all_fills) / n, 3) if n else 0.0,
+        avg_pnl_pct=round(avg, 3),
         max_drawdown_pct=round(max_dd, 3),
+        oos_n=oos_n,
+        oos_win_rate=oos_wr,
+        expired=expired,
         fills=all_fills,
     )

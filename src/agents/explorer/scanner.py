@@ -521,6 +521,18 @@ class ExplorerScanner:
 
             return {
                 "current_price": current_price,
+                "bars": [
+                    {
+                        "date": str(b.date),
+                        "open": b.open,
+                        "high": b.high,
+                        "low": b.low,
+                        "close": b.close,
+                        "volume": b.volume,
+                        "turnover": b.turnover,
+                    }
+                    for b in bars
+                ],
                 "last_close": round(closes[-1], 2) if closes else current_price,
                 "ma5": round(ma5, 2),
                 "ma10": round(ma10, 2),

@@ -59,3 +59,48 @@ def test_attribute_basic(monkeypatch):
     assert attr.outcome in ("win", "loss", "breakeven")
     assert attr.primary_cause != ""
     assert attr.lesson == "follow the trend"
+    assert attr.strategy_id == "volume_breakout"
+
+
+def test_resolve_strategy_id_normalizes_alias() -> None:
+    from src.agents.memory.trade_attribution import resolve_strategy_id
+
+    assert resolve_strategy_id({"original_strategy": "热点板块前排回踩"}) == "hot_sector_pullback"
+    assert resolve_strategy_id({"strategy_id": "value_investing", "original_strategy": "x"}) == "value_investing"
+    assert resolve_strategy_id({"original_strategy": "放量突破后第一次确认回踩"}) == "volume_breakout"
+
+
+def test_repair_strategy_ids(tmp_path) -> None:
+    import sqlite3
+
+    from src.agents.memory.trade_attribution import repair_strategy_ids
+
+    conn = sqlite3.connect(tmp_path / "t.db")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE positions (
+            position_id TEXT, original_strategy TEXT, strategy_id TEXT
+        );
+        CREATE TABLE trade_attributions (
+            position_id TEXT, strategy_id TEXT
+        );
+        INSERT INTO positions VALUES ('P1', '热点板块前排回踩', NULL);
+        INSERT INTO trade_attributions VALUES ('P1', '');
+        """
+    )
+    conn.commit()
+
+    class Store:
+        def _conn(self):
+            return conn
+
+        def _auto_commit(self):
+            conn.commit()
+
+    n = repair_strategy_ids(store=Store())
+    assert n == 1
+    pos = dict(conn.execute("SELECT * FROM positions").fetchone())
+    attr = dict(conn.execute("SELECT * FROM trade_attributions").fetchone())
+    assert pos["strategy_id"] == "hot_sector_pullback"
+    assert attr["strategy_id"] == "hot_sector_pullback"

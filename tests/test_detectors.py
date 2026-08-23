@@ -79,3 +79,19 @@ def test_backtest_deterministic() -> None:
     )
     assert r1.n == r2.n
     assert [f.pnl_pct for f in r1.fills] == [f.pnl_pct for f in r2.fills]
+
+
+def test_synthetic_backtest_reaches_sample_and_is_deterministic() -> None:
+    from src.strategy_lab.gates import evaluate_gates
+    from src.strategy_lab.synthetic import universe_for
+
+    series = universe_for("hot_sector_pullback", n_symbols=20)
+    hot = {str(b.date): ("半导体",) for bars in series.values() for b in bars}
+    sector = {s: "半导体" for s in series}
+    r1 = run_backtest(series, "hot_sector_pullback", sector_of=sector, hot_by_date=hot)
+    r2 = run_backtest(series, "hot_sector_pullback", sector_of=sector, hot_by_date=hot)
+    assert r1.n == r2.n
+    assert r1.n >= 200
+    assert [f.pnl_pct for f in r1.fills] == [f.pnl_pct for f in r2.fills]
+    # 合成样本只证明引擎能跑到 G-bt-2，不算研究过关
+    assert any(g.name == "G-bt-2" and g.ok for g in evaluate_gates(r1))

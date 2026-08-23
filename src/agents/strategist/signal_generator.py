@@ -1024,20 +1024,18 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
             "logs": state.get("logs", []) + ["[Strategist] 无候选票，跳过"],
         }
 
-    from src.agents.strategist.signal_factory import (
-        detect_hits,
-        hits_to_signals,
-        signal_factory_enabled,
-    )
+    from src.agents.strategist.signal_factory import run_factory, signal_factory_enabled
     if signal_factory_enabled():
-        hits = detect_hits(
+        hits, signals = run_factory(
             candidates,
             persona=persona,
             market_regime=market_regime,
             hot_sectors=hot_sectors,
+            max_hits=MAX_LLM_ANALYSIS,
         )
-        signals = hits_to_signals(hits[:MAX_LLM_ANALYSIS])
         risk = engine.risk_assessment(signals)
+        for sig in signals:
+            get_central_brain().bus.emit_trade_signal(sig)
         return {
             "trade_signals": signals,
             "risk_assessment": risk,

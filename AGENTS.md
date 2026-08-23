@@ -16,7 +16,7 @@
 3. 禁止再往 `src/agents/strategist/signal_generator.py` 的 Prompt 里加新策略名。新策略只允许加检测器函数。
 4. 禁止拆 MemoryStore、上 Redis、扩大实盘资金。自动回写 `trading_persona.yaml` / `prompt_weights.json` 默认关闭（需显式 env）。
 5. 新开仓硬闸：`data_quality` 为 mock/degraded/unavailable 时 Strategist 必须空转。
-6. `SIGNAL_FACTORY=1` 才走检测器出信号；默认仍走旧 LLM 生成（过渡期）。
+6. `SIGNAL_FACTORY=1` 才走检测器出信号；默认仍走旧 LLM 生成。至少 1 短线 + 1 价值过 `G-bt-*` 才允许打开。
 7. 生产库在 NAS `/volume1/docker/ai-lab/`；本机库已分叉。
 
 ## 部署
@@ -29,5 +29,6 @@
 
 ## 验证
 
-- 策略对错先走回测（待 `src/strategy_lab/`），不要靠「改 Prompt 等下周 3 笔成交」。
+- 策略对错先走 `python -m src.strategy_lab --strategy <id> --start 2024-01-01`（有缓存才算研究证据；`--synthetic` 只验引擎）。
 - 硬规则（止损、禁策略、数据降级禁开仓、信号过期）必须是代码，不经过 LLM。
+- 新开仓必须带归一化 `strategy_id`；平仓归因读 `positions.strategy_id`，禁止再把中文策略名当 id。

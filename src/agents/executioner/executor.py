@@ -495,6 +495,7 @@ class ExecutionEngine:
             persona_version=signal.get("persona_version", ""),
             sector=signal.get("sector", ""),
             persona_id=self.persona_id,
+            strategy_id=signal.get("strategy_id") or None,
         )
         self.logger.info(
             "[MOCK] 自动建仓 %s | %s | 成本=%.2f | 数量=%d | 策略=%s | regime=%s",

@@ -426,8 +426,12 @@ def job_backfill_attributions() -> None:
     """
     logger.info("⏰ 定时任务触发: 归因补跑")
     try:
-        from src.agents.memory.trade_attribution import TradeAttributor
+        from src.agents.memory.trade_attribution import TradeAttributor, repair_strategy_ids
         from src.central_brain import get_central_brain
+
+        repaired = repair_strategy_ids()
+        if repaired:
+            logger.info("补写 strategy_id %d 条", repaired)
 
         brain = get_central_brain()
         conn = brain.store._conn()

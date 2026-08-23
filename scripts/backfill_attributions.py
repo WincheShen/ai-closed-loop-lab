@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.agents.memory.trade_attribution import TradeAttributor
+from src.agents.memory.trade_attribution import TradeAttributor, repair_strategy_ids
 from src.central_brain import get_central_brain
 
 
@@ -31,6 +31,9 @@ def find_unattributed_positions() -> list[dict]:
 
 
 def backfill(dry_run: bool = False) -> None:
+    repaired = repair_strategy_ids(dry_run=dry_run)
+    print(f"strategy_id repaired: {repaired}")
+
     positions = find_unattributed_positions()
     if not positions:
         print("All closed positions already have attributions.")

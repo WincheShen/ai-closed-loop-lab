@@ -18,9 +18,52 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from src.agents.strategist.signal_generator import _infer_strategy_id
 from src.central_brain import get_central_brain
 from src.infra.logger import get_agent_logger
 from src.infra.model_adapter import get_llm
+
+
+def resolve_strategy_id(position: dict) -> str:
+    """positions.strategy_id 优先；否则从 original_strategy 归一化。"""
+    raw = (position.get("strategy_id") or "").strip()
+    if raw and raw not in {"unknown", "LLM综合分析"}:
+        inferred = _infer_strategy_id(raw)
+        return inferred if inferred != "unknown" else raw
+    return _infer_strategy_id(position.get("original_strategy") or "")
+
+
+def repair_strategy_ids(store=None, dry_run: bool = False) -> int:
+    """补 positions.strategy_id，并回写归因。"""
+    brain_store = store or get_central_brain().store
+    conn = brain_store._conn()
+    n = 0
+    rows = conn.execute(
+        "SELECT position_id, original_strategy, strategy_id FROM positions"
+    ).fetchall()
+    for row in rows:
+        pos = dict(row)
+        sid = resolve_strategy_id(pos)
+        if not sid or sid == (pos.get("strategy_id") or ""):
+            continue
+        n += 1
+        if dry_run:
+            continue
+        conn.execute(
+            "UPDATE positions SET strategy_id=? WHERE position_id=?",
+            (sid, pos["position_id"]),
+        )
+        conn.execute(
+            "UPDATE trade_attributions SET strategy_id=? WHERE position_id=?",
+            (sid, pos["position_id"]),
+        )
+    if not dry_run and n:
+        try:
+            brain_store._auto_commit()
+        except Exception:
+            conn.commit()
+    return n
+
 
 logger = get_agent_logger("attribution", "init")
 
@@ -222,7 +265,7 @@ class TradeAttributor:
             entry_regime=entry_regime,
             close_regime=close_regime,
             regime_changed=regime_changed,
-            strategy_id=position.get("original_strategy", ""),
+            strategy_id=resolve_strategy_id(position),
             original_thesis=position.get("original_thesis", ""),
             created_at=datetime.now().isoformat(),
         )
@@ -335,7 +378,7 @@ class TradeAttributor:
         user_msg = ATTRIBUTION_USER_TEMPLATE.format(
             symbol=attr.symbol,
             name=attr.name,
-            strategy=position.get("original_strategy", "unknown"),
+            strategy=attr.strategy_id or position.get("original_strategy", "unknown"),
             strategy_id=attr.strategy_id,
             outcome=attr.outcome,
             pnl_pct=attr.pnl_pct,

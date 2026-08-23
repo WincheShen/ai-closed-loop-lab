@@ -236,6 +236,7 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
                 original_signal_id TEXT,
                 original_thesis TEXT,
                 original_strategy TEXT,
+                strategy_id TEXT,
                 bull_case TEXT,
                 bear_case TEXT,
                 target_price REAL,
@@ -439,6 +440,9 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             "ALTER TABLE trade_signals ADD COLUMN persona_id TEXT",
             "ALTER TABLE risk_decisions ADD COLUMN persona_id TEXT",
             "ALTER TABLE daily_picks_archive ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'short_term_hot_rotation_v1'",
+        ]),
+        ("003_position_strategy_id", [
+            "ALTER TABLE positions ADD COLUMN strategy_id TEXT",
         ]),
         # --- 未来迁移追加到这里 ---
     ]
@@ -1009,6 +1013,7 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         persona_version: str | None = None,
         sector: str | None = None,
         persona_id: str | None = None,
+        strategy_id: str | None = None,
     ) -> None:
         """Open a new position with the original analysis thesis attached."""
         conn = self._conn()
@@ -1017,14 +1022,14 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             (position_id, persona_id, symbol, name, side, entry_price, current_qty, entry_date,
              status, original_signal_id, original_thesis, original_strategy,
              bull_case, bear_case, target_price, stop_loss, created_at,
-             market_regime, persona_version, sector)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             market_regime, persona_version, sector, strategy_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 position_id, persona_id or "short_term_hot_rotation_v1", symbol, name, side,
                 entry_price, qty, entry_date,
                 signal_id, thesis, strategy, bull_case, bear_case,
                 target_price, stop_loss, datetime.now().isoformat(),
-                market_regime, persona_version, sector,
+                market_regime, persona_version, sector, strategy_id,
             ),
         )
         self._auto_commit()
