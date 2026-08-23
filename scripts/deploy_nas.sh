@@ -88,7 +88,7 @@ if [[ "$INSTALL_WATCHDOG" -eq 1 ]]; then
 set -e
 mkdir -p ${NAS_PATH}/logs
 touch ${NAS_PATH}/logs/watchdog.log
-LINE=\"*/5\t*\t*\t*\t*\troot\tcd ${NAS_PATH} && DATA_DIR=${NAS_PATH}/data OPS_ALERT_LOG=${NAS_PATH}/data/logs/ops_alerts.log /usr/bin/python3 ${NAS_PATH}/scripts/scheduler_watchdog.py >> ${NAS_PATH}/logs/watchdog.log 2>&1\"
+LINE=\"*/5 * * * * root cd ${NAS_PATH} && DATA_DIR=${NAS_PATH}/data OPS_ALERT_LOG=${NAS_PATH}/data/logs/ops_alerts.log /usr/bin/python3 ${NAS_PATH}/scripts/scheduler_watchdog.py >> ${NAS_PATH}/logs/watchdog.log 2>&1\"
 if [ -d /etc/cron.d ]; then
   printf \"%s\\n\" \"\$LINE\" > /etc/cron.d/ai-lab-watchdog
   chmod 644 /etc/cron.d/ai-lab-watchdog
@@ -106,20 +106,13 @@ if [[ "$RESTART" -eq 1 ]]; then
   echo "==> restart web + scheduler (no image rebuild)"
   "${SSH_NAS[@]}" --sudo -c "sh -c '
 set -e
-/usr/local/bin/docker-compose -f ${COMPOSE_FILE} up -d
+/usr/local/bin/docker restart ai-lab-web ai-lab-scheduler
 /usr/local/bin/docker-compose -f ${COMPOSE_FILE} --profile scheduler up -d
 /usr/local/bin/docker ps --filter name=ai-lab --format \"{{.Names}} {{.Status}}\"
 '"
   echo "==> wait heartbeat"
   sleep 8
-  "${SSH_NAS[@]}" --sudo -c "sh -c '
-stat ${NAS_PATH}/data/scheduler.heartbeat || true
-python3 -c \"
-import time, pathlib
-p=pathlib.Path(\"${NAS_PATH}/data/scheduler.heartbeat\")
-print(\"age\", round(time.time()-p.stat().st_mtime,1) if p.exists() else \"missing\")
-\"
-'"
+  "${SSH_NAS[@]}" --sudo -c "python3 -c 'import time,pathlib; p=pathlib.Path(\"${NAS_PATH}/data/scheduler.heartbeat\"); print(\"age\", round(time.time()-p.stat().st_mtime,1) if p.exists() else \"missing\")'"
 fi
 
 echo "done."
