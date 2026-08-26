@@ -162,7 +162,8 @@ class AKShareHealthMetrics:
 
     @property
     def is_degraded(self) -> bool:
-        return self.last_snapshot_is_mock or self.snapshot_success_rate < 0.5
+        # 仅「当前快照是假的」才算降级。东财失败、新浪成功仍是真实行情。
+        return self.last_snapshot_is_mock
 
     def to_dict(self) -> dict:
         return {
@@ -291,17 +292,18 @@ class AkshareClient:
                 return snap
             except Exception as e:  # noqa: BLE001
                 self._cb_record_failure(str(e))
-                self._metrics.snapshot_fail += 1
                 logger.warning("akshare 拉取失败：%s，尝试新浪 API", e)
 
-        # Tier 2: Sina fallback
+        # Tier 2: Sina fallback（真实行情，不算 snapshot_fail）
         try:
             snap = self._fetch_sina()
             self._metrics.sina_fallback_count += 1
+            self._metrics.snapshot_ok += 1
             self._metrics.last_snapshot_at = datetime.now().isoformat()
             self._metrics.last_snapshot_is_mock = False
             return snap
         except Exception as e:  # noqa: BLE001
+            self._metrics.snapshot_fail += 1
             logger.warning("新浪 API 也失败：%s，降级到 mock", e)
 
         # Tier 3: mock
@@ -495,6 +497,8 @@ class AkshareClient:
         "/api/json_v2.php/CN_MarketData.getKLineData"
     )
     _SINA_HEADERS = {"Referer": "http://finance.sina.com.cn"}
+    _SINA_MIN_STOCKS = 1000
+    _SINA_MAX_FAILED_PAGES = 5
 
     def _fetch_sina(self) -> MarketSnapshot:
         """通过新浪财经 API 拉取全 A 股行情快照。
@@ -504,9 +508,9 @@ class AkshareClient:
         不含行业板块数据，HotSectorDetector 会返回空列表。
 
         容错策略 (避免单页超时导致整体降级到 mock):
-        - 单页失败重试 2 次, 每次 sleep 1s
-        - 已经拿到 >= 1000 只票时, 任何后续单页失败都跳过, 不抛异常
-        - 完全失败的页数 > 5 才抛异常让外层降级
+        - 单页失败重试 2 次
+        - 已拿到 >= 1000 只真票：后续失败页跳过，整次仍成功
+        - 不足 1000 且失败页 > 5 才抛给外层
         """
         import time
 
@@ -542,15 +546,11 @@ class AkshareClient:
                     failed_pages.append(page)
 
             if batch is None:
-                # 已经拿到一定数据就容忍这页失败
-                if len(all_data) >= 1000 and len(failed_pages) <= 5:
+                if not sina_should_abort(len(all_data), len(failed_pages)):
                     continue
-                # 失败页太多, 让外层降级
-                if len(failed_pages) > 5:
-                    raise RuntimeError(
-                        f"新浪 API 失败页数过多: {failed_pages}",
-                    )
-                continue
+                raise RuntimeError(
+                    f"新浪 API 失败页数过多且有效样本不足: {failed_pages} n={len(all_data)}",
+                )
 
             if not batch:
                 break
@@ -561,6 +561,10 @@ class AkshareClient:
             logger.warning(
                 "新浪 API 拉取期间失败页: %s, 但仍拿到 %d 条数据",
                 failed_pages, len(all_data),
+            )
+        if len(all_data) < self._SINA_MIN_STOCKS:
+            raise RuntimeError(
+                f"新浪 API 有效样本不足: n={len(all_data)} failed={failed_pages}",
             )
 
         stocks: list[StockQuote] = []
@@ -819,6 +823,13 @@ class AkshareClient:
             ))
             price = close
         return bars
+
+
+def sina_should_abort(n_stocks: int, n_failed_pages: int) -> bool:
+    """新浪分页失败时是否整单作废。已有 >=1000 真票则继续。"""
+    if n_stocks >= AkshareClient._SINA_MIN_STOCKS:
+        return False
+    return n_failed_pages > AkshareClient._SINA_MAX_FAILED_PAGES
 
 
 def _safe_float(value: object, divisor: float = 1.0) -> Optional[float]:

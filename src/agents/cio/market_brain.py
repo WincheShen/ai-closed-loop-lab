@@ -215,7 +215,7 @@ class MarketBrain:
             is_mock=self._last_snapshot.is_mock,
             has_sectors=bool(self._last_snapshot.sectors),
             hot_sectors=hot_sectors,
-            ak_degraded=bool(ak.get("is_degraded")),
+            ak_degraded=bool(ak.get("is_degraded")) and self._last_snapshot.is_mock,
             hot_source=(
                 "none" if not hot_sectors
                 else ("emappdata" if not self._last_snapshot.sectors else "eastmoney")

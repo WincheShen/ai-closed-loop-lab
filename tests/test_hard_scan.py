@@ -65,6 +65,20 @@ def test_data_quality_gates() -> None:
     assert strategy_blocked_by_quality("hot_sector_pullback", no_sec)
     assert not strategy_blocked_by_quality("value_investing", no_sec)
 
+    # 东财挂了但新浪真票：ak_degraded 不得把质量抬成 degraded
+    sina = classify_market_quality(
+        is_mock=False, has_sectors=False, hot_sectors=[], ak_degraded=True,
+    )
+    assert sina["data_quality"] == "no_sector"
+    assert not blocks_new_entries(sina)
+    assert not strategy_blocked_by_quality("value_investing", sina)
+
+    mock_deg = classify_market_quality(
+        is_mock=True, has_sectors=False, hot_sectors=[], ak_degraded=True,
+    )
+    assert mock_deg["data_quality"] == "degraded"
+    assert blocks_new_entries(mock_deg)
+
 
 class _FakeStore:
     def __init__(self, rows: list[dict]) -> None:
