@@ -16,6 +16,8 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Optional
 
+from .market_info_client import MarketInfoClient
+
 # 禁用代理，避免 Edge 浏览器代理扩展干扰
 # 清除所有可能的代理设置
 for var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']:
@@ -67,6 +69,8 @@ class MarketSnapshot:
     stocks: list[StockQuote]
     sectors: list[SectorQuote]
     is_mock: bool = False
+    data_quality: str = "full"
+    source: str = ""
 
 
 @dataclass
@@ -81,6 +85,9 @@ class KlineBar:
     turnover: float     # 元
     turnover_rate: float = 0.0  # 换手率 %
     change_pct: float = 0.0
+    is_mock: bool = False
+    data_quality: str = "full"
+    source: str = ""
 
 
 _INDUSTRY_CACHE: dict[str, list[str]] = {}   # date_str -> list of board names
@@ -243,6 +250,12 @@ class AkshareClient:
         self._session.mount("https://", adapter)
         self._session.headers.update(self._SINA_HEADERS)
 
+        # market-information-platform 适配层（MARKET_INFO_URL 为空时禁用）
+        market_info_url = os.getenv("MARKET_INFO_URL", "")
+        self._market_info_client = MarketInfoClient(
+            market_info_url, timeout=15, session=self._session
+        )
+
     # ------------------------------------------------------------------
     # Circuit Breaker helpers
     # ------------------------------------------------------------------
@@ -281,6 +294,21 @@ class AkshareClient:
     # ------------------------------------------------------------------
 
     def fetch_snapshot(self) -> MarketSnapshot:
+        # Tier 0: market-information-platform（不导入其代码/库）
+        if self._market_info_client.is_configured():
+            try:
+                snap = self._adapt_market_info_snapshot(
+                    self._market_info_client.fetch_snapshot()
+                )
+                self._metrics.snapshot_ok += 1
+                self._metrics.last_snapshot_at = datetime.now().isoformat()
+                self._metrics.last_snapshot_is_mock = snap.is_mock
+                return snap
+            except Exception as e:  # noqa: BLE001
+                self._metrics.snapshot_fail += 1
+                self._metrics.last_error = str(e)
+                logger.warning("market-info-platform 不可达：%s，回退 Akshare", e)
+
         # Tier 1: akshare (受 circuit breaker 保护)
         if self._ak_available and self._cb_can_attempt_ak():
             try:
@@ -687,7 +715,7 @@ class AkshareClient:
     def fetch_kline(self, symbol: str, days: int = 60) -> list[KlineBar]:
         """拉取单只股票的日K线（最近 N 个交易日）。
 
-        数据源优先级：akshare(eastmoney) → 腾讯财经 → 新浪财经 → mock
+        数据源优先级：market-info-platform → akshare(eastmoney) → 腾讯财经 → 新浪财经 → mock
 
         Args:
             symbol: 6位股票代码，如 "600519"
@@ -696,6 +724,18 @@ class AkshareClient:
         Returns:
             按日期升序排列的 KlineBar 列表；失败或 mock 时返回合成数据
         """
+        # Tier 0: market-information-platform
+        if self._market_info_client.is_configured():
+            try:
+                bars = self._adapt_market_info_kline(
+                    self._market_info_client.fetch_kline(symbol), days=days
+                )
+                self._metrics.kline_ok += 1
+                return bars
+            except Exception as e:  # noqa: BLE001
+                self._metrics.kline_fail += 1
+                logger.warning("market-info-platform kline 不可达 %s: %s，回退", symbol, e)
+
         if self._ak_available and self._cb_can_attempt_ak():
             try:
                 bars = self._fetch_kline_real(symbol, days)
@@ -822,6 +862,99 @@ class AkshareClient:
                 change_pct=round(change * 100, 2),
             ))
             price = close
+        return bars
+
+    # ------------------------------------------------------------------
+    # market-information-platform 适配
+    # ------------------------------------------------------------------
+
+    def _adapt_market_info_snapshot(self, raw: dict) -> MarketSnapshot:
+        """将 market-info-platform 的 snapshot + sectors 响应转为 MarketSnapshot。"""
+        meta = raw.get("meta", {})
+        snapshot_date = date.today()
+        fetched_at = str(meta.get("fetched_at", ""))
+        if fetched_at:
+            try:
+                snapshot_date = date.fromisoformat(fetched_at[:10])
+            except ValueError:
+                pass
+
+        stocks: list[StockQuote] = []
+        for item in raw.get("stocks", []):
+            try:
+                sym = str(item.get("symbol", "")).zfill(6)
+                stocks.append(StockQuote(
+                    symbol=sym,
+                    name=str(item.get("name", "")),
+                    price=float(item.get("price", 0) or 0),
+                    change_pct=float(item.get("change_pct", 0) or 0),
+                    volume=float(item.get("volume", 0) or 0),
+                    turnover=float(item.get("amount", item.get("turnover", 0)) or 0),
+                ))
+            except Exception:  # noqa: BLE001
+                continue
+
+        sectors: list[SectorQuote] = []
+        for s in raw.get("sectors", []):
+            try:
+                top = s.get("top_stock")
+                leading: list[str] = []
+                if top:
+                    leading = [str(top).zfill(6)]
+                sectors.append(SectorQuote(
+                    name=str(s.get("sector_name", "")),
+                    change_pct=float(s.get("change_pct", 0) or 0),
+                    leading_stocks=leading,
+                    turnover=0.0,
+                ))
+            except Exception:  # noqa: BLE001
+                continue
+
+        return MarketSnapshot(
+            snapshot_date=snapshot_date,
+            stocks=stocks,
+            sectors=sectors,
+            is_mock=bool(meta.get("is_mock", False)),
+            data_quality=str(meta.get("data_quality", "unknown")),
+            source=str(meta.get("source", "market_info")),
+        )
+
+    def _adapt_market_info_kline(
+        self, raw: dict, days: int
+    ) -> list[KlineBar]:
+        """将 market-info-platform 的 kline 响应转为 KlineBar 列表。"""
+        meta = raw.get("meta", {})
+        bars_raw = raw.get("bars", [])
+        bars_raw = sorted(bars_raw, key=lambda x: str(x.get("trade_date", "")))
+        bars_raw = bars_raw[-days:]
+
+        bars: list[KlineBar] = []
+        prev_close = 0.0
+        for item in bars_raw:
+            try:
+                close = float(item.get("close", 0) or 0)
+                d = date.fromisoformat(str(item.get("trade_date", ""))[:10])
+                change_pct = (
+                    round((close / prev_close - 1) * 100, 2)
+                    if prev_close > 0 else 0.0
+                )
+                bars.append(KlineBar(
+                    date=d,
+                    open=float(item.get("open", 0) or 0),
+                    high=float(item.get("high", 0) or 0),
+                    low=float(item.get("low", 0) or 0),
+                    close=close,
+                    volume=float(item.get("volume", 0) or 0),
+                    turnover=0.0,
+                    turnover_rate=0.0,
+                    change_pct=change_pct,
+                    is_mock=bool(meta.get("is_mock", False)),
+                    data_quality=str(meta.get("data_quality", "unknown")),
+                    source=str(meta.get("source", "market_info")),
+                ))
+                prev_close = close
+            except Exception:  # noqa: BLE001
+                continue
         return bars
 
 

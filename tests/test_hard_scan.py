@@ -79,6 +79,12 @@ def test_data_quality_gates() -> None:
     assert mock_deg["data_quality"] == "degraded"
     assert blocks_new_entries(mock_deg)
 
+    stale = classify_market_quality(
+        is_mock=False, has_sectors=True, hot_sectors=["银行"], upstream_quality="stale",
+    )
+    assert stale["data_quality"] == "degraded"
+    assert blocks_new_entries(stale)
+
 
 class _FakeStore:
     def __init__(self, rows: list[dict]) -> None:

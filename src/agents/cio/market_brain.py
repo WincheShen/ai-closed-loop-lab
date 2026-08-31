@@ -220,6 +220,7 @@ class MarketBrain:
                 "none" if not hot_sectors
                 else ("emappdata" if not self._last_snapshot.sectors else "eastmoney")
             ),
+            upstream_quality=self._last_snapshot.data_quality,
         )
 
         # LLM 综合判断
@@ -234,6 +235,13 @@ class MarketBrain:
         )
 
         max_pos = self.persona.max_total_position_for(regime)
+
+        # 平台 force_defend 干预优先级最高，覆盖 LLM/规则输出的 posture 与仓位
+        force_defend = self._check_force_defend()
+        if force_defend:
+            posture = "defend"
+            max_pos = 0.0
+            evidence["force_defend"] = force_defend
 
         result = MarketRegimeSnapshot(
             snapshot_id=f"REG-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
@@ -500,6 +508,32 @@ class MarketBrain:
                 for p in positions[:5]
             )
         )
+
+    def _check_force_defend(self) -> dict | None:
+        """读取 market-info-platform 的 /api/intervention/active。
+
+        仅对 approved 且 active 的 force_defend 做出响应；
+        disable_source 不由 ai-lab 重复执行。
+        """
+        if not self.akshare._market_info_client.is_configured():
+            return None
+        try:
+            records = self.akshare._market_info_client.active_interventions()
+            for rec in records:
+                if rec.get("type") == "force_defend" and rec.get("is_active"):
+                    return {
+                        "source": "market_info_platform",
+                        "type": "force_defend",
+                        "id": rec.get("id"),
+                        "reason": rec.get("reason", ""),
+                        "submitted_by": rec.get("submitted_by", ""),
+                        "submitted_at": rec.get("submitted_at", ""),
+                        "reviewed_by": rec.get("reviewed_by"),
+                        "reviewed_at": rec.get("reviewed_at"),
+                    }
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning("读取 intervention/active 失败：%s", e)
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -28,10 +28,13 @@ def classify_market_quality(
     hot_sectors: list[str] | None,
     ak_degraded: bool = False,
     hot_source: str | None = None,
+    upstream_quality: str | None = None,
 ) -> dict[str, str]:
     # 东财挂了但快照是真票（新浪）→ no_sector/full，不打 degraded。
     # degraded 只表示没有真实行情（mock）。ak_degraded 仅在 mock 时抬成 degraded。
-    if is_mock:
+    if upstream_quality in {QUALITY_DEGRADED, QUALITY_MOCK, QUALITY_UNAVAILABLE, "stale"}:
+        quality = QUALITY_DEGRADED if upstream_quality == "stale" else upstream_quality
+    elif is_mock:
         quality = QUALITY_DEGRADED if ak_degraded else QUALITY_MOCK
     elif not has_sectors and not (hot_sectors or []):
         quality = QUALITY_NO_SECTOR
