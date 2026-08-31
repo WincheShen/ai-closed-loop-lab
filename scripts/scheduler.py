@@ -40,7 +40,7 @@ from src.agents.reviewer.hard_scan import run_hard_scan
 from src.agents.reviewer.intraday_loop import run_intraday_review
 from src.agents.reviewer.stale_position_check import check_stale_positions
 from src.graph.workflow import run_daily_pipeline, run_weekly_feedback
-from src.infra.heartbeat import write_heartbeat
+from src.infra.heartbeat import start_heartbeat
 from src.infra.logger import setup_logging
 from src.infra.notify import notify_ops
 
@@ -568,22 +568,15 @@ def run_scheduler() -> None:
     signal_mod.signal(signal_mod.SIGTERM, _signal_handler)
     signal_mod.signal(signal_mod.SIGINT, _signal_handler)
 
-    last_heartbeat = 0
+    heartbeat_stop, heartbeat_thread = start_heartbeat()
+    logger.info("scheduler heartbeat — independent thread started")
 
     while not shutdown_requested:
         schedule.run_pending()
-
-        now = time.time()
-        if now - last_heartbeat > 300:
-            logger.info("scheduler heartbeat — alive")
-            last_heartbeat = now
-            try:
-                write_heartbeat()
-            except OSError:
-                pass
-
         time.sleep(30)
 
+    heartbeat_stop.set()
+    heartbeat_thread.join(timeout=5)
     logger.info("调度器已停止")
 
 

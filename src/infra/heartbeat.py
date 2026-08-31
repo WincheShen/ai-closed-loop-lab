@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,22 @@ def write_heartbeat(path: Path | None = None) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
     return p
+
+
+def start_heartbeat(interval_sec: float = 60) -> tuple[threading.Event, threading.Thread]:
+    stopped = threading.Event()
+
+    def run() -> None:
+        while not stopped.is_set():
+            try:
+                write_heartbeat()
+            except OSError:
+                pass
+            stopped.wait(interval_sec)
+
+    thread = threading.Thread(target=run, name="scheduler-heartbeat", daemon=True)
+    thread.start()
+    return stopped, thread
 
 
 def cooldown_ok(marker: Path, cooldown_sec: int) -> bool:
