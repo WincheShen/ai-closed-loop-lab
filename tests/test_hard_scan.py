@@ -4,6 +4,7 @@ from __future__ import annotations
 from src.agents.reviewer.hard_rules import evaluate_hard_exit, position_pnl_pct
 from src.agents.reviewer.hard_scan import expire_stale_signals
 from src.agents.strategist.signal_generator import (
+    _ALLOWED_STRATEGY_IDS,
     _BANNED_STRATEGY_IDS,
     _infer_strategy_id,
     _normalize_strategy_name,
@@ -50,6 +51,24 @@ def test_banned_strategy_variants() -> None:
     assert _infer_strategy_id(_normalize_strategy_name(raw)) in _BANNED_STRATEGY_IDS
 
 
+def test_strategy_whitelist() -> None:
+    """白名单机制：只有允许的 strategy_id 能通过。"""
+    # volume_breakout 不在白名单
+    assert "volume_breakout" not in _ALLOWED_STRATEGY_IDS
+    # unknown 不在白名单
+    assert "unknown" not in _ALLOWED_STRATEGY_IDS
+    # 允许的策略
+    for allowed in ("hot_sector_pullback", "value_investing", "bottom_reversal",
+                     "mean_reversion", "defensive_bluechip", "institutional_accumulation"):
+        assert allowed in _ALLOWED_STRATEGY_IDS
+    # LLM 编造的策略名归一化后不在白名单
+    assert _infer_strategy_id("量能配合突破支撑位") not in _ALLOWED_STRATEGY_IDS
+    assert _infer_strategy_id("短线打板") not in _ALLOWED_STRATEGY_IDS
+    # 合法策略名归一化后在白名单
+    assert _infer_strategy_id("热点板块前排回踩") in _ALLOWED_STRATEGY_IDS
+    assert _infer_strategy_id("价值投资") in _ALLOWED_STRATEGY_IDS
+
+
 def test_data_quality_gates() -> None:
     mock = classify_market_quality(
         is_mock=True, has_sectors=False, hot_sectors=[], ak_degraded=False,
@@ -85,6 +104,12 @@ def test_data_quality_gates() -> None:
     assert stale["data_quality"] == "degraded"
     assert blocks_new_entries(stale)
 
+    # regime 为 None（MarketBrain 完全失败）时必须禁止开仓
+    assert blocks_new_entries(None)
+    assert blocks_new_entries({})
+    assert strategy_blocked_by_quality("hot_sector_pullback", None)
+    assert strategy_blocked_by_quality("value_investing", None)
+
 
 class _FakeStore:
     def __init__(self, rows: list[dict]) -> None:
@@ -96,7 +121,6 @@ class _FakeStore:
 
     def execute(self, sql, params=None):
         status = "pending" if "pending" in sql else "active"
-        days = 5 if "pending" in sql else 2
         # 简化：调用方分别查 pending / active，测试直接按 status 过滤
         self._last = [r for r in self.rows if r["status"] == status]
         return self

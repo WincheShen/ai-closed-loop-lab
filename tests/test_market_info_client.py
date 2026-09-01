@@ -17,6 +17,10 @@ from src.stock_analyzer.data_source.akshare_client import (
     SectorQuote,
     StockQuote,
 )
+from src.stock_analyzer.data_source.market_info_client import (
+    MarketInfoClient,
+    _CircuitBreaker,
+)
 
 
 @dataclass
@@ -245,3 +249,37 @@ def test_force_defend_overrides_posture_and_position(monkeypatch):
     assert result.evidence["force_defend"]["type"] == "force_defend"
     # disable_source 不应导致额外动作，result 不是 disable 触发
     assert result.evidence["force_defend"]["type"] != "disable_source"
+
+
+def test_circuit_breaker_opens_after_threshold():
+    """连续 3 次失败后 circuit breaker 打开，快速跳过而非等 15s 超时。"""
+    cb = _CircuitBreaker(threshold=3, recovery_seconds=60)
+    assert cb.can_attempt()
+    cb.record_failure()
+    cb.record_failure()
+    assert cb.can_attempt()  # 2 次未到阈值
+    cb.record_failure()
+    assert not cb.can_attempt()  # 3 次到阈值
+    assert cb.is_open
+    cb.record_success()
+    assert cb.can_attempt()  # reset
+    assert not cb.is_open
+
+
+def test_circuit_breaker_in_client(monkeypatch):
+    """MarketInfoClient 连续失败后 circuit breaker 快速拒绝。"""
+    client = MarketInfoClient(base_url="http://localhost:9999", timeout=1)
+
+    def raise_err(*args, **kwargs):
+        raise requests.ConnectionError("refused")
+
+    monkeypatch.setattr(client._session, "get", raise_err)
+
+    # 前 3 次调用实际发请求（并失败）
+    for _ in range(3):
+        with pytest.raises(requests.ConnectionError):
+            client._get("/api/health")
+
+    # 第 4 次直接被 circuit breaker 拒绝，不再等超时
+    with pytest.raises(ConnectionError, match="circuit breaker OPEN"):
+        client._get("/api/health")

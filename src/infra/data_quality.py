@@ -53,9 +53,12 @@ def classify_market_quality(
 
 
 def blocks_new_entries(regime: dict[str, Any] | None) -> bool:
-    """mock / degraded / unavailable → 禁止新开仓。"""
+    """mock / degraded / unavailable / None → 禁止新开仓。
+
+    regime 为 None 说明 MarketBrain 完全失败，按"看不到路不开仓"处理。
+    """
     if not regime:
-        return False
+        return True
     q = regime.get("data_quality") or ""
     if q in {QUALITY_MOCK, QUALITY_DEGRADED, QUALITY_UNAVAILABLE}:
         return True
@@ -67,8 +70,8 @@ def blocks_new_entries(regime: dict[str, Any] | None) -> bool:
 def strategy_blocked_by_quality(strategy_id: str, regime: dict[str, Any] | None) -> bool:
     if blocks_new_entries(regime):
         return True
-    if not regime:
-        return False
+    # blocks_new_entries(None) is True so regime is guaranteed non-None here
+    assert regime is not None
     q = regime.get("data_quality") or ""
     hot = regime.get("hot_sectors") or []
     if strategy_id in HOT_SECTOR_STRATEGIES and (

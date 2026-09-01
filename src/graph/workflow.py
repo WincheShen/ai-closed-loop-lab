@@ -20,7 +20,7 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
-from src.graph.enums import POSTURE_EXIT
+from src.graph.enums import POSTURE_DEFEND, POSTURE_EXIT
 
 from src.agents.cio.market_brain import run_market_brain_node
 from src.agents.explorer.scanner import run_discovery_node
@@ -50,7 +50,7 @@ def _route_after_market_brain(state: TradingState) -> str:
         return END
     regime = state.get("market_regime") or {}
     posture = regime.get("recommended_posture", "")
-    if posture == POSTURE_EXIT or regime.get("data_quality") == "unavailable":
+    if posture in (POSTURE_EXIT, POSTURE_DEFEND) or regime.get("data_quality") == "unavailable":
         logger.warning(
             "MarketBrain posture=%s (regime=%s quality=%s)，禁止开新仓，流程提前结束",
             posture, regime.get("regime"), regime.get("data_quality"),

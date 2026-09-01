@@ -48,7 +48,20 @@ _STRATEGY_NAME_TO_ID = {
     "主力吸筹": "institutional_accumulation",
 }
 
-# 绝对禁用策略黑名单 — 无论 LLM 输出什么，含有这些关键词的信号一律拦截
+# ── 策略白名单 ──
+# 只有这些 strategy_id 允许通过。不在白名单内的一律拦截。
+# 白名单比黑名单安全：LLM 无法通过创造新名字绕过。
+_ALLOWED_STRATEGY_IDS = frozenset({
+    "hot_sector_pullback",
+    "defensive_bluechip",
+    "mean_reversion",
+    "bottom_reversal",
+    "value_investing",
+    "moat_quality",
+    "institutional_accumulation",
+})
+
+# 保留黑名单用于向后兼容（测试引用）和日志追踪
 _BANNED_STRATEGY_KEYWORDS = {"放量突破", "volume_breakout", "突破前高", "追涨"}
 _BANNED_STRATEGY_IDS = {"volume_breakout"}
 
@@ -730,21 +743,21 @@ class StrategistEngine:
                 )
                 result["position_pct"] = discounted_pct
 
-        # ── P1 硬拦截: 先 normalize 再按 strategy_id 拒绝（防变体绕过）──
+        # ── 策略白名单硬拦截 ──
+        # 先 normalize 再检查白名单。不在白名单的一律拒绝。
+        # 比黑名单安全：LLM 无法通过创造新策略名绕过。
         strategy_name = _normalize_strategy_name(result.get("strategy", "") or "")
         result["strategy"] = strategy_name
         strategy_id_check = _infer_strategy_id(strategy_name)
-        if (
-            strategy_id_check in _BANNED_STRATEGY_IDS
-            or any(kw in (result.get("strategy") or "") for kw in _BANNED_STRATEGY_KEYWORDS)
-        ):
+        if strategy_id_check not in _ALLOWED_STRATEGY_IDS:
             self.logger.warning(
-                "[%s %s] BLOCKED — 被禁策略「%s」id=%s，强制 PASS",
+                "[%s %s] BLOCKED — 策略「%s」(id=%s) 不在白名单 %s 内，强制 PASS",
                 symbol, name, strategy_name, strategy_id_check,
+                sorted(_ALLOWED_STRATEGY_IDS),
             )
             return None
 
-        from src.infra.data_quality import strategy_blocked_by_quality, blocks_new_entries
+        from src.infra.data_quality import blocks_new_entries, strategy_blocked_by_quality
         if blocks_new_entries(self.market_regime):
             self.logger.warning(
                 "[%s %s] PASS — 数据质量=%s，禁止新开仓",
@@ -843,6 +856,20 @@ class StrategistEngine:
             entry_condition = "pullback"
         else:
             entry_condition = "immediate"
+
+        # ── 条件单入场价偏离度检查 ──
+        # 历史数据: 68% 的 pending 信号永远不触发，因为 entry_price 设得太理想。
+        # 对 breakout/pullback 条件单，入场价偏离当前价 >3% 直接拒绝。
+        MAX_PENDING_ENTRY_DEVIATION = 0.03
+        if entry_condition in ("breakout", "pullback") and current_price > 0 and entry_price > 0:
+            pending_deviation = abs(entry_price - current_price) / current_price
+            if pending_deviation > MAX_PENDING_ENTRY_DEVIATION:
+                self.logger.warning(
+                    "[%s %s] REJECT — 条件单 %s 入场价 %.2f 偏离当前价 %.2f 达 %.1f%% (>%.0f%%)，不现实",
+                    symbol, name, entry_condition, entry_price, current_price,
+                    pending_deviation * 100, MAX_PENDING_ENTRY_DEVIATION * 100,
+                )
+                return None
 
         signal: TradeSignal = {
             "signal_id": f"SIG-{uuid.uuid4().hex[:8].upper()}",
@@ -993,11 +1020,15 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
             ],
         }
 
-    # ── P4: 短线人格在 bear/panic / defend/exit 下跳过信号生成──
+    # ── 短线人格在弱势环境下跳过信号生成，节省无效 LLM 调用 ──
+    # 历史数据：regime 防守占被拒信号 51%，这些信号全部浪费。
+    # 覆盖: bear/panic regime 或 defend/exit/observe posture。
+    # 价值人格不受此限制——弱市可能是价值投资建仓窗口。
     regime_label = market_regime.get("regime", "")
     posture = market_regime.get("recommended_posture", "")
     if not engine._is_value_persona() and (
-        regime_label in ("bear", "panic") or posture in ("defend", "exit")
+        regime_label in ("bear", "panic")
+        or posture in ("defend", "exit", "observe")
     ):
         logger.info(
             "[Strategist] 短线人格在 %s/%s 市场下跳过信号生成 (节省 LLM 调用)",
@@ -1005,9 +1036,9 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
         )
         return {
             "trade_signals": [],
-            "risk_assessment": {"skipped": f"short_term_skip_{regime_label}"},
+            "risk_assessment": {"skipped": f"short_term_skip_{regime_label}_{posture}"},
             "logs": state.get("logs", []) + [
-                f"[Strategist] regime={regime_label} 短线人格跳过 (bear/panic 下不生成信号)"
+                f"[Strategist] regime={regime_label} posture={posture} 短线人格跳过"
             ],
         }
 
