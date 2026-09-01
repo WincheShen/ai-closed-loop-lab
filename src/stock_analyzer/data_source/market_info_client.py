@@ -125,9 +125,11 @@ class MarketInfoClient:
         quality = snapshot.data_quality
         sector_quality = sectors.data_quality
         if quality in {"stale", "degraded", "mock", "unavailable"}:
+            # snapshot 本身有问题 → 直接传递
             combined_quality = quality
         elif sector_quality in {"stale", "degraded", "mock", "unavailable"}:
-            combined_quality = sector_quality
+            # snapshot 正常但 sectors 不可用 → 降级为 no_sector（不阻止选股）
+            combined_quality = "no_sector"
         elif not sector_items or sector_quality == "no_sector":
             combined_quality = "no_sector"
         else:
