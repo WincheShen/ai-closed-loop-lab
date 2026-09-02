@@ -125,16 +125,25 @@ class ValueStockPool:
             client = AkshareClient(allow_mock_fallback=True)
             snapshot = client.fetch_snapshot()
 
-            # 初筛：市值+估值
-            candidates = [
-                s for s in snapshot.stocks
-                if not s.is_st
-                and s.market_cap_yi is not None and s.market_cap_yi >= 100
-                and s.pe_ttm is not None and 0 < s.pe_ttm <= 50
-            ]
+            # 初筛：市值+估值（数据缺失时放宽，不直接过滤）
+            has_valuation = any(s.market_cap_yi is not None for s in snapshot.stocks)
+            if has_valuation:
+                candidates = [
+                    s for s in snapshot.stocks
+                    if not s.is_st
+                    and s.market_cap_yi is not None and s.market_cap_yi >= 100
+                    and s.pe_ttm is not None and 0 < s.pe_ttm <= 50
+                ]
+            else:
+                # 数据源（如 Sina）不提供市值/PE → 仅排除 ST，后续靠基本面精筛
+                logger.warning("ValueStockPool: 快照无市值/PE 数据，降级为仅排除 ST")
+                candidates = [s for s in snapshot.stocks if not s.is_st]
 
-            # 取市值前 200 只进行基本面数据填充
-            candidates.sort(key=lambda s: s.market_cap_yi or 0, reverse=True)
+            # 取前 200 只进行基本面数据填充（按市值排序，无市值时按成交额）
+            if has_valuation:
+                candidates.sort(key=lambda s: s.market_cap_yi or 0, reverse=True)
+            else:
+                candidates.sort(key=lambda s: s.turnover or 0, reverse=True)
             candidates = candidates[:200]
 
             # 填充基本面数据（200只以内，FundamentalClient 可全量处理）
