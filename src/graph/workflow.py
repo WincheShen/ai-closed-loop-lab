@@ -37,12 +37,51 @@ from src.infra.logger import get_agent_logger, setup_logging
 logger = get_agent_logger("workflow", "init")
 
 
+def _save_signals_to_watchlist(signals: list[dict], state: TradingState) -> None:
+    """defend 模式下将 Strategist 产出的信号存入 watchlist 待观察。"""
+    try:
+        from src.agents.explorer.watchlist import WatchlistManager
+        wm = WatchlistManager(session_id=state.get("session_id", "defend"))
+        store = wm.brain.store
+        existing = set(store.get_watchlist_symbols())
+        added = 0
+        for sig in signals:
+            symbol = sig.get("symbol", "")
+            if not symbol or symbol in existing:
+                continue
+            item = {
+                "watch_id": f"W-{uuid.uuid4().hex[:8].upper()}",
+                "symbol": symbol,
+                "name": sig.get("name", ""),
+                "sector": sig.get("sector", ""),
+                "status": "watching",
+                "thesis": sig.get("rationale", "")[:200],
+                "entry_condition": f"price_below:{sig['entry_price']}" if sig.get("entry_price") else "",
+                "target_price": sig.get("target_price"),
+                "stop_loss": sig.get("stop_loss"),
+                "strategy_id": sig.get("strategy_id", ""),
+                "source": "defend_watchlist",
+                "added_at": datetime.now().isoformat(),
+                "last_price": sig.get("current_price") or sig.get("entry_price"),
+            }
+            store.add_to_watchlist(item)
+            existing.add(symbol)
+            added += 1
+        logger.info("defend watchlist: 存入 %d 条信号 (跳过 %d 已存在)", added, len(signals) - added)
+    except Exception:
+        logger.exception("defend watchlist 写入失败")
+
+
 # =============================================================================
 # 条件路由函数
 # =============================================================================
 
 def _route_after_market_brain(state: TradingState) -> str:
-    """MarketBrain 后路由：posture=exit / 数据不可用时不开新仓。"""
+    """MarketBrain 后路由：posture=exit / 数据不可用时不开新仓。
+
+    defend 模式下仍允许 Explorer+Strategist 运行（选股分析），
+    但在 RiskGovernor 之后拦截，信号进 watchlist 而非建仓。
+    """
     if state.get("errors") and any(
         e.get("node") == "market_brain" for e in (state.get("errors") or [])
     ):
@@ -50,12 +89,17 @@ def _route_after_market_brain(state: TradingState) -> str:
         return END
     regime = state.get("market_regime") or {}
     posture = regime.get("recommended_posture", "")
-    if posture in (POSTURE_EXIT, POSTURE_DEFEND) or regime.get("data_quality") == "unavailable":
+    if posture == POSTURE_EXIT or regime.get("data_quality") == "unavailable":
         logger.warning(
             "MarketBrain posture=%s (regime=%s quality=%s)，禁止开新仓，流程提前结束",
             posture, regime.get("regime"), regime.get("data_quality"),
         )
         return END
+    if posture == POSTURE_DEFEND:
+        logger.info(
+            "MarketBrain posture=defend (regime=%s)，允许选股分析但不建仓",
+            regime.get("regime"),
+        )
     return "explorer"
 
 
@@ -76,11 +120,24 @@ def _route_after_strategist(state: TradingState) -> str:
 
 
 def _route_after_risk_governor(state: TradingState) -> str:
-    """风控后路由：有通过的信号才进入执行。"""
-    if state.get("trade_signals"):
-        return "executioner"
-    logger.info("RiskGovernor 拒绝了所有信号，跳过执行")
-    return END
+    """风控后路由：有通过的信号才进入执行。
+
+    defend 模式下信号不进入 Executioner，而是存入 watchlist 待观察。
+    """
+    signals = state.get("trade_signals") or []
+    if not signals:
+        logger.info("RiskGovernor 拒绝了所有信号，跳过执行")
+        return END
+    regime = state.get("market_regime") or {}
+    posture = regime.get("recommended_posture", "")
+    if posture == POSTURE_DEFEND:
+        _save_signals_to_watchlist(signals, state)
+        logger.info(
+            "posture=defend，%d 条信号已存入 watchlist 待观察，不建仓",
+            len(signals),
+        )
+        return END
+    return "executioner"
 
 
 def _route_after_executioner(state: TradingState) -> str:
