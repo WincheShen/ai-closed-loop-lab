@@ -1020,15 +1020,14 @@ def run_strategy_node(state: TradingState) -> dict[str, Any]:
             ],
         }
 
-    # ── 短线人格在弱势环境下跳过信号生成，节省无效 LLM 调用 ──
-    # 历史数据：regime 防守占被拒信号 51%，这些信号全部浪费。
-    # 覆盖: bear/panic regime 或 defend/exit/observe posture。
-    # 价值人格不受此限制——弱市可能是价值投资建仓窗口。
+    # ── 短线人格在极端弱势环境下跳过信号生成，节省无效 LLM 调用 ──
+    # defend 模式仍生成信号——workflow 层保证不建仓，信号进 watchlist 观察。
+    # 仅 panic regime 或 exit posture 才完全跳过。
     regime_label = market_regime.get("regime", "")
     posture = market_regime.get("recommended_posture", "")
     if not engine._is_value_persona() and (
-        regime_label in ("bear", "panic")
-        or posture in ("defend", "exit", "observe")
+        regime_label == "panic"
+        or posture in ("exit", "observe")
     ):
         logger.info(
             "[Strategist] 短线人格在 %s/%s 市场下跳过信号生成 (节省 LLM 调用)",
