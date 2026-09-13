@@ -106,7 +106,7 @@ if [[ "$RESTART" -eq 1 ]]; then
   echo "==> restart web + scheduler (no image rebuild)"
   "${SSH_NAS[@]}" --sudo -c "sh -c '
 set -e
-/usr/local/bin/docker restart ai-lab-web ai-lab-scheduler
+/usr/local/bin/docker restart ai-lab-web ai-lab-scheduler ai-lab-trading-agent 2>/dev/null || /usr/local/bin/docker restart ai-lab-web ai-lab-scheduler
 /usr/local/bin/docker-compose -f ${COMPOSE_FILE} --profile scheduler up -d
 /usr/local/bin/docker ps --filter name=ai-lab --format \"{{.Names}} {{.Status}}\"
 '"
