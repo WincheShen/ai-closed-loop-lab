@@ -37,6 +37,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.environ.get("TAS_PORT", "8001")))
     args = parser.parse_args()
 
+    # Pre-apply resilient dataflow patches
+    try:
+        from trading_agent_service.analysis.patch_cn_dataflows import apply_dataflow_patches
+        apply_dataflow_patches()
+    except Exception as e:
+        logging.warning("Could not pre-apply dataflow patches: %s", e)
+
     uvicorn.run(
         "trading_agent_service.api.server:app",
         host=args.host, port=args.port, reload=False,

@@ -123,6 +123,14 @@ def _get_graph() -> Any:
     with _graph_lock:
         if _cached_graph is not None:
             return _cached_graph
+
+        # Apply resilient dataflow patches before graph creation
+        try:
+            from .patch_cn_dataflows import apply_dataflow_patches
+            apply_dataflow_patches()
+        except Exception as e:
+            logger.warning("Could not apply dataflow patches: %s", e)
+
         from tradingagents.graph.trading_graph import TradingAgentsGraph  # type: ignore
 
         cfg = _build_config()
@@ -143,15 +151,12 @@ def reset_graph() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stock metadata loader（返回默认值，TradingAgents 内部会自己拉数据）
+# Stock metadata loader
 # ---------------------------------------------------------------------------
 
 def _load_stock_meta(symbol: str) -> dict:
-    """返回默认的股票元数据。
-
-    TradingAgents 内部会自己拉取数据，这里只提供默认值。
-    """
-    return {
+    """获取股票基础元数据（名称、当前价、行业等）。"""
+    meta = {
         "name": f"代码{symbol}",
         "current_price": 0.0,
         "industry": "",
@@ -160,6 +165,35 @@ def _load_stock_meta(symbol: str) -> dict:
         "pb": None,
         "roe": None,
     }
+
+    # 尝试从腾讯实时行情获取名称和最新价
+    try:
+        import urllib.request
+        from .patch_cn_dataflows import to_akshare_code
+        code = to_akshare_code(symbol)
+        prefix = "sh" if code.startswith(("6", "9")) else "sz"
+        url = f"http://qt.gtimg.cn/q={prefix}{code}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            raw = resp.read().decode("gbk", errors="ignore")
+        fields = raw.split("~")
+        if len(fields) > 50:
+            name = fields[1].strip()
+            price = float(fields[3]) if fields[3] else 0.0
+            total_cap = float(fields[45]) if fields[45] else None
+            pe_ttm = float(fields[52]) if fields[52] else None
+            pb = float(fields[46]) if fields[46] else None
+            if name:
+                meta["name"] = name
+            if price > 0:
+                meta["current_price"] = price
+            meta["market_cap_yi"] = total_cap
+            meta["pe_ttm"] = pe_ttm
+            meta["pb"] = pb
+    except Exception as e:
+        logger.debug("Failed to fetch live stock meta for %s: %s", symbol, e)
+
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +209,11 @@ class RealTradingAgentsAdapter(AnalyzerAdapter):
         try:
             import tradingagents  # type: ignore  # noqa: F401
             self.available = True
+            try:
+                from .patch_cn_dataflows import apply_dataflow_patches
+                apply_dataflow_patches()
+            except Exception as e:
+                logger.warning("Could not apply dataflow patches: %s", e)
         except ImportError:
             logger.warning(
                 "tradingagents 包未安装。安装方式：\n"
