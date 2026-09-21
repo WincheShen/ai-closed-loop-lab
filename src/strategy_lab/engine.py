@@ -200,6 +200,7 @@ def run_backtest(
     hot_by_date: dict[str, tuple[str, ...]] | None = None,
     pe_of: dict[str, float] | None = None,
     oos_start: str | None = None,
+    hold_days: int = 10,
 ) -> BacktestReport:
     all_fills: list[FillRecord] = []
     expired = 0
@@ -211,6 +212,7 @@ def run_backtest(
             sector=(sector_of or {}).get(symbol, ""),
             hot_by_date=hot_by_date,
             pe_ttm=(pe_of or {}).get(symbol, 0.0),
+            hold_days=hold_days,
         )
         all_fills.extend(fills)
         expired += exp

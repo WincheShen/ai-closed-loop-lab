@@ -59,6 +59,7 @@ def main() -> int:
     parser.add_argument("--symbols", default="")
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--synthetic", action="store_true", help="用确定性合成行情（不算研究过闸）")
+    parser.add_argument("--hold-days", type=int, default=0, help="覆盖默认持仓天数")
     args = parser.parse_args()
 
     symbols = [s for s in args.symbols.split(",") if s] or DEFAULT_UNIVERSE.get(args.strategy, [])
@@ -78,8 +79,11 @@ def main() -> int:
         days = {str(b.date) for bars in series.values() for b in bars}
         hot_by_date = {d: ("半导体",) for d in days}
     pe_of = {sym: 18.0 for sym in series} if args.strategy == "value_investing" else None
+    # 隔夜动量策略默认持仓 2 日；其余沿用引擎默认 10 日
+    hold_days = args.hold_days or (2 if args.strategy == "ultra_short_momentum" else 10)
     report = run_backtest(
         series, args.strategy, sector_of=sector_of, hot_by_date=hot_by_date, pe_of=pe_of,
+        hold_days=hold_days,
     )
     gate = gates_to_dict(report)
     if args.synthetic:

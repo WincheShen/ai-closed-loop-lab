@@ -15,7 +15,12 @@ NAS_HOST="${NAS_HOST:-192.168.3.73}"
 NAS_PATH="${NAS_PATH:-/volume1/docker/ai-lab}"
 COMPOSE_FILE="$NAS_PATH/docker-compose.yml"
 STAGE="/var/services/homes/kingSY_9/ai-lab-deploy.tgz"
-SSH_NAS=(python3 "$ROOT/scripts/ssh_nas.py")
+PYTHON="${PYTHON:-python3}"
+# 如果系统 python3 < 3.10，优先尝试 miniforge/conda
+if command -v /opt/homebrew/Caskroom/miniforge/base/envs/ai_agent/bin/python &>/dev/null; then
+  PYTHON="/opt/homebrew/Caskroom/miniforge/base/envs/ai_agent/bin/python"
+fi
+SSH_NAS=("$PYTHON" "$ROOT/scripts/ssh_nas.py")
 
 RESTART=1
 INSTALL_WATCHDOG=1
@@ -53,7 +58,7 @@ COPYFILE_DISABLE=1 tar -czf "$TMP" \
 ls -lh "$TMP"
 
 echo "==> upload $STAGE"
-python3 - <<PY
+"$PYTHON" - <<PY
 import pathlib, subprocess, sys
 sys.path.insert(0, "scripts")
 from ssh_nas import get_keychain_password

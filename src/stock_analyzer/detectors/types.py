@@ -18,6 +18,9 @@ class BarContext:
     inst_net_buy_wan: float = 0.0
     pe_ttm: float = 0.0
     turnover_rate: float = 0.0
+    name: str = ""
+    # 全市场上涨家数占比（0~1）；<0 表示未知，检测器应跳过宽度闸门
+    up_ratio: float = -1.0
 
 
 @dataclass(frozen=True)

@@ -123,6 +123,97 @@ personas:
           weight: 0.5
 
   # ═══════════════════════════════════════════
+  # 隔夜极速动量人格（高弹性 T+1 轮动）
+  # enabled: false — 2024-09 起两年真实日线回测未过 G-bt-3/4/5
+  # (wr=44.8% pf=0.95)，保持休眠，调度器不会为其跑管线；
+  # 过闸后改为 enabled: true 再部署启用。
+  # ═══════════════════════════════════════════
+  - id: ultra_short_momentum_v1
+    enabled: false
+    version: "v1.0"
+    name: 极速动量隔夜客
+    capital: 300000  # 30万独立子账户
+    philosophy:
+      - 只在高弹性战场作战（创业板/科创板/北交所/深市题材股）
+      - 尾盘确认后买入，赚次日早盘情绪溢价，持股不超过 1-2 天
+      - 认错极快，跌破止损立即离场，不与亏损仓位纠缠
+      - 市场宽度恶化时强制空仓，拒绝接飞刀
+
+    preferred_holding_days: [1, 2]
+
+    preferred_setups:
+      - 强趋势放量延续（5日/20日动量确认 + 收盘强势）
+      - 强势股回踩企稳（20日强势股自10日高点回撤4%-15%）
+      - 高波动题材股的隔夜情绪溢价
+
+    avoid_setups:
+      - ST、退市整理股与沪市主板低弹性标的
+      - 日成交额低于 3 亿的流动性不足标的
+      - 当日振幅低于 5% 的僵尸股
+      - 市场上涨家数占比低于 30% 的系统性弱势日
+      - 单日暴跌超过 7% 的下跌中继
+
+    risk_limits:
+      max_single_position_pct: 0.20
+      max_sector_concentration_pct: 0.50
+      max_total_position_pct:
+        bull: 0.80
+        neutral: 0.30
+        bear: 0.15
+        panic: 0.00
+        rebound: 0.60
+      default_stop_loss_pct: 0.025   # 极窄止损
+      default_take_profit_pct: 0.08  # 次日冲高兑现
+      max_daily_loss_pct: 0.02
+      consecutive_loss_limit: 2      # 连亏 2 笔降频冷静
+
+    # 策略 regime 兼容性 — 只跑专属检测器，panic 强制禁开新仓
+    strategy_regime_compatibility:
+      ultra_short_momentum:
+        compatible: [bull, rebound, neutral]
+        forbidden: [panic]
+        degraded: [bear]
+
+    # 选股规则（P1 多人格差异化选股）
+    stock_selection_rules:
+      technical_filters:
+        - indicator: recent_5d_change_pct
+          params:
+            min: 3.0
+            max: 30.0
+          weight: 1.5
+        - indicator: volume_surge
+          params:
+            min_ratio: 1.2
+          weight: 1.5
+        - indicator: price_vs_ma20
+          condition: above
+          weight: 1.0
+
+      # K线数据周期 - 隔夜策略只需短周期
+      kline_lookback_days: 30
+
+      # 关注热点板块（题材/主线是核心驱动）
+      follow_hot_sectors: true
+      hot_sector_weight: 1.5
+
+      # 不看基本面
+      fundamental_filters: []
+
+    social_style:
+      tone: 冷静、敏捷、纪律型
+      avoid:
+        - 夸张收益承诺
+        - 无依据喊单
+        - 持仓恋战
+        - 亏损后情绪化加仓
+      prefer:
+        - 真实复盘
+        - 次日溢价逻辑
+        - 风险提示
+        - 空仓纪律说明
+
+  # ═══════════════════════════════════════════
   # 段永平 - 价值投资，长期持有
   # ═══════════════════════════════════════════
   - id: duan_yongping_v1

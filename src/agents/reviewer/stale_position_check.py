@@ -17,6 +17,7 @@ DEFAULT_STALE_THRESHOLD_DAYS = 5
 # 人格级别的 stale 阈值 — 价值投资允许更长持仓期
 _PERSONA_STALE_THRESHOLDS: dict[str, int] = {
     "short_term_hot_rotation_v1": 5,    # 短线: 5 天
+    "ultra_short_momentum_v1": 1,       # 隔夜动量: 1 天即超期
     "warren_buffett_v1": 90,            # 巴菲特: 90 天
     "duan_yongping_v1": 90,             # 段永平: 90 天
 }

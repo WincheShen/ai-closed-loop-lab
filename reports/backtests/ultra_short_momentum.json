@@ -1,0 +1,57 @@
+{
+  "strategy_id": "ultra_short_momentum",
+  "n": 443,
+  "wins": 203,
+  "losses": 240,
+  "win_rate": 0.4582392776523702,
+  "profit_factor": 0.947,
+  "avg_pnl_pct": -0.127,
+  "max_drawdown_pct": -228.574,
+  "oos_n": 102,
+  "oos_win_rate": 0.5196078431372549,
+  "expired": 0,
+  "assumptions": "immediate=next_open*1.002; pullback=5d_low<=entry; breakout=5d_high>=entry*1.002; stop=daily_low then close; hard_exit=evaluate_hard_exit; hold<=10d",
+  "gates": {
+    "strategy_id": "ultra_short_momentum",
+    "kind": "short",
+    "passed": false,
+    "gates": [
+      {
+        "name": "G-bt-2",
+        "ok": true,
+        "detail": "n=443 need>=200"
+      },
+      {
+        "name": "G-bt-3",
+        "ok": false,
+        "detail": "wr=45.8% need>=48%"
+      },
+      {
+        "name": "G-bt-4",
+        "ok": false,
+        "detail": "pf=0.947 need>=1.2"
+      },
+      {
+        "name": "G-bt-5",
+        "ok": false,
+        "detail": "dd=-228.574 need<=15.0"
+      },
+      {
+        "name": "G-bt-6",
+        "ok": true,
+        "detail": "oos_n=102 oos_wr=52.0% floor=37.8%"
+      },
+      {
+        "name": "G-bt-7",
+        "ok": true,
+        "detail": "detectors imported from stock_analyzer.detectors"
+      }
+    ],
+    "n": 443,
+    "win_rate": 0.4582392776523702,
+    "profit_factor": 0.947,
+    "max_drawdown_pct": -228.574,
+    "oos_n": 102,
+    "oos_win_rate": 0.5196078431372549
+  }
+}

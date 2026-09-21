@@ -206,6 +206,7 @@ def list_personas(path: Path | str | None = None) -> list[dict[str, Any]]:
                 "stock_selection_rules": p.get("stock_selection_rules", {}),
             }
             for p in personas_data
+            if p.get("enabled", True)
         ]
     except Exception as e:  # noqa: BLE001
         logger.error("列出 personas 失败: %s", e)

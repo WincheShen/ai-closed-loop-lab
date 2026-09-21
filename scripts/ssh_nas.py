@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """通过 Keychain 获取 NAS 凭据并执行远程命令。"""
+from __future__ import annotations
 
 import argparse
 import subprocess

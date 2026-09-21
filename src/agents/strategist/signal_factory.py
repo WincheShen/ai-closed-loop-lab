@@ -91,6 +91,8 @@ def detect_hits(
         bars = bars_from_candidate(cand)
         if len(bars) < 12:
             continue
+        evidence = regime.get("evidence") or {}
+        raw_up_ratio = evidence.get("up_ratio")
         ctx = BarContext(
             symbol=cand.get("symbol", ""),
             bars=bars,
@@ -98,6 +100,8 @@ def detect_hits(
             hot_sectors=hot,
             inst_net_buy_wan=float((cand.get("dragon_tiger") or {}).get("inst_net_buy_wan") or 0),
             pe_ttm=float((cand.get("kline_summary") or {}).get("pe_ttm") or 0),
+            name=cand.get("name") or "",
+            up_ratio=float(raw_up_ratio) if isinstance(raw_up_ratio, (int, float)) else -1.0,
         )
         for sid in allowed:
             if strategy_blocked_by_quality(sid, regime):

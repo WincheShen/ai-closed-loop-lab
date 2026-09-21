@@ -88,9 +88,46 @@ def value_series(symbol: str, days_n: int = 320, start: date = date(2024, 1, 2))
     return bars
 
 
+def momentum_series(symbol: str, cycles: int = 18, start: date = date(2024, 1, 2)) -> list[KlineBar]:
+    """每周期：慢涨 15 日 + 放量急涨 3 日（延续形态）+ 宽幅回踩 4 日（回踩形态）+ 过渡 8 日。"""
+    days = trading_days(cycles * 30, start)
+    bars: list[KlineBar] = []
+    price = 20.0 + (hash(symbol) % 9)
+    i = 0
+    for _ in range(cycles):
+        for step in range(15):
+            c = price * (1 + 0.008 * step)
+            o = c * 0.997
+            bars.append(_bar(days[i], o, c * 1.015, o * 0.985, c, vol=20000, to=4e8))
+            i += 1
+        base = bars[-1].close
+        for step in range(3):
+            o = base * (1 + 0.035 * step)
+            c = base * (1 + 0.035 * (step + 1))
+            bars.append(_bar(days[i], o, c * 1.03, o * 0.965, c, vol=60000, to=6e8))
+            i += 1
+        peak = bars[-1].close
+        for step in range(4):
+            c = peak * (1 - 0.022 * (step + 1))
+            o = c * 0.995
+            bars.append(_bar(days[i], o, o * 1.01, c * 0.94, c, vol=30000, to=4e8))
+            i += 1
+        last = bars[-1].close
+        for step in range(8):
+            c = last * (1 + 0.003 * step)
+            o = c * 0.998
+            bars.append(_bar(days[i], o, c * 1.015, o * 0.985, c, vol=18000, to=3.5e8))
+            i += 1
+        price = bars[-1].close
+    return bars
+
+
 def universe_for(strategy_id: str, n_symbols: int = 20) -> dict[str, list[KlineBar]]:
     if strategy_id == "hot_sector_pullback":
         return {f"P{i:04d}": pullback_series(f"P{i:04d}") for i in range(n_symbols)}
     if strategy_id == "bottom_reversal":
         return {f"B{i:04d}": bottom_series(f"B{i:04d}") for i in range(n_symbols)}
+    if strategy_id == "ultra_short_momentum":
+        # 合成代码也需落在检测器允许的创业板前缀内
+        return {f"300{i:03d}": momentum_series(f"300{i:03d}") for i in range(n_symbols)}
     return {f"V{i:04d}": value_series(f"V{i:04d}") for i in range(n_symbols)}

@@ -11,6 +11,7 @@ SHORT_STRATEGIES = frozenset({
     "bottom_reversal",
     "institutional_accumulation",
     "mean_reversion",
+    "ultra_short_momentum",
 })
 VALUE_STRATEGIES = frozenset({
     "value_investing",
