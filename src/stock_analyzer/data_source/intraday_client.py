@@ -69,6 +69,7 @@ class IntradayClient:
 
     def __init__(self, allow_mock_fallback: bool = True) -> None:
         self.allow_mock_fallback = allow_mock_fallback
+        self._last_source = "none"
         try:
             import akshare  # noqa: F401
             self._ak_available = True
@@ -94,21 +95,30 @@ class IntradayClient:
         Returns:
             按时间升序的 MinuteBar 列表
         """
+        self._last_source = "none"
         if self._ak_available:
             try:
-                return self._fetch_minute_real(symbol, period, limit)
+                bars = self._fetch_minute_real(symbol, period, limit)
+                if bars:
+                    self._last_source = "eastmoney"
+                    return bars
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "分钟K线拉取失败 %s(period=%s): %s，尝试新浪",
                     symbol, period, e,
                 )
         try:
-            return self._fetch_minute_sina(symbol, period, limit)
+            bars = self._fetch_minute_sina(symbol, period, limit)
+            if bars:
+                self._last_source = "sina"
+                return bars
         except Exception as e:  # noqa: BLE001
             logger.warning("新浪分钟K线也失败 %s: %s，降级 mock", symbol, e)
         if not self.allow_mock_fallback:
             raise RuntimeError(f"分钟K线不可用: {symbol}")
-        return self._fetch_minute_mock(symbol, period, limit)
+        bars = self._fetch_minute_mock(symbol, period, limit)
+        self._last_source = "mock"
+        return bars
 
     def fetch_intraday_ticks(self, symbol: str) -> list[IntradayTick]:
         """拉取当日分时成交数据。
@@ -159,7 +169,7 @@ class IntradayClient:
             volume=sum(b.volume for b in bars),
             turnover=sum(b.turnover for b in bars),
             bars=bars,
-            is_mock=not self._ak_available,
+            is_mock=self._last_source == "mock",
         )
 
     # ------------------------------------------------------------------

@@ -120,8 +120,29 @@ class PositionReviewAgent:
             symbol, name=name, period="30", bar_limit=16,
         )
 
+        # 1.4 数据防护 — mock / 缺失 / 异常偏离的价格禁止触发任何交易动作
+        # (2026-09-22 事故: 真实源失败降级 mock 且 is_mock 误标，600519 等 6 持仓被假价强平)
+        current_price = snapshot.current_price or 0.0
+        if getattr(snapshot, "is_mock", False) or not snapshot.bars or current_price <= 0:
+            return self._skip_review(
+                position,
+                f"盘中行情缺失或已降级为 mock 数据(source={getattr(self.intraday, '_last_source', 'unknown')})",
+                reference_price=entry_price,
+                anomaly_price=current_price,
+            )
+
+        reference = self._last_known_price(position) or entry_price
+        if reference > 0:
+            deviation = abs(current_price - reference) / reference
+            if deviation > 0.30:
+                return self._skip_review(
+                    position,
+                    f"当前价 {current_price:.2f} 偏离上次有效价 {reference:.2f} 达 {deviation:.0%}，疑似行情数据异常",
+                    reference_price=reference,
+                    anomaly_price=current_price,
+                )
+
         # 1.5 Pre-LLM 硬止损检查 — 价格已破止损时跳过 LLM 直接 EXIT（省钱+快速）
-        current_price = snapshot.current_price or entry_price
         pnl_pct = (current_price / entry_price - 1) * 100 if entry_price > 0 else 0
         if position.get("side") == "short":
             pnl_pct = -pnl_pct
@@ -234,10 +255,10 @@ class PositionReviewAgent:
         if (
             result["action"] == "REDUCE"
             and not result.get("rule_override")
-            and entry_date
+            and position.get("entry_date")
         ):
             from datetime import date as date_cls
-            days_held = (date_cls.today() - date_cls.fromisoformat(entry_date)).days
+            days_held = (date_cls.today() - date_cls.fromisoformat(position["entry_date"])).days
             strategy = position.get("original_strategy", "")
             persona_id_val = position.get("persona_id", "")
             is_value = any(
@@ -331,6 +352,81 @@ class PositionReviewAgent:
                     "risk_flag": "REVIEW_ERROR",
                 })
         return results
+
+    def _last_known_price(self, position: dict) -> float:
+        """最近一次有效复审价（fallback: 入场价），用于异常价格检测。"""
+        try:
+            reviews = self.brain.store.list_position_reviews(
+                position["position_id"], limit=1,
+            )
+            for r in reviews:
+                price = float(r.get("current_price") or 0)
+                if price > 0:
+                    return price
+        except Exception:  # noqa: BLE001
+            pass
+        return 0.0
+
+    def _skip_review(
+        self,
+        position: dict,
+        reason: str,
+        reference_price: float,
+        anomaly_price: float = 0.0,
+    ) -> dict:
+        """数据异常时安全跳过复审 — 记录 HOLD 审计，绝不触发交易。
+
+        复审记录里的 current_price 写 reference（上次有效价），
+        把异常值留在 reason 里，防止假价格污染后续 _last_known_price。
+        """
+        symbol = position["symbol"]
+        entry_price = position.get("entry_price", 0) or 0
+        pnl_pct = (reference_price / entry_price - 1) * 100 if entry_price > 0 else 0
+        if position.get("side") == "short":
+            pnl_pct = -pnl_pct
+
+        full_reason = reason
+        if anomaly_price > 0:
+            full_reason = f"{reason}（异常价 {anomaly_price:.2f} 已忽略）"
+
+        logger.warning(
+            "[DATA-GUARD] %s %s 跳过复审: %s",
+            symbol, position.get("name", ""), full_reason,
+        )
+
+        review_id = f"REV-{uuid.uuid4().hex[:8].upper()}"
+        try:
+            self.brain.store.save_position_review(
+                review_id=review_id,
+                position_id=position["position_id"],
+                current_price=reference_price,
+                pnl_pct=round(pnl_pct, 2),
+                action="HOLD",
+                reason=full_reason,
+                market_summary=f"数据异常: {full_reason}",
+                model="data_guard",
+                tokens_used=0,
+            )
+            self.brain.store.update_position_review(
+                position["position_id"], action="HOLD", reason=full_reason,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[DATA-GUARD] %s 复审记录保存失败: %s", symbol, e)
+
+        return {
+            "action": "HOLD",
+            "confidence": 0.0,
+            "reason": full_reason,
+            "thesis_status": "unknown",
+            "key_observation": "",
+            "risk_flag": "DATA_ANOMALY",
+            "data_guard": True,
+            "review_id": review_id,
+            "position_id": position["position_id"],
+            "symbol": symbol,
+            "current_price": reference_price,
+            "pnl_pct": round(pnl_pct, 2),
+        }
 
     def _parse_response(self, content: str) -> dict:
         """Parse LLM JSON response, with fallback for malformed output."""
