@@ -382,18 +382,20 @@ def job_tail_hunt() -> None:
 
 @skip_if_weekend
 def job_short_term_watchlist_audit() -> None:
-    """每日 15:30 短线高弹性自选股池审查与清理 — 剔除破位、缩量、弹性枯竭或超期标的。"""
-    logger.info("⏰ 定时任务触发: 短线自选股池审查与清理 (15:30)")
+    """每日 15:30 短线高弹性自选股池维护 — 真实行情清洗存量 + 盘后快照补票入池。"""
+    logger.info("⏰ 定时任务触发: 短线自选股池审查与补票 (15:30)")
     try:
         from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
         mgr = ShortTermWatchlistManager()
-        res = mgr.audit_and_clean()
+        res = mgr.run_daily_maintenance()
+        audited = res.get("audited", {})
         logger.info(
-            "短线自选股审查完成: checked=%d, removed=%d, remaining=%d",
-            res.get("checked", 0), res.get("removed", 0), res.get("remaining", 0),
+            "短线自选股维护完成: data_ok=%s, checked=%d, removed=%d, added=%d, pool=%d",
+            res.get("data_ok"), audited.get("checked", 0), audited.get("removed", 0),
+            res.get("added", 0), res.get("pool_size", 0),
         )
     except Exception as e:
-        logger.warning("短线自选股审查失败: %s", e)
+        logger.warning("短线自选股维护失败: %s", e)
 
 
 @skip_if_weekend

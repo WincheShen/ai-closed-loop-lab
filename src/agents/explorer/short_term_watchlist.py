@@ -32,6 +32,14 @@ MIN_TURNOVER = 1.5e8         # 成交额低于 1.5 亿视为流动性枯竭
 MIN_AMPLITUDE = 0.03         # 日内真实振幅低于 3% 视为丧失高弹性
 MAX_SINGLE_DAY_DROP = -0.06  # 单日跌幅超 -6% 视为形态破位
 
+# 盘后补票筛选（全市场快照维度）
+FEED_MIN_TURNOVER = 3e8        # 当日成交额 >= 3 亿
+FEED_MIN_TURNOVER_RATE = 8.0   # 换手率 >= 8%（高弹性代理指标）
+FEED_FALLBACK_TURNOVER = 5e8   # 换手率缺失（新浪源）时成交额门槛提高至 5 亿
+FEED_MIN_CHANGE_PCT = -4.0     # 当日跌幅下限（不接崩坏飞刀）
+FEED_MAX_CHANGE_PCT = 11.0     # 当日涨幅上限（不追已涨停/过热）
+FEED_TOP_N = 40                # 每次最多考察的活跃标的数
+
 
 def _is_allowed_symbol(symbol: str) -> bool:
     """仅允许高弹性板块：创业板(300)、科创板(688)、北交所(920/834/430)、深市题材(000/001/002)。"""
@@ -190,6 +198,101 @@ class ShortTermWatchlistManager:
 
         logger.info("短线自选股池刷新: 补充入池 %d 只，当前在池 %d 只", added, len(current_pool) + added)
         return added
+
+    def _fetch_today_amplitude(self, client, symbol: str) -> float:
+        """拉最近日线计算当日真实振幅 (high-low)/前收；失败返回 0（跳过弹性闸门）。"""
+        try:
+            bars = client.fetch_kline(symbol, days=3)
+        except Exception:  # noqa: BLE001
+            return 0.0
+        if not bars:
+            return 0.0
+        last = bars[-1]
+        prev_close = bars[-2].close if len(bars) >= 2 and bars[-2].close > 0 else None
+        if prev_close is None and last.close > 0 and last.change_pct > -99:
+            prev_close = last.close / (1 + last.change_pct / 100)
+        if not prev_close or prev_close <= 0:
+            return 0.0
+        return max(0.0, (last.high - last.low) / prev_close)
+
+    def run_daily_maintenance(self, snapshot=None, client=None) -> dict[str, Any]:
+        """盘后维护闭环：真实行情清洗存量 + 全市场快照补票入池。
+
+        Args:
+            snapshot: 可选注入的 MarketSnapshot（测试用）；None 则实时拉取。
+            client: 可选注入的行情客户端（测试用）；None 则新建 AkshareClient。
+
+        Returns:
+            {"data_ok": bool, "audited": dict, "added": int, "pool_size": int}
+        """
+        from src.stock_analyzer.data_source.akshare_client import AkshareClient
+
+        if client is None:
+            client = AkshareClient(allow_mock_fallback=False)
+        if snapshot is None:
+            try:
+                snapshot = client.fetch_snapshot()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("短线池维护：快照拉取失败，跳过行情维度清洗与补票: %s", e)
+                snapshot = None
+
+        data_ok = bool(snapshot) and not getattr(snapshot, "is_mock", True)
+        quotes_map: dict[str, dict[str, Any]] = {}
+        feed_candidates: list[dict[str, Any]] = []
+
+        if data_ok:
+            by_symbol = {s.symbol: s for s in snapshot.stocks}
+            for item in self.get_active_pool():
+                q = by_symbol.get(item["symbol"])
+                if not q or q.price <= 0:
+                    continue
+                quotes_map[item["symbol"]] = {
+                    "price": q.price,
+                    "turnover": q.turnover,
+                    "change_pct": q.change_pct,
+                    "amplitude": self._fetch_today_amplitude(client, item["symbol"]),
+                }
+            movers = [
+                s for s in snapshot.stocks
+                if _is_allowed_symbol(s.symbol)
+                and _is_clean_name(s.name)
+                and s.price > 0
+                and FEED_MIN_CHANGE_PCT <= s.change_pct <= FEED_MAX_CHANGE_PCT
+                and (
+                    # 换手率可用时：成交 >= 3 亿且换手 >= 8%
+                    (s.turnover_rate > 0 and s.turnover >= FEED_MIN_TURNOVER
+                     and s.turnover_rate >= FEED_MIN_TURNOVER_RATE)
+                    # 换手率缺失（新浪等降级源）：成交额门槛提高至 5 亿
+                    or (s.turnover_rate <= 0 and s.turnover >= FEED_FALLBACK_TURNOVER)
+                )
+            ]
+            movers.sort(key=lambda s: s.turnover, reverse=True)
+            for s in movers[:FEED_TOP_N]:
+                rate_txt = (
+                    f"换手{s.turnover_rate:.1f}%"
+                    if s.turnover_rate > 0 else "换手率缺失"
+                )
+                feed_candidates.append({
+                    "symbol": s.symbol,
+                    "name": s.name,
+                    "sector": s.industry or "",
+                    "current_price": s.price,
+                    "turnover": s.turnover,
+                    "change_pct": s.change_pct,
+                    "thesis": (
+                        f"盘后复盘入池: {rate_txt} "
+                        f"成交{s.turnover / 1e8:.1f}亿 涨幅{s.change_pct:+.2f}%"
+                    ),
+                })
+
+        audited = self.audit_and_clean(quotes_map)
+        added = self.refresh_from_candidates(feed_candidates)
+        pool_size = len(self.get_active_symbols())
+        logger.info(
+            "短线池盘后维护完成: data_ok=%s 清洗=%s 补票=%d 在池=%d",
+            data_ok, audited, added, pool_size,
+        )
+        return {"data_ok": data_ok, "audited": audited, "added": added, "pool_size": pool_size}
 
     def audit_and_clean(self, quotes_map: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
         """盘后/盘前自选股清洗：冷酷剔除破位、缩量、弹性枯竭或超期标的。

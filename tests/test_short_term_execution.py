@@ -125,6 +125,91 @@ def test_watchlist_audit_and_clean(tmp_path):
     assert remaining_symbols == ["300005"]
 
 
+# ── 盘后维护闭环（清洗 + 补票）─────────────────────────────────
+
+class _FakeQuote:
+    def __init__(self, symbol, name, price, change_pct, turnover, turnover_rate, industry="电子"):
+        self.symbol = symbol
+        self.name = name
+        self.price = price
+        self.change_pct = change_pct
+        self.turnover = turnover
+        self.turnover_rate = turnover_rate
+        self.industry = industry
+
+
+class _FakeSnapshot:
+    def __init__(self, stocks, is_mock=False):
+        self.stocks = stocks
+        self.is_mock = is_mock
+
+
+class _FakeKlineClient:
+    def fetch_kline(self, symbol, days=3):
+        raise RuntimeError("test: no kline")
+
+
+def test_run_daily_maintenance_feeds_pool(tmp_path):
+    brain = _MockBrain(tmp_path)
+    mgr = ShortTermWatchlistManager(brain)
+
+    snapshot = _FakeSnapshot([
+        _FakeQuote("300209", "行云科技", 25.0, 4.0, 5e8, 12.0),      # 合规入池
+        _FakeQuote("688981", "中芯国际", 90.0, 3.0, 8e8, 9.0),       # 合规入池
+        _FakeQuote("600519", "贵州茅台", 1300.0, 2.0, 9e8, 15.0),    # 板块前缀拒绝
+        _FakeQuote("300999", "*ST测试", 5.0, 3.0, 5e8, 12.0),        # ST 拒绝
+        _FakeQuote("301888", "缩量标的", 20.0, 2.0, 1e8, 12.0),      # 成交额 < 3 亿拒绝
+        _FakeQuote("300777", "低换手", 30.0, 2.0, 5e8, 3.0),         # 换手率 < 8% 拒绝
+        _FakeQuote("300555", "过热标的", 40.0, 19.5, 5e8, 25.0),     # 涨幅 > 11% 拒绝（不追涨停）
+        _FakeQuote("300666", "崩坏标的", 10.0, -8.0, 5e8, 15.0),     # 跌幅 < -4% 拒绝（不接飞刀）
+        _FakeQuote("301111", "新浪降级高成交", 15.0, 3.0, 6e8, 0.0), # 换手率缺失但成交 >= 5亿 → 入池
+        _FakeQuote("302222", "新浪降级低成交", 15.0, 3.0, 4e8, 0.0), # 换手率缺失且成交 < 5亿 → 拒绝
+    ])
+
+    res = mgr.run_daily_maintenance(snapshot=snapshot, client=_FakeKlineClient())
+
+    assert res["data_ok"] is True
+    assert res["added"] == 3
+    assert res["pool_size"] == 3
+    assert set(mgr.get_active_symbols()) == {"300209", "688981", "301111"}
+
+
+def test_run_daily_maintenance_cleans_with_real_quotes(tmp_path):
+    brain = _MockBrain(tmp_path)
+    mgr = ShortTermWatchlistManager(brain)
+    mgr.add_candidate("300209", "行云科技", price=25.0)
+    mgr.add_candidate("300684", "中石科技", price=50.0)
+
+    snapshot = _FakeSnapshot([
+        _FakeQuote("300209", "行云科技", 23.0, -7.5, 5e8, 12.0),   # 破位暴跌 → 踢出
+        _FakeQuote("300684", "中石科技", 51.0, 2.0, 5e8, 10.0),     # 健康 → 保留并回写检查价
+    ])
+
+    res = mgr.run_daily_maintenance(snapshot=snapshot, client=_FakeKlineClient())
+
+    assert res["data_ok"] is True
+    assert res["audited"]["removed"] == 1
+    assert mgr.get_active_symbols() == ["300684"]
+    # 健康标的被回写最新检查价
+    item = mgr.get_active_pool()[0]
+    assert item["last_price"] == 51.0
+
+
+def test_run_daily_maintenance_mock_snapshot_blocks_feed(tmp_path):
+    brain = _MockBrain(tmp_path)
+    mgr = ShortTermWatchlistManager(brain)
+
+    snapshot = _FakeSnapshot(
+        [_FakeQuote("300209", "行云科技", 25.0, 4.0, 5e8, 12.0)],
+        is_mock=True,
+    )
+    res = mgr.run_daily_maintenance(snapshot=snapshot, client=_FakeKlineClient())
+
+    assert res["data_ok"] is False
+    assert res["added"] == 0
+    assert res["pool_size"] == 0
+
+
 # ── 冷静期与大盘天气前置闸门 ─────────────────────────────────
 
 def test_check_cold_period_post_loss(tmp_path):
