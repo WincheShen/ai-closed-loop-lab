@@ -24,6 +24,7 @@ import signal as signal_mod
 import sys
 import uuid
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -56,6 +57,7 @@ def is_trading_day() -> bool:
 
 def skip_if_weekend(func):
     """装饰器：周末跳过执行。"""
+    @wraps(func)
     def wrapper(*args, **kwargs):
         if not is_trading_day():
             logger.info("今天是周末，跳过 %s", func.__name__)
