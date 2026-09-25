@@ -1349,26 +1349,33 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         )
         self._auto_commit()
 
-    def get_watchlist(self, status: str = "watching") -> list[dict]:
+    def get_watchlist(self, status: str = "watching", strategy_id: str | None = None) -> list[dict]:
         """获取指定状态的自选股列表。"""
         conn = self._conn()
-        if status == "all":
+        query = "SELECT * FROM watchlist WHERE 1=1"
+        params: list[Any] = []
+        if status != "all":
+            query += " AND status = ?"
+            params.append(status)
+        if strategy_id:
+            query += " AND strategy_id = ?"
+            params.append(strategy_id)
+        query += " ORDER BY added_at DESC"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_watchlist_symbols(self, strategy_id: str | None = None) -> list[str]:
+        """仅获取当前 watching 状态的 symbol 列表。"""
+        conn = self._conn()
+        if strategy_id:
             rows = conn.execute(
-                "SELECT * FROM watchlist ORDER BY added_at DESC"
+                "SELECT symbol FROM watchlist WHERE status = 'watching' AND strategy_id = ?",
+                (strategy_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM watchlist WHERE status = ? ORDER BY added_at DESC",
-                (status,),
+                "SELECT symbol FROM watchlist WHERE status = 'watching'"
             ).fetchall()
-        return [dict(r) for r in rows]
-
-    def get_watchlist_symbols(self) -> list[str]:
-        """仅获取当前 watching 状态的 symbol 列表。"""
-        conn = self._conn()
-        rows = conn.execute(
-            "SELECT symbol FROM watchlist WHERE status = 'watching'"
-        ).fetchall()
         return [r["symbol"] for r in rows]
 
     def update_watchlist_check(self, watch_id: str, price: float, change_pct: float) -> None:

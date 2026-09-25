@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import signal as signal_mod
 import sys
 import uuid
@@ -344,6 +343,58 @@ def job_weekly_feedback() -> None:
 
 
 @skip_if_weekend
+def job_morning_pulse() -> None:
+    """每日 09:35 隔夜极速动量早盘脉冲 — 冲高脉冲止盈 / 低开极窄止损 / 回流自选池。"""
+    logger.info("⏰ 定时任务触发: 隔夜极速动量早盘脉冲 (09:35)")
+    try:
+        from src.agents.reviewer.tail_hunt import execute_morning_pulse
+        res = asyncio.run(execute_morning_pulse())
+        logger.info("早盘脉冲巡检完成: checked=%d, actions=%d", res.get("checked", 0), len(res.get("actions", [])))
+    except Exception as e:
+        logger.error("早盘脉冲执行失败: %s", e)
+
+
+@skip_if_weekend
+def job_force_close_ultra_short() -> None:
+    """每日 14:30 隔夜极速动量强制清仓 — 持仓满 1 交易日无论盈亏强制退出 (T+1 纪律)。"""
+    logger.info("⏰ 定时任务触发: 隔夜极速动量强制清仓 (14:30)")
+    try:
+        from src.agents.reviewer.tail_hunt import execute_force_close_ultra_short
+        res = asyncio.run(execute_force_close_ultra_short())
+        logger.info("隔夜持仓强制清仓完成: closed=%d", res.get("closed", 0))
+    except Exception as e:
+        logger.error("隔夜持仓强制清仓失败: %s", e)
+
+
+@skip_if_weekend
+def job_tail_hunt() -> None:
+    """每日 14:35 隔夜极速动量尾盘狙击 — 冷静期检查 + 自选股盘中筛选 + 尾盘建仓。"""
+    logger.info("⏰ 定时任务触发: 隔夜极速动量尾盘狙击 (14:35)")
+    try:
+        from src.agents.reviewer.tail_hunt import execute_tail_hunt
+        res = asyncio.run(execute_tail_hunt())
+        logger.info("尾盘狙击执行完成: %s", res)
+    except Exception as e:
+        logger.error("尾盘狙击执行失败: %s", e)
+
+
+@skip_if_weekend
+def job_short_term_watchlist_audit() -> None:
+    """每日 15:30 短线高弹性自选股池审查与清理 — 剔除破位、缩量、弹性枯竭或超期标的。"""
+    logger.info("⏰ 定时任务触发: 短线自选股池审查与清理 (15:30)")
+    try:
+        from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
+        mgr = ShortTermWatchlistManager()
+        res = mgr.audit_and_clean()
+        logger.info(
+            "短线自选股审查完成: checked=%d, removed=%d, remaining=%d",
+            res.get("checked", 0), res.get("removed", 0), res.get("remaining", 0),
+        )
+    except Exception as e:
+        logger.warning("短线自选股审查失败: %s", e)
+
+
+@skip_if_weekend
 def job_watchlist_check() -> None:
     """每日 15:40 自选股池检查 — 检查入场条件 + 剔除过期标的。"""
     logger.info("⏰ 定时任务触发: 自选股池检查")
@@ -535,15 +586,19 @@ def setup_schedule() -> None:
             schedule.every().day.at(t).do(job_hard_scan)
 
     schedule.every().day.at("09:35").do(job_market_brain_only)
+    schedule.every().day.at("09:35").do(job_morning_pulse)
     schedule.every().day.at("11:35").do(job_market_brain_only)
     schedule.every().day.at("14:00").do(job_market_brain_only)
+    schedule.every().day.at("14:30").do(job_force_close_ultra_short)
+    schedule.every().day.at("14:35").do(job_tail_hunt)
 
+    schedule.every().day.at("14:50").do(job_stale_position_check)
     schedule.every().day.at("15:05").do(job_closing_analysis)
     schedule.every().day.at("15:15").do(job_backfill_attributions)
+    schedule.every().day.at("15:30").do(job_short_term_watchlist_audit)
     schedule.every().day.at("15:35").do(job_daily_pipeline)
     schedule.every().day.at("15:40").do(job_watchlist_check)
     schedule.every().day.at("15:45").do(job_sync_sma_status)
-    schedule.every().day.at("14:50").do(job_stale_position_check)
     schedule.every().day.at("16:00").do(job_health_check)
 
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)

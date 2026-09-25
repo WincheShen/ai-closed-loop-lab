@@ -35,11 +35,11 @@ CIRCUIT_BREAKER_WINDOW_DAYS = 14   # 熔断只看最近 N 天内的平仓记录
 class ExecutionEngine:
     """执行者引擎。"""
 
-    def __init__(self, session_id: str, persona_id: str | None = None) -> None:
+    def __init__(self, session_id: str, persona_id: str | None = None, brain=None) -> None:
         self.session_id = session_id
         self.persona_id = persona_id or "short_term_hot_rotation_v1"
         self.logger = get_agent_logger("executioner", session_id)
-        self.brain = get_central_brain()
+        self.brain = brain or get_central_brain()
         self.mode = cfg().get("trading_mode", "mock")
         self.submitted_orders: list[Order] = []
         self.filled_orders: list[Fill] = []
@@ -434,7 +434,8 @@ class ExecutionEngine:
             fill = None
             raise
 
-        self.brain.bus.emit_order_fill(fill)
+        if getattr(self.brain, "bus", None):
+            self.brain.bus.emit_order_fill(fill)
         return order, fill
 
     def _update_account_after_trade(self, fill: Fill) -> None:
