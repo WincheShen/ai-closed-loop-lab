@@ -253,7 +253,7 @@ class AkshareClient:
         # market-information-platform 适配层（MARKET_INFO_URL 为空时禁用）
         market_info_url = os.getenv("MARKET_INFO_URL", "")
         self._market_info_client = MarketInfoClient(
-            market_info_url, timeout=15, session=self._session
+            market_info_url, timeout=60, session=self._session
         )
 
     # ------------------------------------------------------------------

@@ -80,7 +80,7 @@ class MarketInfoClient:
     def __init__(
         self,
         base_url: str,
-        timeout: int = 15,
+        timeout: int = 60,
         session: requests.Session | None = None,
     ) -> None:
         self.base_url = (base_url or "").rstrip("/")
