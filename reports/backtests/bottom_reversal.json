@@ -1,0 +1,57 @@
+{
+  "strategy_id": "bottom_reversal",
+  "n": 0,
+  "wins": 0,
+  "losses": 0,
+  "win_rate": 0.0,
+  "profit_factor": 0.0,
+  "avg_pnl_pct": 0.0,
+  "max_drawdown_pct": 0.0,
+  "oos_n": 0,
+  "oos_win_rate": 0.0,
+  "expired": 0,
+  "assumptions": "immediate=next_open*1.002; pullback=5d_low<=entry; breakout=5d_high>=entry*1.002; stop=daily_low then close; hard_exit=evaluate_hard_exit; hold<=10d",
+  "gates": {
+    "strategy_id": "bottom_reversal",
+    "kind": "short",
+    "passed": false,
+    "gates": [
+      {
+        "name": "G-bt-2",
+        "ok": false,
+        "detail": "n=0 need>=200"
+      },
+      {
+        "name": "G-bt-3",
+        "ok": false,
+        "detail": "wr=0.0% need>=48%"
+      },
+      {
+        "name": "G-bt-4",
+        "ok": false,
+        "detail": "pf=0.0 need>=1.2"
+      },
+      {
+        "name": "G-bt-5",
+        "ok": true,
+        "detail": "dd=0.0 need<=15.0"
+      },
+      {
+        "name": "G-bt-6",
+        "ok": true,
+        "detail": "oos_n=0 oos_wr=0.0% floor=-8.0%"
+      },
+      {
+        "name": "G-bt-7",
+        "ok": true,
+        "detail": "detectors imported from stock_analyzer.detectors"
+      }
+    ],
+    "n": 0,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "max_drawdown_pct": 0.0,
+    "oos_n": 0,
+    "oos_win_rate": 0.0
+  }
+}

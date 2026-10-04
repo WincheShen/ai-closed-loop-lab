@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from src.agents.reviewer.hard_rules import evaluate_hard_exit
@@ -492,6 +492,20 @@ class PositionReviewAgent:
         target_price = position.get("target_price") or 0
         stop_loss = position.get("stop_loss") or 0
         entry_date = position.get("entry_date", "")
+
+        # 规则 0: T+1 交易纪律（当日建仓不可在当日卖出）
+        if entry_date and entry_date == date.today().isoformat():
+            if result.get("action") in ("EXIT", "REDUCE"):
+                logger.info(
+                    "[%s] 当日建仓标的 (entry_date=%s) 受 A股 T+1 限制，卖出动作强制转为 HOLD",
+                    symbol, entry_date,
+                )
+                return {
+                    **result,
+                    "action": "HOLD",
+                    "reason": f"当日买入标的受 T+1 纪律限制不可卖出 (原判定: {result.get('action')})，维持持仓",
+                    "rule_override": True,
+                }
 
         # 规则 1: 硬止损
         if stop_loss > 0 and current_price <= stop_loss:

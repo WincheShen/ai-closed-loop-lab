@@ -319,7 +319,7 @@ async def _execute_review_action(
         # 加仓：固定加 50% 当前持仓（最少100股）
         add_qty = max(int(current_qty * 0.5 // 100) * 100, 100)
         signal = _build_signal(symbol, "buy", current_price, review.get("reason", "复审加仓"))
-        engine = ExecutionEngine(session_id, persona_id=effective_persona_id)
+        engine = ExecutionEngine(session_id, persona_id=effective_persona_id, brain=brain)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
             new_qty = current_qty + add_qty
@@ -349,7 +349,7 @@ async def _execute_review_action(
         signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审减仓"), qty=reduce_qty)
         logger.info("[%s] REDUCE 信号: target_qty=%s", symbol, signal.get("target_qty"))
 
-        engine = ExecutionEngine(session_id, persona_id=effective_persona_id)
+        engine = ExecutionEngine(session_id, persona_id=effective_persona_id, brain=brain)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
             actual_sold = fills[0]["quantity"]
@@ -387,7 +387,7 @@ async def _execute_review_action(
         signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审清仓"), qty=current_qty)
         logger.info("[%s] EXIT 信号: target_qty=%s", symbol, signal.get("target_qty"))
 
-        engine = ExecutionEngine(session_id, persona_id=effective_persona_id)
+        engine = ExecutionEngine(session_id, persona_id=effective_persona_id, brain=brain)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
             pnl = (current_price - position["entry_price"]) * current_qty

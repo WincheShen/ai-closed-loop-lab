@@ -64,6 +64,15 @@ class IntradaySnapshot:
     is_mock: bool = False
 
 
+def _sina_symbol(symbol: str) -> str:
+    """根据股票代码前缀转换为新浪行情代码。"""
+    if symbol.startswith(("6", "9")):
+        return f"sh{symbol}"
+    if symbol.startswith(("4", "8", "920")):
+        return f"bj{symbol}"
+    return f"sz{symbol}"
+
+
 class IntradayClient:
     """盘中行情入口 — 分钟K线 + 分时数据。"""
 
@@ -145,29 +154,90 @@ class IntradayClient:
         period: PeriodType = "30",
         bar_limit: int = 48,
     ) -> IntradaySnapshot:
-        """获取一只股票的完整盘中快照（聚合分钟K线和统计信息）。"""
-        bars = self.fetch_minute_bars(symbol, period, bar_limit)
+        """获取一只股票的完整盘中快照（聚合分钟K线和统计信息）。
+
+        高可用保障：
+        1. 优先拉取分钟K线 (AKShare / 新浪API)；
+        2. 结合新浪实时行情 (hq.sinajs.cn) 获取当日全量盘中统计（最高/最低/成交额/均价）；
+        3. 若分钟K线偶发失败，由秒级实时行情兜底合成快照，防止盘中风控与脉冲策略因网络波动漏触发。
+        """
+        try:
+            bars = self.fetch_minute_bars(symbol, period, bar_limit)
+        except Exception as e:
+            logger.warning("拉取分钟K线失败 %s: %s", symbol, e)
+            bars = []
+
+        quote = self._fetch_quote_sina(symbol)
+
         if not bars:
+            if quote and quote["current_price"] > 0:
+                # 分钟K线失败但实时行情正常时，用实时快照兜底
+                now_bar = MinuteBar(
+                    timestamp=datetime.now(),
+                    open=quote["open"],
+                    high=quote["high"],
+                    low=quote["low"],
+                    close=quote["current_price"],
+                    volume=quote["volume"],
+                    turnover=quote["turnover"],
+                    change_pct=quote["change_pct"],
+                )
+                self._last_source = "sina_quote"
+                return IntradaySnapshot(
+                    symbol=symbol,
+                    name=quote.get("name") or name,
+                    current_price=quote["current_price"],
+                    prev_close=quote["prev_close"],
+                    change_pct=quote["change_pct"],
+                    high=quote["high"],
+                    low=quote["low"],
+                    open=quote["open"],
+                    volume=quote["volume"],
+                    turnover=quote["turnover"],
+                    bars=[now_bar],
+                    is_mock=False,
+                )
+
+            if not self.allow_mock_fallback:
+                raise RuntimeError(f"实时行情与分钟K线均不可用: {symbol}")
+
             return IntradaySnapshot(
                 symbol=symbol, name=name,
                 current_price=0, prev_close=0, change_pct=0,
                 high=0, low=0, open=0, volume=0, turnover=0,
                 bars=[], is_mock=True,
             )
+
         latest = bars[-1]
         first = bars[0]
-        prev_close = first.open / (1 + first.change_pct / 100) if first.change_pct else first.open
+        curr_p = latest.close
+        prev_close = (
+            quote["prev_close"]
+            if (quote and quote["prev_close"] > 0)
+            else (first.open / (1 + first.change_pct / 100) if first.change_pct else first.open)
+        )
+        change_pct = (
+            quote["change_pct"]
+            if quote
+            else (round((latest.close / prev_close - 1) * 100, 2) if prev_close else 0)
+        )
+        high = quote["high"] if (quote and quote["high"] > 0) else max(b.high for b in bars)
+        low = quote["low"] if (quote and quote["low"] > 0) else min(b.low for b in bars)
+        open_p = quote["open"] if (quote and quote["open"] > 0) else first.open
+        vol = quote["volume"] if (quote and quote["volume"] > 0) else sum(b.volume for b in bars)
+        turnover = quote["turnover"] if (quote and quote["turnover"] > 0) else sum(b.turnover for b in bars)
+
         return IntradaySnapshot(
             symbol=symbol,
-            name=name,
-            current_price=latest.close,
+            name=quote.get("name") or name,
+            current_price=curr_p,
             prev_close=round(prev_close, 2),
-            change_pct=round((latest.close / prev_close - 1) * 100, 2) if prev_close else 0,
-            high=max(b.high for b in bars),
-            low=min(b.low for b in bars),
-            open=first.open,
-            volume=sum(b.volume for b in bars),
-            turnover=sum(b.turnover for b in bars),
+            change_pct=change_pct,
+            high=high,
+            low=low,
+            open=open_p,
+            volume=vol,
+            turnover=turnover,
             bars=bars,
             is_mock=self._last_source == "mock",
         )
@@ -226,35 +296,48 @@ class IntradayClient:
     # Sina fallback (push2.eastmoney.com 被封时使用)
     # ------------------------------------------------------------------
 
-    _SINA_KLINE_URL = (
+    _SINA_KLINE_URL_V2 = (
+        "https://quotes.sina.cn/cn/api/json_v2.php"
+        "/CN_MarketDataService.getKLineData"
+    )
+    _SINA_KLINE_URL_LEGACY = (
         "http://money.finance.sina.com.cn/quotes_service"
         "/api/json_v2.php/CN_MarketData.getKLineData"
     )
-    _SINA_HEADERS = {"Referer": "http://finance.sina.com.cn"}
+    _SINA_HEADERS = {
+        "Referer": "https://finance.sina.com.cn",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    }
 
     def _fetch_minute_sina(
         self, symbol: str, period: PeriodType, limit: int,
     ) -> list[MinuteBar]:
-        """通过新浪财经 API 拉取分钟K线。"""
+        """通过新浪财经 API 拉取分钟K线（优先 quotes.sina.cn，备用 money.finance.sina）。"""
         import requests as _req
 
-        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
-        sina_symbol = f"{prefix}{symbol}"
-
+        sina_symbol = _sina_symbol(symbol)
         params = {
             "symbol": sina_symbol,
             "scale": int(period),
             "ma": "no",
             "datalen": limit,
         }
-        resp = _req.get(
-            self._SINA_KLINE_URL, params=params,
-            headers=self._SINA_HEADERS, timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data:
-            # 新浪对 period=1 的部分股票返回 null
+
+        data = None
+        for url in (self._SINA_KLINE_URL_V2, self._SINA_KLINE_URL_LEGACY):
+            try:
+                resp = _req.get(
+                    url, params=params,
+                    headers=self._SINA_HEADERS, timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data:
+                        break
+            except Exception as e:
+                logger.debug("新浪接口 %s 请求失败 %s: %s", url, symbol, e)
+
+        if not data or not isinstance(data, list):
             return []
 
         bars: list[MinuteBar] = []
@@ -268,6 +351,7 @@ class IntradayClient:
                     round((close / prev_close - 1) * 100, 2)
                     if prev_close > 0 else 0
                 )
+                amount = float(item.get("amount", 0) or 0)
                 bars.append(MinuteBar(
                     timestamp=ts,
                     open=float(item.get("open", 0)),
@@ -275,13 +359,52 @@ class IntradayClient:
                     low=float(item.get("low", 0)),
                     close=close,
                     volume=float(item.get("volume", 0)) / 100,  # 股→手
-                    turnover=0.0,  # 新浪分钟 K 线不含成交额
+                    turnover=amount,
                     change_pct=change_pct,
                 ))
                 prev_close = close
             except Exception:  # noqa: BLE001
                 continue
         return bars[-limit:]
+
+    def _fetch_quote_sina(self, symbol: str) -> dict[str, Any] | None:
+        """从新浪实时行情源（hq.sinajs.cn）获取秒级快照。"""
+        import requests as _req
+
+        sina_symbol = _sina_symbol(symbol)
+        url = f"http://hq.sinajs.cn/list={sina_symbol}"
+        try:
+            resp = _req.get(url, headers=self._SINA_HEADERS, timeout=5)
+            if resp.status_code == 200 and '="' in resp.text:
+                raw = resp.text.split('="')[1].split('";')[0]
+                parts = raw.split(",")
+                if len(parts) >= 10:
+                    open_p = float(parts[1] or 0)
+                    prev_close = float(parts[2] or 0)
+                    curr_p = float(parts[3] or 0)
+                    high_p = float(parts[4] or 0)
+                    low_p = float(parts[5] or 0)
+                    vol_shares = float(parts[8] or 0)
+                    turnover = float(parts[9] or 0)
+                    if curr_p > 0:
+                        change_pct = (
+                            round((curr_p / prev_close - 1) * 100, 2)
+                            if prev_close > 0 else 0.0
+                        )
+                        return {
+                            "name": parts[0],
+                            "open": open_p,
+                            "prev_close": prev_close,
+                            "current_price": curr_p,
+                            "high": high_p,
+                            "low": low_p,
+                            "volume": vol_shares / 100.0,
+                            "turnover": turnover,
+                            "change_pct": change_pct,
+                        }
+        except Exception as e:
+            logger.debug("新浪实时行情获取失败 %s: %s", symbol, e)
+        return None
 
     # ------------------------------------------------------------------
     # Mock implementations

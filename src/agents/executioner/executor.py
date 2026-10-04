@@ -35,12 +35,19 @@ CIRCUIT_BREAKER_WINDOW_DAYS = 14   # 熔断只看最近 N 天内的平仓记录
 class ExecutionEngine:
     """执行者引擎。"""
 
-    def __init__(self, session_id: str, persona_id: str | None = None, brain=None) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        persona_id: str | None = None,
+        brain=None,
+        enforce_t1: bool = True,
+    ) -> None:
         self.session_id = session_id
         self.persona_id = persona_id or "short_term_hot_rotation_v1"
         self.logger = get_agent_logger("executioner", session_id)
         self.brain = brain or get_central_brain()
         self.mode = cfg().get("trading_mode", "mock")
+        self.enforce_t1 = enforce_t1
         self.submitted_orders: list[Order] = []
         self.filled_orders: list[Fill] = []
 
@@ -277,6 +284,52 @@ class ExecutionEngine:
                     "quantity": 0,
                     "order_type": "limit",
                     "limit_price": signal["entry_price"],
+                    "status": "rejected",
+                    "submitted_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                return rejected_order, None
+
+        # --- P0.1b: 卖出前 T+1 与持仓检查 ---
+        if action == "sell":
+            existing = self.brain.store.list_open_positions(persona_id=self.persona_id)
+            pos = next((p for p in existing if p["symbol"] == symbol), None)
+            if not pos:
+                self.logger.warning(
+                    "[MOCK] ❌ %s 无开仓持仓，拒绝卖出信号 %s",
+                    symbol, signal["signal_id"],
+                )
+                self.brain.store.update_signal_status(signal["signal_id"], "rejected_no_position")
+                rejected_order: Order = {
+                    "order_id": f"ORD-{uuid.uuid4().hex[:8].upper()}",
+                    "signal_id": signal["signal_id"],
+                    "symbol": symbol,
+                    "side": "sell",
+                    "quantity": 0,
+                    "order_type": "limit",
+                    "limit_price": signal.get("entry_price", 0),
+                    "status": "rejected",
+                    "submitted_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                return rejected_order, None
+
+            entry_date = pos.get("entry_date") or ""
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if self.enforce_t1 and entry_date == today_str and not signal.get("allow_same_day_exit", False):
+                self.logger.warning(
+                    "[MOCK] ❌ %s 属于当日买入标的 (entry_date=%s)，受 A股 T+1 交易制度限制当日不可卖出，拒绝下单",
+                    symbol, entry_date,
+                )
+                self.brain.store.update_signal_status(signal["signal_id"], "rejected_t1_locked")
+                rejected_order: Order = {
+                    "order_id": f"ORD-{uuid.uuid4().hex[:8].upper()}",
+                    "signal_id": signal["signal_id"],
+                    "symbol": symbol,
+                    "side": "sell",
+                    "quantity": 0,
+                    "order_type": "limit",
+                    "limit_price": signal.get("entry_price", 0),
                     "status": "rejected",
                     "submitted_at": datetime.now().isoformat(),
                     "updated_at": datetime.now().isoformat(),

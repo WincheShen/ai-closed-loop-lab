@@ -315,13 +315,14 @@ async def test_execute_tail_hunt_success(tmp_path, monkeypatch):
 async def test_execute_morning_pulse_take_profit(tmp_path, monkeypatch):
     brain = _MockBrain(tmp_path)
     # 先建立一个底仓
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     brain.store.open_position(
         position_id="POS-PULSE-1",
         symbol="300209",
         name="行云科技",
         entry_price=20.0,
         qty=1000,
-        entry_date=date.today().isoformat(),
+        entry_date=yesterday,
         persona_id="ultra_short_momentum_v1",
         target_price=21.6,
         stop_loss=19.5,

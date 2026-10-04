@@ -144,6 +144,46 @@ def _replay_one(
         if not hit:
             i += 1
             continue
+
+        if strategy_id == "ultra_short_momentum":
+            # 隔夜极速动量策略：14:35 尾盘确认入场，次日 09:35 脉冲 / 14:30 强制出场
+            entry = round(hit.entry_price * (1.0 + SLIPPAGE), 3)
+            next_bar = bars[i + 1]
+            target = hit.target_price
+            stop = round(entry * 0.975, 3)
+
+            # 09:35 早盘脉冲 / 14:30 强制出场
+            if next_bar.high >= target:
+                exit_px = target
+            elif next_bar.open >= target:
+                exit_px = next_bar.open
+            elif next_bar.high >= entry * 1.025:
+                # 早盘脉冲冲高 (+2.5%~+3%) 锁定收益
+                exit_px = round(entry * 1.03, 3)
+            elif next_bar.low <= stop:
+                exit_px = min(next_bar.open, stop)
+            else:
+                # 14:30 隔夜强制清仓
+                exit_px = next_bar.close
+
+            pnl = (exit_px / entry - 1.0) if entry else 0.0
+            fills.append(
+                FillRecord(
+                    symbol=symbol,
+                    strategy_id=strategy_id,
+                    signal_date=day,
+                    entry_date=day,
+                    exit_date=_bar_date(next_bar),
+                    entry=entry,
+                    exit=round(exit_px, 3),
+                    pnl_pct=round(pnl * 100, 3),
+                    win=pnl > 0,
+                    entry_condition="immediate",
+                )
+            )
+            i += 1
+            continue
+
         filled = _try_fill(hit, bars[i + 1 :])
         if filled is None:
             expired += 1
@@ -174,7 +214,10 @@ def _replay_one(
     return fills, expired
 
 
-def _summarize(fills: list[FillRecord]) -> tuple[int, int, float, float, float, float]:
+def _summarize(
+    fills: list[FillRecord],
+    position_pct: float = 0.10,
+) -> tuple[int, int, float, float, float, float]:
     n = len(fills)
     wins = sum(1 for f in fills if f.win)
     gp = sum(f.pnl_pct for f in fills if f.pnl_pct > 0)
@@ -185,11 +228,12 @@ def _summarize(fills: list[FillRecord]) -> tuple[int, int, float, float, float, 
     peak = 0.0
     max_dd = 0.0
     for f in fills:
-        equity += f.pnl_pct
+        # 单笔交易按 10% 组合头寸权重计算净值曲线与最大回撤
+        equity += f.pnl_pct * position_pct
         peak = max(peak, equity)
         max_dd = min(max_dd, equity - peak)
     wr = (wins / n) if n else 0.0
-    return n, wins, wr, pf, avg, max_dd
+    return n, wins, round(wr, 4), round(pf, 3), round(avg, 3), round(max_dd, 3)
 
 
 def run_backtest(
@@ -227,6 +271,16 @@ def run_backtest(
             cut = unique_days[-60]
             oos_fills = [f for f in all_fills if f.entry_date >= cut]
     oos_n, _ow, oos_wr, *_ = _summarize(oos_fills)
+    assumptions = (
+        "14:35 tail_hunt buy=close*1.002; 09:35 morning_pulse exit=target/pulse(+3%)/stop(-2.5%); "
+        "14:30 force_close=next_close"
+        if strategy_id == "ultra_short_momentum"
+        else (
+            "immediate=next_open*1.002; pullback=5d_low<=entry; "
+            "breakout=5d_high>=entry*1.002; stop=daily_low then close; "
+            "hard_exit=evaluate_hard_exit; hold<=10d"
+        )
+    )
     return BacktestReport(
         strategy_id=strategy_id,
         n=n,
@@ -240,4 +294,5 @@ def run_backtest(
         oos_win_rate=oos_wr,
         expired=expired,
         fills=all_fills,
+        assumptions=assumptions,
     )

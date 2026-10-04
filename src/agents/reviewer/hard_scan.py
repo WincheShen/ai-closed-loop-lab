@@ -52,6 +52,14 @@ async def run_hard_scan(
 
     for pos in positions:
         symbol = pos.get("symbol", "")
+
+        # A 股 T+1 交易纪律：当日买入的持仓无法在当日卖出
+        entry_date = pos.get("entry_date") or ""
+        today_str = date.today().isoformat()
+        if entry_date == today_str and not force:
+            logger.info("[HARD] %s 为当日建仓 (entry_date=%s, T+1 锁定)，无法当日卖出，保留持仓", symbol, entry_date)
+            continue
+
         price, is_mock = _price_for(symbol, pos, intraday, price_cache)
         if is_mock or price <= 0:
             logger.warning("[HARD] %s 无真实行情，跳过硬止损", symbol)
