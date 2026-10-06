@@ -204,6 +204,7 @@ def list_personas(path: Path | str | None = None) -> list[dict[str, Any]]:
                 "strategy_regime_compatibility": p.get("strategy_regime_compatibility", {}),
                 "social_style": p.get("social_style", {}),
                 "stock_selection_rules": p.get("stock_selection_rules", {}),
+                "daily_pipeline": p.get("daily_pipeline", True),
             }
             for p in personas_data
             if p.get("enabled", True)
