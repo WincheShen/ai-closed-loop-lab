@@ -157,9 +157,9 @@ def _replay_one(
                 exit_px = target
             elif next_bar.open >= target:
                 exit_px = next_bar.open
-            elif next_bar.high >= entry * 1.025:
-                # 早盘脉冲冲高 (+2.5%~+3%) 锁定收益
-                exit_px = round(entry * 1.03, 3)
+            elif next_bar.high >= entry * 1.035:
+                # 早盘脉冲冲高 ≥ +3.5% 锁定收益（与 tail_hunt.execute_morning_pulse 阈值一致）
+                exit_px = round(entry * 1.035, 3)
             elif next_bar.low <= stop:
                 exit_px = min(next_bar.open, stop)
             else:
@@ -272,8 +272,9 @@ def run_backtest(
             oos_fills = [f for f in all_fills if f.entry_date >= cut]
     oos_n, _ow, oos_wr, *_ = _summarize(oos_fills)
     assumptions = (
-        "14:35 tail_hunt buy=close*1.002; 09:35 morning_pulse exit=target/pulse(+3%)/stop(-2.5%); "
-        "14:30 force_close=next_close"
+        "14:35 tail_hunt buy=close*1.002; 09:35 morning_pulse exit=target/pulse(+3.5%)/stop(-2.5%); "
+        "14:30 force_close=next_close; OPTIMISTIC: pulse assumes any intraday high is caught at 09:35, "
+        "target checked before stop on same bar; dd uses 10% position weight"
         if strategy_id == "ultra_short_momentum"
         else (
             "immediate=next_open*1.002; pullback=5d_low<=entry; "

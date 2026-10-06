@@ -237,13 +237,14 @@ def test_ultra_short_synthetic_backtest_deterministic() -> None:
     assert any(g.name == "G-bt-2" and g.ok for g in evaluate_gates(r1))
 
 
-def test_ultra_short_persona_dormant_but_loadable() -> None:
-    """人格 enabled:false → 不进调度器枚举；显式按 id 加载仍可用（回测/研究）。"""
+def test_ultra_short_persona_enabled_without_daily_pipeline() -> None:
+    """人格 enabled:true 进调度器枚举（hard_scan/复审），但 daily_pipeline:false 禁止 LLM 管线开仓。"""
     from src.agents.cio.trading_persona import list_personas, load_persona_by_id
 
-    ids = [p["id"] for p in list_personas()]
-    assert "ultra_short_momentum_v1" not in ids
-    assert "short_term_hot_rotation_v1" in ids
+    personas = {p["id"]: p for p in list_personas()}
+    assert "ultra_short_momentum_v1" in personas
+    assert personas["ultra_short_momentum_v1"].get("daily_pipeline") is False
+    assert "short_term_hot_rotation_v1" in personas
     persona = load_persona_by_id("ultra_short_momentum_v1")
     assert persona.id == "ultra_short_momentum_v1"
     assert persona.max_total_position_for("panic") == 0.0

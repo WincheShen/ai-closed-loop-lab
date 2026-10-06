@@ -195,6 +195,9 @@ def job_daily_pipeline() -> None:
     for p in personas:
         persona_id = p["id"]
         persona_name = p.get("name", persona_id)
+        if not p.get("daily_pipeline", True):
+            logger.info("人格 %s 配置 daily_pipeline=false，跳过 LLM 日常管线（由专属调度执行）", persona_name)
+            continue
         logger.info("开始执行人格: %s (%s)", persona_name, persona_id)
         try:
             asyncio.run(run_daily_pipeline("mock", persona_id=persona_id))

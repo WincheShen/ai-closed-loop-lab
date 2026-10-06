@@ -292,7 +292,9 @@ class ExecutionEngine:
 
         # --- P0.1b: 卖出前 T+1 与持仓检查 ---
         if action == "sell":
-            existing = self.brain.store.list_open_positions(persona_id=self.persona_id)
+            existing = self.brain.store.list_open_positions(
+                persona_id=self.persona_id, include_unassigned=True,
+            )
             pos = next((p for p in existing if p["symbol"] == symbol), None)
             if not pos:
                 self.logger.warning(

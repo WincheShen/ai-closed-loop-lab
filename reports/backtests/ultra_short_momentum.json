@@ -1,16 +1,16 @@
 {
   "strategy_id": "ultra_short_momentum",
   "n": 665,
-  "wins": 377,
-  "losses": 288,
-  "win_rate": 0.5669,
-  "profit_factor": 1.903,
-  "avg_pnl_pct": 1.249,
-  "max_drawdown_pct": -10.243,
+  "wins": 328,
+  "losses": 337,
+  "win_rate": 0.4932,
+  "profit_factor": 1.597,
+  "avg_pnl_pct": 0.933,
+  "max_drawdown_pct": -10.68,
   "oos_n": 127,
-  "oos_win_rate": 0.5591,
+  "oos_win_rate": 0.4646,
   "expired": 0,
-  "assumptions": "14:35 tail_hunt buy=close*1.002; 09:35 morning_pulse exit=target/pulse(+3%)/stop(-2.5%); 14:30 force_close=next_close",
+  "assumptions": "14:35 tail_hunt buy=close*1.002; 09:35 morning_pulse exit=target/pulse(+3.5%)/stop(-2.5%); 14:30 force_close=next_close; OPTIMISTIC: pulse assumes any intraday high is caught at 09:35, target checked before stop on same bar; dd uses 10% position weight",
   "gates": {
     "strategy_id": "ultra_short_momentum",
     "kind": "short",
@@ -24,22 +24,22 @@
       {
         "name": "G-bt-3",
         "ok": true,
-        "detail": "wr=56.7% need>=48%"
+        "detail": "wr=49.3% need>=48%"
       },
       {
         "name": "G-bt-4",
         "ok": true,
-        "detail": "pf=1.903 need>=1.2"
+        "detail": "pf=1.597 need>=1.2"
       },
       {
         "name": "G-bt-5",
         "ok": true,
-        "detail": "dd=-10.243 need<=15.0"
+        "detail": "dd=-10.68 need<=15.0"
       },
       {
         "name": "G-bt-6",
         "ok": true,
-        "detail": "oos_n=127 oos_wr=55.9% floor=48.7%"
+        "detail": "oos_n=127 oos_wr=46.5% floor=41.3%"
       },
       {
         "name": "G-bt-7",
@@ -48,10 +48,10 @@
       }
     ],
     "n": 665,
-    "win_rate": 0.5669,
-    "profit_factor": 1.903,
-    "max_drawdown_pct": -10.243,
+    "win_rate": 0.4932,
+    "profit_factor": 1.597,
+    "max_drawdown_pct": -10.68,
     "oos_n": 127,
-    "oos_win_rate": 0.5591
+    "oos_win_rate": 0.4646
   }
 }
