@@ -164,7 +164,7 @@ async def execute_tail_hunt(
         name = item.get("name", symbol)
 
         try:
-            snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="30", bar_limit=16)
+            snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="30", bar_limit=8)
         except Exception as e:  # noqa: BLE001
             logger.debug("[TAIL-HUNT] 获取 %s 盘中快照失败: %s", symbol, e)
             continue
@@ -174,16 +174,22 @@ async def execute_tail_hunt(
             continue
 
         current_price = snapshot.current_price
-        turnover = snapshot.turnover
         bars = snapshot.bars
         if len(bars) < 2:
             continue
 
-        high = snapshot.high
-        low = snapshot.low
+        # 仅取当日 K 线（30分钟单日最多 8 根），避免跨日聚合失真
+        latest_date = bars[-1].timestamp.date()
+        today_bars = [b for b in bars if b.timestamp.date() == latest_date]
+        if not today_bars:
+            continue
+
+        high = max(b.high for b in today_bars)
+        low = min(b.low for b in today_bars)
         day_range = high - low
         close_pos = (current_price - low) / day_range if day_range > 0 else 0.5
         amplitude = day_range / snapshot.prev_close if snapshot.prev_close > 0 else 0.0
+        turnover = sum(b.turnover for b in today_bars) if any(b.turnover > 0 for b in today_bars) else snapshot.turnover
 
         # 流动性与振幅硬过滤
         if turnover < _MIN_TURNOVER or amplitude < _MIN_AMPLITUDE:

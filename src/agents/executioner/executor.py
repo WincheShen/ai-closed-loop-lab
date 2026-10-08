@@ -267,8 +267,30 @@ class ExecutionEngine:
         action = signal.get("action", "")
         symbol = signal["symbol"]
 
-        # --- P0.1: 买入前重复持仓检查（在下单前拦截） ---
+        # --- P0.1: 买入前重复持仓与策略专属校验 ---
         if action == "buy":
+            if self.persona_id == "ultra_short_momentum_v1":
+                sig_strat = signal.get("strategy_id") or signal.get("strategy")
+                if sig_strat != "ultra_short_momentum":
+                    self.logger.warning(
+                        "[MOCK] ❌ 人格 %s 仅允许 ultra_short_momentum 专属策略开仓，拒绝信号 %s (strategy=%s)",
+                        self.persona_id, signal["signal_id"], sig_strat,
+                    )
+                    self.brain.store.update_signal_status(signal["signal_id"], "rejected_strategy_mismatch")
+                    rejected_order: Order = {
+                        "order_id": f"ORD-{uuid.uuid4().hex[:8].upper()}",
+                        "signal_id": signal["signal_id"],
+                        "symbol": symbol,
+                        "side": "buy",
+                        "quantity": 0,
+                        "order_type": "limit",
+                        "limit_price": signal["entry_price"],
+                        "status": "rejected",
+                        "submitted_at": datetime.now().isoformat(),
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                    return rejected_order, None
+
             existing = self.brain.store.list_open_positions(persona_id=self.persona_id)
             if any(p["symbol"] == symbol for p in existing):
                 self.logger.warning(
