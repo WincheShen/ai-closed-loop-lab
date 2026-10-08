@@ -167,9 +167,8 @@ class IntradayClient:
             logger.warning("拉取分钟K线失败 %s: %s", symbol, e)
             bars = []
 
-        quote = self._fetch_quote_sina(symbol)
-
         if not bars:
+            quote = self._fetch_quote_sina(symbol)
             if quote and quote["current_price"] > 0:
                 # 分钟K线失败但实时行情正常时，用实时快照兜底
                 now_bar = MinuteBar(
@@ -210,34 +209,18 @@ class IntradayClient:
 
         latest = bars[-1]
         first = bars[0]
-        curr_p = latest.close
-        prev_close = (
-            quote["prev_close"]
-            if (quote and quote["prev_close"] > 0)
-            else (first.open / (1 + first.change_pct / 100) if first.change_pct else first.open)
-        )
-        change_pct = (
-            quote["change_pct"]
-            if quote
-            else (round((latest.close / prev_close - 1) * 100, 2) if prev_close else 0)
-        )
-        high = quote["high"] if (quote and quote["high"] > 0) else max(b.high for b in bars)
-        low = quote["low"] if (quote and quote["low"] > 0) else min(b.low for b in bars)
-        open_p = quote["open"] if (quote and quote["open"] > 0) else first.open
-        vol = quote["volume"] if (quote and quote["volume"] > 0) else sum(b.volume for b in bars)
-        turnover = quote["turnover"] if (quote and quote["turnover"] > 0) else sum(b.turnover for b in bars)
-
+        prev_close = first.open / (1 + first.change_pct / 100) if first.change_pct else first.open
         return IntradaySnapshot(
             symbol=symbol,
-            name=quote.get("name") or name,
-            current_price=curr_p,
+            name=name,
+            current_price=latest.close,
             prev_close=round(prev_close, 2),
-            change_pct=change_pct,
-            high=high,
-            low=low,
-            open=open_p,
-            volume=vol,
-            turnover=turnover,
+            change_pct=round((latest.close / prev_close - 1) * 100, 2) if prev_close else 0,
+            high=max(b.high for b in bars),
+            low=min(b.low for b in bars),
+            open=first.open,
+            volume=sum(b.volume for b in bars),
+            turnover=sum(b.turnover for b in bars),
             bars=bars,
             is_mock=self._last_source == "mock",
         )

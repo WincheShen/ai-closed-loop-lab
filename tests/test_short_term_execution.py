@@ -31,6 +31,9 @@ class _MockBrain:
         self.store = MemoryStore(str(tmp_path / "test_st.db"))
         self.bus = _DummyBus()
 
+    def log_agent_event(self, **kwargs):
+        pass
+
 
 def _make_snapshot(price: float, is_mock: bool = False, turnover: float = 4e8, change_pct: float = 2.0) -> IntradaySnapshot:
     bars = [
@@ -236,6 +239,38 @@ def test_check_cold_period_post_loss(tmp_path):
     assert "触发止损" in reason or "冷静期" in reason
 
 
+def test_check_cold_period_friday_to_monday(tmp_path, monkeypatch):
+    """验证周五大亏平仓，跨周末至周一依然严格保持 1 个交易日冷静期。"""
+    brain = _MockBrain(tmp_path)
+    monday = date(2026, 9, 21)
+    friday = date(2026, 9, 18)
+
+    class MockDate(date):
+        @classmethod
+        def today(cls):
+            return monday
+
+    monkeypatch.setattr("src.agents.reviewer.tail_hunt.date", MockDate)
+
+    brain.store.open_position(
+        position_id="POS-FRI-1",
+        symbol="300209",
+        entry_price=10.0,
+        qty=1000,
+        entry_date=friday.isoformat(),
+        persona_id="ultra_short_momentum_v1",
+    )
+    brain.store.close_position("POS-FRI-1", close_price=9.50, realized_pnl=-500.0)
+    brain.store._conn().execute(
+        "UPDATE positions SET closed_at=? WHERE position_id='POS-FRI-1'",
+        (friday.isoformat() + "T14:35:00",),
+    )
+
+    is_cold, reason = check_cold_period(brain, "ultra_short_momentum_v1")
+    assert is_cold is True
+    assert "冷静期" in reason
+
+
 def test_check_cold_period_bad_weather(tmp_path):
     brain = _MockBrain(tmp_path)
     conn = brain.store._conn()
@@ -330,7 +365,7 @@ async def test_execute_morning_pulse_take_profit(tmp_path, monkeypatch):
 
     # 模拟早盘高开冲高 +6% (21.2)
     monkeypatch.setattr(
-        "src.agents.reviewer.tail_hunt.IntradayClient.fetch_intraday_snapshot",
+        "src.stock_analyzer.data_source.intraday_client.IntradayClient.fetch_intraday_snapshot",
         lambda self, symbol, **kwargs: _make_snapshot(21.2, is_mock=False, turnover=3e8, change_pct=6.0),
     )
 

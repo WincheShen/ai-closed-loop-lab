@@ -61,8 +61,9 @@ def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
             closed_at_str = latest.get("closed_at") or ""
             if closed_at_str:
                 closed_date = date.fromisoformat(closed_at_str[:10])
-                days_since_closed = (date.today() - closed_date).days
-                # 如果是今天或昨天平仓，且亏损 >= 2.5%
+                from src.infra.data_quality import trading_days_between
+                days_since_closed = trading_days_between(closed_date, date.today())
+                # 如果在 1 个交易日之内（含当日平仓或上个交易日平仓），且亏损 >= 2.5%
                 entry_p = float(latest.get("entry_price") or 0)
                 close_p = float(latest.get("close_price") or 0)
                 pnl_pct = (close_p / entry_p - 1) * 100 if entry_p > 0 else 0
@@ -71,7 +72,7 @@ def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
                 if days_since_closed <= 1 and (pnl_pct <= -2.5 or realized_pnl < -1000):
                     reason = (
                         f"上一笔交易 {latest.get('symbol')} 于 {closed_at_str[:10]} 触发止损 "
-                        f"(PnL={pnl_pct:.2f}%)，进入 1 天强制冷静期，全天保持 100% 现金"
+                        f"(PnL={pnl_pct:.2f}%)，进入 1 个交易日强制冷静期，全天保持 100% 现金"
                     )
                     return True, reason
     except Exception as e:  # noqa: BLE001
@@ -281,7 +282,9 @@ async def execute_morning_pulse(
     persona_id: str = PERSONA_ID,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """09:35 早盘脉冲：冲高止盈 / 低开止损 / 回流跟踪。"""
+    """09:35 早盘脉冲：委托给统一 hard_scan 执行（消除双轨冲突与规则分叉）。"""
+    from src.agents.reviewer.hard_scan import run_hard_scan
+
     brain = brain or get_central_brain()
     session_id = session_id or f"morning-pulse-{datetime.now().strftime('%Y%m%d-%H%M')}-{uuid.uuid4().hex[:4]}"
     logger.info("⏰ [MORNING-PULSE] 开始执行 09:35 早盘脉冲巡检 (persona=%s)", persona_id)
@@ -291,79 +294,8 @@ async def execute_morning_pulse(
         logger.info("[MORNING-PULSE] 当前无持仓，跳过")
         return {"checked": 0, "actions": []}
 
-    intraday = IntradayClient(allow_mock_fallback=False)
-    actions = []
-
-    for pos in positions:
-        symbol = pos["symbol"]
-        name = pos.get("name", symbol)
-        entry_price = float(pos["entry_price"])
-        stop_loss = float(pos.get("stop_loss") or (entry_price * 0.975))
-        target_price = float(pos.get("target_price") or (entry_price * 1.08))
-
-        try:
-            snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="1", bar_limit=10)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("[MORNING-PULSE] 获取 %s 快照失败: %s", symbol, e)
-            continue
-
-        # 数据防护
-        current_price = snapshot.current_price or 0.0
-        if getattr(snapshot, "is_mock", False) or current_price <= 0:
-            continue
-        if abs(current_price - entry_price) / entry_price > 0.30:
-            logger.warning("[MORNING-PULSE] %s 价格异常偏离 (%.2f vs %.2f)，跳过", symbol, current_price, entry_price)
-            continue
-
-        pnl_pct = (current_price / entry_price - 1) * 100
-
-        action = None
-        reason = ""
-
-        # 1. 冲高脉冲止盈 (浮盈达到目标价或浮盈 >= 3.5%)
-        if current_price >= target_price or pnl_pct >= 3.5:
-            action = "EXIT"
-            reason = f"次日早盘冲高脉冲止盈 (现价={current_price:.2f}, 浮盈={pnl_pct:.2f}%)"
-
-        # 2. 破位极窄止损 (浮亏跌破止损位或浮亏 <= -2.5%)
-        elif current_price <= stop_loss or pnl_pct <= -2.5:
-            action = "EXIT"
-            reason = f"次日早盘触发极窄止损 (现价={current_price:.2f}, 浮亏={pnl_pct:.2f}%)"
-
-        if action:
-            logger.info("⚡ [MORNING-PULSE] 触发动作: %s %s -> %s (%s)", symbol, name, action, reason)
-            review = {
-                "action": action,
-                "current_price": current_price,
-                "reason": reason,
-            }
-            exec_res = await _execute_review_action(
-                brain,
-                session_id=session_id,
-                position=pos,
-                review=review,
-                persona_id=persona_id,
-            )
-
-            # 复刻「行云科技」逻辑：若止盈或轻微止损，自动回流自选股跟踪池
-            if exec_res.get("executed") and pnl_pct >= -3.5:
-                wl_mgr = ShortTermWatchlistManager(brain)
-                wl_mgr.add_rebound_watch(
-                    symbol=symbol,
-                    name=name,
-                    sector=pos.get("sector", ""),
-                    last_price=current_price,
-                    reason=f"早盘平仓(PnL={pnl_pct:.1f}%)，保留自选池跟踪等待二次企稳",
-                )
-
-            actions.append({
-                "symbol": symbol,
-                "action": action,
-                "price": current_price,
-                "pnl_pct": pnl_pct,
-                "result": exec_res,
-            })
-
+    results = await run_hard_scan(persona_id=persona_id, force=True, brain=brain)
+    actions = [r for r in results if r.get("action") in ("EXIT", "REDUCE")]
     return {"checked": len(positions), "actions": actions}
 
 

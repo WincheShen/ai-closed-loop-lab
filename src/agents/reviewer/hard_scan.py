@@ -22,6 +22,7 @@ async def run_hard_scan(
     persona_id: str | None = None,
     *,
     force: bool = False,
+    brain=None,
 ) -> list[dict]:
     """每 5 分钟：硬止损、条件单、过期。零 LLM。"""
     from src.agents.reviewer.intraday_loop import (
@@ -34,7 +35,7 @@ async def run_hard_scan(
         logger.info("非交易时段，跳过 hard_scan")
         return []
 
-    brain = get_central_brain()
+    brain = brain or get_central_brain()
     session_id = (
         f"hard-{date.today().isoformat()}-"
         f"{datetime.now().strftime('%H%M')}-{persona_id or 'all'}"
@@ -81,6 +82,27 @@ async def run_hard_scan(
                 brain, session_id, pos, review, persona_id=persona_id,
             )
             review.update(executed)
+
+            # 隔夜动量持仓平仓后，若趋势健康 (pnl_pct >= -3.5%)，自动回流自选池跟踪等待二次企稳
+            is_ultra_short = (
+                persona_id == "ultra_short_momentum_v1"
+                or pos.get("persona_id") == "ultra_short_momentum_v1"
+            )
+            if (
+                is_ultra_short
+                and review.get("action") == "EXIT"
+                and review.get("executed")
+                and pnl_pct >= -3.5
+            ):
+                from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
+                wl_mgr = ShortTermWatchlistManager(brain)
+                wl_mgr.add_rebound_watch(
+                    symbol=symbol,
+                    name=pos.get("name", symbol),
+                    sector=pos.get("sector", ""),
+                    last_price=price,
+                    reason=f"隔夜持仓平仓(PnL={pnl_pct:+.1f}%)，自动回流自选池跟踪二次机会",
+                )
         except Exception as exc:
             logger.error("[HARD] 执行 %s %s 失败: %s", review["action"], symbol, exc)
             review["execution_error"] = str(exc)
@@ -93,18 +115,19 @@ async def run_hard_scan(
     triggered = await _check_pending_signals(brain, session_id, force=force)
     expired_n = expire_stale_signals(brain)
 
-    brain.log_agent_event(
-        session_id=session_id,
-        agent="hard_scan",
-        event_type="hard_scan_complete",
-        payload={
-            "persona_id": persona_id,
-            "open_positions": len(positions),
-            "hard_exits": len(exits),
-            "pending_triggered": len(triggered),
-            "expired": expired_n,
-        },
-    )
+    if hasattr(brain, "log_agent_event"):
+        brain.log_agent_event(
+            session_id=session_id,
+            agent="hard_scan",
+            event_type="hard_scan_complete",
+            payload={
+                "persona_id": persona_id,
+                "open_positions": len(positions),
+                "hard_exits": len(exits),
+                "pending_triggered": len(triggered),
+                "expired": expired_n,
+            },
+        )
     logger.info(
         "hard_scan 完成: 持仓=%d 硬动作=%d 条件单=%d 过期=%d",
         len(positions), len(exits), len(triggered), expired_n,

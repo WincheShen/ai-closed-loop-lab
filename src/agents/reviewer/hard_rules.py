@@ -21,13 +21,53 @@ def evaluate_hard_exit(position: dict, current_price: float) -> dict[str, Any] |
     """价格触发则返回决策 dict，否则 None。
 
     优先级：止损 / 浮亏-8% > 目标价减仓。
+    针对 ultra_short_momentum_v1 (隔夜极速动量)：
+    - 极窄止损线：当前价 <= stop_loss 或 pnl_pct <= -2.5%
+    - 冲高止盈线：当前价 >= target_price 或 pnl_pct >= 3.5% (全仓 EXIT，不减仓)
     """
     if current_price <= 0:
         return None
     pnl_pct = position_pnl_pct(position, current_price)
     stop_loss = float(position.get("stop_loss") or 0)
     target_price = float(position.get("target_price") or 0)
+    persona_id = position.get("persona_id") or ""
+    is_ultra_short = (
+        persona_id == "ultra_short_momentum_v1"
+        or position.get("strategy_id") == "ultra_short_momentum"
+    )
 
+    if is_ultra_short:
+        # 1. 隔夜动量极窄止损 (触及 stop_loss 或 浮亏 <= -2.5%)
+        if (stop_loss > 0 and current_price <= stop_loss) or pnl_pct <= -2.5:
+            return {
+                "action": "EXIT",
+                "confidence": 1.0,
+                "reason": (
+                    f"隔夜极速动量触及极窄止损 (现价={current_price:.2f}, "
+                    f"PnL={pnl_pct:.2f}%)，规则引擎强制清仓"
+                ),
+                "thesis_status": "invalidated",
+                "key_observation": f"极窄止损: {pnl_pct:.2f}% <= -2.5%",
+                "risk_flag": "stop_loss_triggered",
+                "rule_override": True,
+            }
+        # 2. 隔夜动量冲高脉冲止盈 (触及 target_price 或 浮盈 >= +3.5%)
+        if (target_price > 0 and current_price >= target_price) or pnl_pct >= 3.5:
+            return {
+                "action": "EXIT",
+                "confidence": 1.0,
+                "reason": (
+                    f"隔夜极速动量触发冲高脉冲止盈 (现价={current_price:.2f}, "
+                    f"PnL={pnl_pct:.2f}%)，规则引擎兑现利润"
+                ),
+                "thesis_status": "intact",
+                "key_observation": f"脉冲止盈: {pnl_pct:.2f}% >= +3.5%",
+                "risk_flag": "",
+                "rule_override": True,
+            }
+        return None
+
+    # --- 常规人格持仓硬规则 ---
     if stop_loss > 0 and current_price <= stop_loss:
         return {
             "action": "EXIT",
