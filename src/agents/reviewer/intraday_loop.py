@@ -104,11 +104,23 @@ async def run_intraday_review(
         agent="reviewer",
         event_type="intraday_review_complete",
         payload={
+            "persona_id": persona_id,
             "total_positions": len(reviews),
             "actions_taken": len(actions_taken),
             "summary": [
                 {"symbol": r["symbol"], "action": r["action"], "reason": r.get("reason", "")}
                 for r in actions_taken
+            ],
+            "reviews": [
+                {
+                    "symbol": r.get("symbol"),
+                    "action": r.get("action"),
+                    "confidence": r.get("confidence"),
+                    "reason": r.get("reason", ""),
+                    "executed": r.get("executed"),
+                    "execution_error": r.get("execution_error"),
+                }
+                for r in action_results
             ],
         },
     )

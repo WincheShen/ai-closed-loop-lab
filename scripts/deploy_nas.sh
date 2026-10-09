@@ -47,14 +47,20 @@ TMP="$(mktemp -t ai-lab-deploy.XXXXXX).tgz"
 cleanup() { rm -f "$TMP"; }
 trap cleanup EXIT
 
-echo "==> packing src/ scripts/ config/ docker/docker-compose.nas.yml"
+# 前端 dist 是 web 容器的 bind-mount，改动 UI 前必须先本地构建
+if [[ ! -f frontend/dist/index.html ]]; then
+  echo "⚠️  frontend/dist 不存在 — UI 改动不会生效（先 cd frontend && npm run build）" >&2
+fi
+
+echo "==> packing src/ scripts/ config/ frontend/dist docker/docker-compose.nas.yml"
 # 只打热更新所需目录；不打 data / .env / logs
 COPYFILE_DISABLE=1 tar -czf "$TMP" \
   --exclude='.DS_Store' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   --exclude='._*' \
-  src scripts config docker/docker-compose.nas.yml
+  src scripts config docker/docker-compose.nas.yml \
+  $( [[ -d frontend/dist ]] && echo frontend/dist )
 ls -lh "$TMP"
 
 echo "==> upload $STAGE"

@@ -117,6 +117,7 @@ class RiskGovernor:
                 decisions.append(d)
             self._persist_decisions(decisions)
             self._summary_log(signals, decisions)
+            self._emit_review_event(signals, decisions)
             return [], decisions
 
         # 当前已用仓位（按 持仓市值/初始资金 估算）
@@ -151,6 +152,7 @@ class RiskGovernor:
 
         self._persist_decisions(decisions)
         self._summary_log(signals, decisions)
+        self._emit_review_event(signals, decisions)
         return approved, decisions
 
     # ----------------------------------------------------------------------
@@ -330,6 +332,37 @@ class RiskGovernor:
                 d.original_position_pct * 100, d.approved_position_pct * 100,
                 d.reason,
             )
+
+    def _emit_review_event(
+        self, signals: list[TradeSignal], decisions: list[RiskDecision],
+    ) -> None:
+        """把风控裁决明细写入 events 表，供监控页展示。"""
+        try:
+            self.brain.log_agent_event(
+                self.session_id,
+                "risk_governor",
+                "risk_review_complete",
+                {
+                    "regime": self.regime,
+                    "posture": self.posture,
+                    "signal_count": len(signals),
+                    "approve": sum(1 for d in decisions if d.decision == "approve"),
+                    "reduce": sum(1 for d in decisions if d.decision == "reduce"),
+                    "reject": sum(1 for d in decisions if d.decision == "reject"),
+                    "decisions": [
+                        {
+                            "symbol": d.symbol,
+                            "decision": d.decision,
+                            "original_pct": d.original_position_pct,
+                            "approved_pct": d.approved_position_pct,
+                            "reason": d.reason,
+                        }
+                        for d in decisions
+                    ],
+                },
+            )
+        except Exception:
+            self.logger.debug("risk_review_complete 事件写入失败", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

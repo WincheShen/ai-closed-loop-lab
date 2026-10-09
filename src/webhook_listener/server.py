@@ -915,38 +915,213 @@ async def attribution_stats(days: int = 30):
 
 
 @app.get("/api/events/recent")
-async def recent_events(limit: int = 20):
-    """返回最近的事件记录（central_brain.db.events）。"""
+async def recent_events(
+    limit: int = 100,
+    date: str | None = None,
+    agent: str | None = None,
+    event_type: str | None = None,
+    session_id: str | None = None,
+):
+    """返回事件记录（central_brain.db.events）。
+
+    - 自动剔除 event_bus 广播产生的重复行（与 agent 行同 session+type）
+    - date: YYYY-MM-DD，按 created_at 当日过滤
+    - agent/event_type: 前缀模糊匹配
+    - session_id: 精确匹配，查看单次运行的完整事件链
+    """
     try:
         brain = _get_central_brain()
         conn = brain.store._conn()
-        rows = conn.execute(
-            """
-            SELECT event_id, event_type, payload, created_at
-            FROM events
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+
+        sql = """
+            SELECT e.event_id, e.agent, e.event_type, e.payload, e.created_at, e.session_id
+            FROM events e
+            WHERE (
+                e.agent != 'event_bus'
+                OR NOT EXISTS (
+                    SELECT 1 FROM events e2
+                    WHERE e2.session_id = e.session_id
+                      AND e2.event_type = e.event_type
+                      AND e2.agent != 'event_bus'
+                )
+            )
+        """
+        params: list = []
+        if date:
+            sql += " AND e.created_at LIKE ?"
+            params.append(f"{date}%")
+        if agent:
+            sql += " AND e.agent LIKE ?"
+            params.append(f"{agent}%")
+        if event_type:
+            sql += " AND e.event_type LIKE ?"
+            params.append(f"{event_type}%")
+        if session_id:
+            sql += " AND e.session_id = ?"
+            params.append(session_id)
+        sql += " ORDER BY e.created_at DESC LIMIT ?"
+        params.append(min(limit, 1000))
+
+        rows = conn.execute(sql, params).fetchall()
 
         events = []
         for r in rows:
             try:
-                payload = json.loads(r[2])
+                payload = json.loads(r[3])
             except Exception:
                 payload = {}
 
             events.append({
                 "id": r[0],
-                "event_type": r[1],
-                "created_at": r[3],
+                "agent": r[1],
+                "event_type": r[2],
+                "created_at": r[4],
+                "session_id": r[5],
                 "payload": payload,
             })
 
         return events
     except Exception as e:
         logger.error("recent_events error: %s", e)
+        return []
+
+
+@app.get("/api/workflow/runs")
+async def workflow_runs(date: str | None = None, limit: int = 100):
+    """把今日事件按运行单元（job/session）聚合，供监控页时间线展示。
+
+    每个 run = 一次 job 执行（job_started → job_finished/job_failed），
+    或一个独立的 session 事件簇（如手动触发的 pipeline）。
+    """
+    try:
+        brain = _get_central_brain()
+        conn = brain.store._conn()
+
+        date_filter = date or datetime.now().strftime("%Y-%m-%d")
+        rows = conn.execute(
+            """
+            SELECT e.event_id, e.agent, e.event_type, e.payload, e.created_at, e.session_id
+            FROM events e
+            WHERE e.created_at LIKE ?
+              AND (
+                  e.agent != 'event_bus'
+                  OR NOT EXISTS (
+                      SELECT 1 FROM events e2
+                      WHERE e2.session_id = e.session_id
+                        AND e2.event_type = e.event_type
+                        AND e2.agent != 'event_bus'
+                  )
+              )
+            ORDER BY e.created_at ASC
+            """,
+            (f"{date_filter}%",),
+        ).fetchall()
+
+        # 1. 解析所有事件
+        events = []
+        for r in rows:
+            try:
+                payload = json.loads(r[3])
+            except Exception:
+                payload = {}
+            events.append({
+                "id": r[0],
+                "agent": r[1],
+                "event_type": r[2],
+                "created_at": r[4],
+                "session_id": r[5] or "",
+                "payload": payload,
+            })
+
+        # 2. 按 session_id 聚合为 run
+        runs: dict[str, dict] = {}
+        for ev in events:
+            sid = ev["session_id"] or ev["id"]
+            run = runs.setdefault(sid, {
+                "session_id": sid,
+                "job": None,
+                "agents": set(),
+                "started_at": ev["created_at"],
+                "ended_at": ev["created_at"],
+                "event_count": 0,
+                "status": "ok",
+                "duration_s": None,
+                "summary": {},
+            })
+            run["agents"].add(ev["agent"])
+            run["ended_at"] = ev["created_at"]
+            run["event_count"] += 1
+            et = ev["event_type"]
+            p = ev["payload"] or {}
+
+            if et == "job_started":
+                run["job"] = p.get("job")
+            elif et == "job_finished":
+                run["duration_s"] = p.get("duration_s")
+                run["summary"] = {k: v for k, v in p.items() if k not in ("job", "duration_s")}
+            elif et == "job_failed":
+                run["status"] = "failed"
+                run["duration_s"] = p.get("duration_s")
+                run["summary"] = {"error": p.get("error")}
+            elif et in ("node_failed",) or "error" in et or "fail" in et:
+                run["status"] = "failed"
+
+        # 3. 把 job 窗口内的子事件（内部 session 产生的）关联到 run.steps
+        def _ts(ev: dict) -> datetime:
+            try:
+                return datetime.fromisoformat(ev["created_at"])
+            except Exception:
+                return datetime.min
+
+        job_runs = [r for r in runs.values() if r["job"]]
+        non_scheduler_events = [
+            ev for ev in events
+            if ev["agent"] != "scheduler"
+            or ev["event_type"] not in ("job_started", "job_finished", "job_failed")
+        ]
+        for run in job_runs:
+            t0 = _ts({"created_at": run["started_at"]})
+            t1 = _ts({"created_at": run["ended_at"]})
+            steps = [
+                ev for ev in non_scheduler_events
+                if ev["session_id"] != run["session_id"]
+                and t0 <= _ts(ev) <= t1
+            ]
+            # 合并自身 session 的 job_* 事件在前的其余事件 + 窗口内子事件
+            own_steps = [
+                ev for ev in events
+                if ev["session_id"] == run["session_id"]
+                and ev["event_type"] not in ("job_started", "job_finished", "job_failed")
+            ]
+            run["steps"] = own_steps + steps
+            # 子 session 产生的 run 不再单列（已并入父 job 时间线）
+            child_sids = {ev["session_id"] for ev in steps}
+            run["child_session_ids"] = sorted(child_sids)
+
+        # 4. 计算耗时（无 duration_s 时用首尾事件差）+ 排序
+        absorbed = set()
+        for run in job_runs:
+            absorbed.update(run.get("child_session_ids") or [])
+
+        result = []
+        for sid, run in runs.items():
+            if sid in absorbed and not run["job"]:
+                continue
+            if run["duration_s"] is None:
+                try:
+                    t0 = datetime.fromisoformat(run["started_at"])
+                    t1 = datetime.fromisoformat(run["ended_at"])
+                    run["duration_s"] = round((t1 - t0).total_seconds(), 2)
+                except Exception:
+                    pass
+            run["agents"] = sorted(run["agents"] | {s["agent"] for s in run.get("steps", [])})
+            run["event_count"] += len(run.get("steps", []))
+            result.append(run)
+
+        result.sort(key=lambda r: r["started_at"], reverse=True)
+        return result[: min(limit, 500)]
+    except Exception as e:
+        logger.error("workflow_runs error: %s", e)
         return []
 
 

@@ -942,6 +942,22 @@ class StrategistEngine:
                 "analyzed": analyze_count,
                 "buy_count": len(signals),
                 "symbols": [s["symbol"] for s in signals],
+                "signals": [
+                    {
+                        "symbol": s["symbol"],
+                        "name": s.get("name", ""),
+                        "action": s["action"],
+                        "entry_price": s.get("entry_price"),
+                        "stop_loss": s.get("stop_loss"),
+                        "target_price": s.get("target_price"),
+                        "position_pct": s.get("position_pct"),
+                        "strategy": s.get("strategy"),
+                        "entry_condition": s.get("entry_condition"),
+                        "confidence": s.get("confidence"),
+                        "rationale": (s.get("rationale") or "")[:200],
+                    }
+                    for s in signals
+                ],
             },
         )
         self.logger.info(

@@ -177,9 +177,20 @@ class ExplorerScanner:
             self.session_id, "explorer", "scan_complete",
             {
                 "date": str(self._snapshot.snapshot_date),
+                "universe_size": len(self._snapshot.stocks),
                 "candidate_count": len(candidates),
                 "top_sectors": self._hot_names,
                 "is_mock": self._snapshot.is_mock,
+                "top_candidates": [
+                    {
+                        "symbol": c["symbol"],
+                        "name": c["name"],
+                        "sector": c["sector"],
+                        "score": c["qlib_score"],
+                        "reasons": c["hot_reason"][:2],
+                    }
+                    for c in candidates[:10]
+                ],
             },
         )
         return candidates

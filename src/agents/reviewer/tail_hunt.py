@@ -117,18 +117,34 @@ async def execute_tail_hunt(
     session_id = session_id or f"tail-hunt-{datetime.now().strftime('%Y%m%d-%H%M')}-{uuid.uuid4().hex[:4]}"
     logger.info("⏰ [TAIL-HUNT] 开始执行 14:35 尾盘狙击 (persona=%s, session=%s)", persona_id, session_id)
 
+    evaluated: list[dict[str, Any]] = []
+    pool_size = 0
+
+    def _done(result: dict[str, Any]) -> dict[str, Any]:
+        """统一收尾：写 tail_hunt_complete 事件供监控页展示。"""
+        payload = dict(result)
+        payload["pool_size"] = pool_size
+        if evaluated:
+            payload["evaluated"] = evaluated
+        try:
+            brain.log_agent_event(session_id, "tail_hunt", "tail_hunt_complete", payload)
+        except Exception:
+            logger.debug("tail_hunt_complete 事件写入失败", exc_info=True)
+        return result
+
     # 1. 冷静期与大盘天气前置硬闸门
     is_cold, cold_reason = check_cold_period(brain, persona_id=persona_id)
     if is_cold:
         logger.warning("🚫 [TAIL-HUNT] 闸门拦截: %s", cold_reason)
-        return {"executed": False, "reason": cold_reason, "action": "SKIP"}
+        return _done({"executed": False, "reason": cold_reason, "action": "SKIP"})
 
     # 2. 获取短线自选股池
     wl_mgr = ShortTermWatchlistManager(brain)
     watchlist_items = wl_mgr.get_active_pool()
+    pool_size = len(watchlist_items)
     if not watchlist_items:
         logger.info("[TAIL-HUNT] 短线自选股池为空，跳过尾盘狙击")
-        return {"executed": False, "reason": "短线自选股池为空", "action": "SKIP"}
+        return _done({"executed": False, "reason": "短线自选股池为空", "action": "SKIP"})
 
     # 3. 检查资金账户可用资金 (若未开户则自动初始化 30 万模拟子账户)
     account = brain.store.get_account_by_persona(persona_id)
@@ -147,13 +163,13 @@ async def execute_tail_hunt(
     available_cash = float(account.get("available_cash", 0)) if account else 300000.0
     if available_cash < 10000.0:
         logger.warning("[TAIL-HUNT] 账户可用资金不足 (%.2f < 10000)，跳过建仓", available_cash)
-        return {"executed": False, "reason": f"可用资金不足 ({available_cash:.2f})", "action": "SKIP"}
+        return _done({"executed": False, "reason": f"可用资金不足 ({available_cash:.2f})", "action": "SKIP"})
 
     # 检查持仓数量，最多持有 2 只
     open_positions = brain.store.list_open_positions(persona_id=persona_id)
     if len(open_positions) >= 2:
         logger.info("[TAIL-HUNT] 当前已有 %d 只持仓 (上限 2 只)，跳过开新仓", len(open_positions))
-        return {"executed": False, "reason": "持仓已达上限", "action": "SKIP"}
+        return _done({"executed": False, "reason": "持仓已达上限", "action": "SKIP"})
 
     # 4. 扫描自选股池，拉取 14:30 盘中真实快照
     intraday = IntradayClient(allow_mock_fallback=False)
@@ -162,26 +178,35 @@ async def execute_tail_hunt(
     for item in watchlist_items:
         symbol = item["symbol"]
         name = item.get("name", symbol)
+        eval_rec: dict[str, Any] = {"symbol": symbol, "name": name}
+
+        def _skip(reason: str) -> None:
+            eval_rec["skip"] = reason
+            evaluated.append(eval_rec)
 
         try:
             snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="30", bar_limit=8)
         except Exception as e:  # noqa: BLE001
             logger.debug("[TAIL-HUNT] 获取 %s 盘中快照失败: %s", symbol, e)
+            _skip(f"盘中快照拉取失败: {e}")
             continue
 
         # 数据防护：拒绝 mock、无数据或非正价格
         if getattr(snapshot, "is_mock", False) or not snapshot.bars or (snapshot.current_price or 0) <= 0:
+            _skip("mock/无数据/价格异常")
             continue
 
         current_price = snapshot.current_price
         bars = snapshot.bars
         if len(bars) < 2:
+            _skip("K线数量不足")
             continue
 
         # 仅取当日 K 线（30分钟单日最多 8 根），避免跨日聚合失真
         latest_date = bars[-1].timestamp.date()
         today_bars = [b for b in bars if b.timestamp.date() == latest_date]
         if not today_bars:
+            _skip("无当日K线")
             continue
 
         high = max(b.high for b in today_bars)
@@ -190,14 +215,22 @@ async def execute_tail_hunt(
         close_pos = (current_price - low) / day_range if day_range > 0 else 0.5
         amplitude = day_range / snapshot.prev_close if snapshot.prev_close > 0 else 0.0
         turnover = sum(b.turnover for b in today_bars) if any(b.turnover > 0 for b in today_bars) else snapshot.turnover
+        change_pct = snapshot.change_pct
+        eval_rec.update({
+            "price": current_price,
+            "change_pct": round(change_pct, 2),
+            "close_pos": round(close_pos, 2),
+            "amplitude": round(amplitude, 4),
+            "turnover": turnover,
+        })
 
         # 流动性与振幅硬过滤
         if turnover < _MIN_TURNOVER or amplitude < _MIN_AMPLITUDE:
+            _skip(f"流动性/振幅不足 (turnover={turnover/1e8:.2f}亿, amplitude={amplitude:.1%})")
             continue
 
         # 匹配形态 A (强势延续) 或 形态 B (强势企稳)
         matched_setup = None
-        change_pct = snapshot.change_pct
 
         # 形态 A：收红 + 位于振幅前 35% 高位区
         if change_pct >= 0.0 and close_pos >= _CONT_CLOSE_POS:
@@ -206,8 +239,14 @@ async def execute_tail_hunt(
         elif change_pct >= -7.0 and (current_price >= snapshot.open or (min(snapshot.open, current_price) - low) / max(day_range, 0.01) >= 0.4):
             matched_setup = "strong_pullback"
 
+        if not matched_setup:
+            _skip("未匹配尾盘形态 (非强势延续/强势企稳)")
+            continue
+
         if matched_setup:
             score = (close_pos * 40.0) + (min(turnover / 1e8, 20.0) * 2.0) + (change_pct * 2.0)
+            eval_rec.update({"setup": matched_setup, "score": round(score, 2)})
+            evaluated.append(eval_rec)
             candidates_scored.append({
                 "symbol": symbol,
                 "name": name,
@@ -222,7 +261,7 @@ async def execute_tail_hunt(
 
     if not candidates_scored:
         logger.info("[TAIL-HUNT] 自选股池中未发现满足 14:30 尾盘触发条件的标的")
-        return {"executed": False, "reason": "无标的满足尾盘触发条件", "action": "SKIP"}
+        return _done({"executed": False, "reason": "无标的满足尾盘触发条件", "action": "SKIP"})
 
     # 5. 挑出得分最高的一只标的建仓
     candidates_scored.sort(key=lambda x: x["score"], reverse=True)
@@ -268,7 +307,7 @@ async def execute_tail_hunt(
             "🎯 [TAIL-HUNT] 尾盘狙击成交成功! %s %s | 数量=%d | 成交价=%.2f | 止损=%.2f | 目标=%.2f",
             symbol, best["name"], fill_qty, fill_price, signal["stop_loss"], signal["target_price"],
         )
-        return {
+        return _done({
             "executed": True,
             "symbol": symbol,
             "name": best["name"],
@@ -277,10 +316,10 @@ async def execute_tail_hunt(
             "setup": best["setup"],
             "orders": orders,
             "fills": fills,
-        }
+        })
 
     logger.warning("[TAIL-HUNT] %s 下单未产生成交", symbol)
-    return {"executed": False, "symbol": symbol, "reason": "下单未成交"}
+    return _done({"executed": False, "symbol": symbol, "reason": "下单未成交"})
 
 
 async def execute_morning_pulse(
@@ -295,14 +334,34 @@ async def execute_morning_pulse(
     session_id = session_id or f"morning-pulse-{datetime.now().strftime('%Y%m%d-%H%M')}-{uuid.uuid4().hex[:4]}"
     logger.info("⏰ [MORNING-PULSE] 开始执行 09:35 早盘脉冲巡检 (persona=%s)", persona_id)
 
+    def _emit(result: dict[str, Any]) -> dict[str, Any]:
+        try:
+            brain.log_agent_event(session_id, "tail_hunt", "morning_pulse_complete", result)
+        except Exception:
+            logger.debug("morning_pulse_complete 事件写入失败", exc_info=True)
+        return result
+
     positions = brain.store.list_open_positions(persona_id=persona_id)
     if not positions:
         logger.info("[MORNING-PULSE] 当前无持仓，跳过")
-        return {"checked": 0, "actions": []}
+        return _emit({"checked": 0, "actions": []})
 
     results = await run_hard_scan(persona_id=persona_id, force=True, brain=brain)
     actions = [r for r in results if r.get("action") in ("EXIT", "REDUCE")]
-    return {"checked": len(positions), "actions": actions}
+    return _emit({
+        "checked": len(positions),
+        "actions": [
+            {
+                "symbol": r.get("symbol"),
+                "action": r.get("action"),
+                "price": r.get("current_price"),
+                "pnl_pct": r.get("pnl_pct"),
+                "reason": r.get("reason", ""),
+                "executed": r.get("executed"),
+            }
+            for r in actions
+        ],
+    })
 
 
 async def execute_force_close_ultra_short(
@@ -315,13 +374,21 @@ async def execute_force_close_ultra_short(
     session_id = session_id or f"force-close-{datetime.now().strftime('%Y%m%d-%H%M')}-{uuid.uuid4().hex[:4]}"
     logger.info("⏰ [FORCE-CLOSE] 开始执行 14:30 隔夜持仓强制清仓检查 (persona=%s)", persona_id)
 
+    def _emit(result: dict[str, Any]) -> dict[str, Any]:
+        try:
+            brain.log_agent_event(session_id, "tail_hunt", "force_close_complete", result)
+        except Exception:
+            logger.debug("force_close_complete 事件写入失败", exc_info=True)
+        return result
+
     positions = brain.store.list_open_positions(persona_id=persona_id)
     if not positions:
-        return {"closed": 0}
+        return _emit({"closed": 0})
 
     today_str = date.today().isoformat()
     intraday = IntradayClient(allow_mock_fallback=False)
     closed_count = 0
+    closed_items: list[dict[str, Any]] = []
 
     for pos in positions:
         entry_date_str = pos.get("entry_date") or ""
@@ -354,5 +421,12 @@ async def execute_force_close_ultra_short(
             )
             if res.get("executed"):
                 closed_count += 1
+            closed_items.append({
+                "symbol": symbol,
+                "name": name,
+                "price": current_price,
+                "executed": bool(res.get("executed")),
+                "error": res.get("execution_error"),
+            })
 
-    return {"closed": closed_count}
+    return _emit({"closed": closed_count, "items": closed_items})

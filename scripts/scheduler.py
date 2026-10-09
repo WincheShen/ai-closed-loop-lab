@@ -66,27 +66,91 @@ def skip_if_weekend(func):
     return wrapper
 
 
+# --- 任务运行事件埋点（供监控页展示"几点跑了什么"） ---
+
+def _safe_log_job_event(session_id: str, event_type: str, payload: dict) -> None:
+    """写任务事件，任何失败都不允许影响任务本身。"""
+    try:
+        from src.central_brain import get_central_brain
+        get_central_brain().log_agent_event(session_id, "scheduler", event_type, payload)
+    except Exception:
+        logger.debug("job 事件写入失败 (%s)", event_type, exc_info=True)
+
+
+def _summarize_job_result(result) -> dict:
+    """把任务返回值压成可入库的小摘要。"""
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        summary = {}
+        for k, v in result.items():
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                summary[k] = v
+            elif isinstance(v, (list, tuple)):
+                summary[f"{k}_count"] = len(v)
+        return summary
+    if isinstance(result, (list, tuple)):
+        return {"result_count": len(result)}
+    return {}
+
+
+def tracked_job(job_name: str):
+    """装饰器：为定时任务写 job_started / job_finished / job_failed 事件。
+
+    放在 skip_if_weekend 之内（下方），周末跳过时不会产生事件噪音。
+    """
+    def deco(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            started = datetime.now()
+            session_id = f"job-{started.strftime('%Y%m%d-%H%M%S')}-{job_name}"
+            _safe_log_job_event(session_id, "job_started", {"job": job_name})
+            try:
+                result = func(*args, **kwargs)
+            except Exception as e:
+                _safe_log_job_event(session_id, "job_failed", {
+                    "job": job_name,
+                    "error": str(e),
+                    "duration_s": round((datetime.now() - started).total_seconds(), 2),
+                })
+                raise
+            payload = {
+                "job": job_name,
+                "duration_s": round((datetime.now() - started).total_seconds(), 2),
+            }
+            payload.update(_summarize_job_result(result))
+            _safe_log_job_event(session_id, "job_finished", payload)
+            return result
+        return wrapper
+    return deco
+
+
 # --- 定时任务 ---
 
 @skip_if_weekend
+@tracked_job("hard_scan")
 def job_hard_scan() -> None:
     """盘中每 5 分钟：硬止损 + pending 触发。零 LLM。"""
     logger.info("⏰ 定时任务触发: hard_scan")
     personas = list_personas()
     targets = personas or [{"id": None, "name": "default"}]
+    total_actions = 0
     for p in targets:
         persona_id = p.get("id") if isinstance(p, dict) else None
         try:
             results = asyncio.run(run_hard_scan(persona_id=persona_id))
             actions = [r for r in results if r.get("action") in ("EXIT", "REDUCE", "BUY")]
+            total_actions += len(actions)
             if actions:
                 logger.info("hard_scan %s 产生 %d 个动作", persona_id or "default", len(actions))
         except Exception as e:
             logger.error("hard_scan 人格 %s 失败: %s", persona_id, e)
             notify_ops("hard_scan 失败", f"persona={persona_id} err={e}")
+    return {"personas": len(targets), "actions": total_actions}
 
 
 @skip_if_weekend
+@tracked_job("intraday_review")
 def job_intraday_review() -> None:
     """盘中每 30 分钟持仓复审 — 为所有活跃人格分别执行。"""
     logger.info("⏰ 定时任务触发: 盘中复审 (多人格模式)")
@@ -118,9 +182,11 @@ def job_intraday_review() -> None:
 
     if total_actions > 0:
         logger.info("总计产生 %d 个交易动作", total_actions)
+    return {"personas": len(personas), "actions": total_actions}
 
 
 @skip_if_weekend
+@tracked_job("market_brain_only")
 def job_market_brain_only() -> None:
     """盘中 MarketBrain 单独判定（不触发交易），用于积累 regime 漂移数据。"""
     logger.info("⏰ 定时任务触发: MarketBrain 单独判定")
@@ -135,11 +201,18 @@ def job_market_brain_only() -> None:
             snap.max_total_position_pct * 100,
             ",".join(snap.hot_sectors[:3]) or "无",
         )
+        return {
+            "regime": snap.regime,
+            "posture": snap.recommended_posture,
+            "max_position_pct": snap.max_total_position_pct,
+        }
     except Exception as e:
         logger.warning("MarketBrain 盘中判定失败: %s", e)
+        return {"error": str(e)}
 
 
 @skip_if_weekend
+@tracked_job("regime_drift_check")
 def job_regime_drift_check() -> None:
     """盘中每 5 分钟 regime drift 快速检测（纯量化，无 LLM）。"""
     try:
@@ -162,6 +235,7 @@ def job_regime_drift_check() -> None:
 
 
 @skip_if_weekend
+@tracked_job("closing_analysis")
 def job_closing_analysis() -> None:
     """每日 15:05 收盘分析 + 生成发帖内容 + 自动发布到社交平台。"""
     logger.info("⏰ 定时任务触发: 收盘分析")
@@ -180,6 +254,7 @@ def job_closing_analysis() -> None:
 
 
 @skip_if_weekend
+@tracked_job("daily_pipeline")
 def job_daily_pipeline() -> None:
     """每日 15:35 收盘后完整管线 — 为所有活跃人格分别执行。"""
     logger.info("⏰ 定时任务触发: 每日完整管线 (多人格模式)")
@@ -207,6 +282,7 @@ def job_daily_pipeline() -> None:
 
 
 @skip_if_weekend
+@tracked_job("health_check")
 def job_health_check() -> None:
     """每日 16:00 健康检查 — 确认各节点今日是否产出数据。"""
     from src.central_brain import get_central_brain
@@ -296,6 +372,7 @@ def job_health_check() -> None:
         logger.warning("[HealthCheck] AKShare 健康检查异常: %s", e)
 
 
+@tracked_job("weekly_feedback")
 def job_weekly_feedback() -> None:
     """每周日 20:00 复盘 — 为所有人格分别执行。"""
     logger.info("⏰ 定时任务触发: 周复盘 (多人格模式)")
@@ -348,6 +425,7 @@ def job_weekly_feedback() -> None:
 
 
 @skip_if_weekend
+@tracked_job("morning_pulse")
 def job_morning_pulse() -> None:
     """每日 09:35 隔夜极速动量早盘脉冲 — 冲高脉冲止盈 / 低开极窄止损 / 回流自选池。"""
     logger.info("⏰ 定时任务触发: 隔夜极速动量早盘脉冲 (09:35)")
@@ -355,11 +433,13 @@ def job_morning_pulse() -> None:
         from src.agents.reviewer.tail_hunt import execute_morning_pulse
         res = asyncio.run(execute_morning_pulse())
         logger.info("早盘脉冲巡检完成: checked=%d, actions=%d", res.get("checked", 0), len(res.get("actions", [])))
+        return res
     except Exception as e:
         logger.error("早盘脉冲执行失败: %s", e)
 
 
 @skip_if_weekend
+@tracked_job("force_close_ultra_short")
 def job_force_close_ultra_short() -> None:
     """每日 14:30 隔夜极速动量强制清仓 — 持仓满 1 交易日无论盈亏强制退出 (T+1 纪律)。"""
     logger.info("⏰ 定时任务触发: 隔夜极速动量强制清仓 (14:30)")
@@ -367,11 +447,13 @@ def job_force_close_ultra_short() -> None:
         from src.agents.reviewer.tail_hunt import execute_force_close_ultra_short
         res = asyncio.run(execute_force_close_ultra_short())
         logger.info("隔夜持仓强制清仓完成: closed=%d", res.get("closed", 0))
+        return res
     except Exception as e:
         logger.error("隔夜持仓强制清仓失败: %s", e)
 
 
 @skip_if_weekend
+@tracked_job("tail_hunt")
 def job_tail_hunt() -> None:
     """每日 14:35 隔夜极速动量尾盘狙击 — 冷静期检查 + 自选股盘中筛选 + 尾盘建仓。"""
     logger.info("⏰ 定时任务触发: 隔夜极速动量尾盘狙击 (14:35)")
@@ -379,11 +461,13 @@ def job_tail_hunt() -> None:
         from src.agents.reviewer.tail_hunt import execute_tail_hunt
         res = asyncio.run(execute_tail_hunt())
         logger.info("尾盘狙击执行完成: %s", res)
+        return res
     except Exception as e:
         logger.error("尾盘狙击执行失败: %s", e)
 
 
 @skip_if_weekend
+@tracked_job("short_term_watchlist_audit")
 def job_short_term_watchlist_audit() -> None:
     """每日 15:30 短线高弹性自选股池维护 — 真实行情清洗存量 + 盘后快照补票入池。"""
     logger.info("⏰ 定时任务触发: 短线自选股池审查与补票 (15:30)")
@@ -397,11 +481,19 @@ def job_short_term_watchlist_audit() -> None:
             res.get("data_ok"), audited.get("checked", 0), audited.get("removed", 0),
             res.get("added", 0), res.get("pool_size", 0),
         )
+        return {
+            "data_ok": res.get("data_ok"),
+            "checked": audited.get("checked", 0),
+            "removed": audited.get("removed", 0),
+            "added": res.get("added", 0),
+            "pool_size": res.get("pool_size", 0),
+        }
     except Exception as e:
         logger.warning("短线自选股维护失败: %s", e)
 
 
 @skip_if_weekend
+@tracked_job("watchlist_check")
 def job_watchlist_check() -> None:
     """每日 15:40 自选股池检查 — 检查入场条件 + 剔除过期标的。"""
     logger.info("⏰ 定时任务触发: 自选股池检查")
@@ -414,6 +506,7 @@ def job_watchlist_check() -> None:
 
 
 @skip_if_weekend
+@tracked_job("sync_sma_status")
 def job_sync_sma_status() -> None:
     """每日 15:45 同步 SMA 发帖状态 — 更新 social_posts 表。"""
     logger.info("⏰ 定时任务触发: SMA 状态同步")
@@ -477,6 +570,7 @@ def job_sync_sma_status() -> None:
         logger.warning("SMA 状态同步异常: %s", e)
 
 
+@tracked_job("backfill_attributions")
 def job_backfill_attributions() -> None:
     """每日 15:15 补跑缺失归因 — 保底机制。
 
@@ -519,6 +613,7 @@ def job_backfill_attributions() -> None:
 
 
 @skip_if_weekend
+@tracked_job("stale_position_check")
 def job_stale_position_check() -> None:
     """每日 14:50 超期持仓强制复审 — 检测超期持仓并触发带卖出倾向的复审。
 
@@ -561,6 +656,7 @@ def job_stale_position_check() -> None:
 
     if total_stale > 0:
         logger.warning("总计 %d 只超期持仓已触发强制复审", total_stale)
+    return {"stale": total_stale}
 
 
 # --- 调度配置 ---
@@ -611,6 +707,19 @@ def setup_schedule() -> None:
     schedule.every().sunday.at("20:00").do(job_weekly_feedback)
 
     logger.info("调度器已启动 — 当前时间: %s", datetime.now().isoformat())
+
+    jobs_info = [
+        {
+            "job": getattr(job.job_func, "__name__", str(job.job_func)),
+            "next_run": job.next_run.isoformat() if job.next_run else None,
+        }
+        for job in schedule.get_jobs()
+    ]
+    _safe_log_job_event(
+        f"sched-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        "scheduler_started",
+        {"jobs": jobs_info, "job_count": len(jobs_info)},
+    )
 
     for job in schedule.get_jobs():
         logger.info("任务注册: %s | 下次运行: %s", job, job.next_run)

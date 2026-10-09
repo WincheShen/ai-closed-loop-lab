@@ -27,6 +27,7 @@ services:
       - ./src:/app/src
       - ./scripts:/app/scripts
       - ./config:/app/config
+      - ./frontend/dist:/app/frontend/dist
     env_file:
       - .env
     environment:

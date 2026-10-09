@@ -126,6 +126,17 @@ async def run_hard_scan(
                 "hard_exits": len(exits),
                 "pending_triggered": len(triggered),
                 "expired": expired_n,
+                "details": [
+                    {
+                        "symbol": r.get("symbol"),
+                        "action": r.get("action"),
+                        "price": r.get("current_price") or r.get("price"),
+                        "pnl_pct": r.get("pnl_pct"),
+                        "reason": r.get("reason", ""),
+                        "executed": r.get("executed"),
+                    }
+                    for r in exits + triggered
+                ],
             },
         )
     logger.info(
