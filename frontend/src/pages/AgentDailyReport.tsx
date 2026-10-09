@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
+import { usePersonaOptions } from '@/hooks/usePersonas'
 import {
   Calendar,
   Target,
@@ -807,19 +808,12 @@ function AttributionSection({ attributions }: { attributions: TradeAttribution[]
   )
 }
 
-// 人格选项
-const PERSONA_OPTIONS = [
-  { id: 'all', name: '全部人格' },
-  { id: 'short_term_hot_rotation_v1', name: '短线热点' },
-  { id: 'duan_yongping_v1', name: '段永平' },
-  { id: 'warren_buffett_v1', name: '巴菲特' },
-]
-
 // ── 主页面 ──
 export default function AgentDailyReport() {
   const [dates, setDates] = useState<string[]>([])
   const [selectedDate, setSelectedDate] = useState<string>('')
   const [selectedPersona, setSelectedPersona] = useState<string>('all')
+  const personaOptions = usePersonaOptions(true)
   const [report, setReport] = useState<AgentReport | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -894,7 +888,7 @@ export default function AgentDailyReport() {
               onChange={(e) => setSelectedPersona(e.target.value)}
               className="bg-panel-hover border border-panel-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent/50"
             >
-              {PERSONA_OPTIONS.map((p) => (
+              {personaOptions.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>

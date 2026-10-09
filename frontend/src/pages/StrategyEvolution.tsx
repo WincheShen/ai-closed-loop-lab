@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
+import { usePersonaOptions } from '@/hooks/usePersonas'
 import {
   BrainCircuit,
   Shield,
@@ -95,18 +96,12 @@ interface ExitReason {
   count: number
 }
 
-// 人格选项
-const PERSONA_OPTIONS = [
-  { id: 'short_term_hot_rotation_v1', name: '短线热点' },
-  { id: 'duan_yongping_v1', name: '段永平' },
-  { id: 'warren_buffett_v1', name: '巴菲特' },
-]
-
 // ── 主页面 ──
 export default function StrategyEvolution() {
   const [weights, setWeights] = useState<PromptWeight[]>([])
   const [personas, setPersonas] = useState<Persona[]>([])
   const [selectedPersona, setSelectedPersona] = useState<string>('short_term_hot_rotation_v1')
+  const personaOptions = usePersonaOptions()
   const [lessons, setLessons] = useState<Lesson[]>([])
   const [strategyStats, setStrategyStats] = useState<StrategyStats[]>([])
   const [exitReasons, setExitReasons] = useState<ExitReason[]>([])
@@ -178,7 +173,7 @@ export default function StrategyEvolution() {
             onChange={(e) => setSelectedPersona(e.target.value)}
             className="bg-panel-hover border border-panel-border rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50"
           >
-            {PERSONA_OPTIONS.map((p) => (
+            {personaOptions.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>

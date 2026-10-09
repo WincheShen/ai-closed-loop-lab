@@ -176,8 +176,15 @@ def load_persona_by_id(persona_id: str, path: Path | str | None = None) -> Tradi
     return load_persona(path, persona_id)
 
 
-def list_personas(path: Path | str | None = None) -> list[dict[str, Any]]:
-    """列出所有可用的人格。"""
+def list_personas(
+    path: Path | str | None = None,
+    include_disabled: bool = False,
+) -> list[dict[str, Any]]:
+    """列出所有可用的人格。
+
+    include_disabled=True 时同时返回 enabled=false 的人格（供管理页展示），
+    调度与交易路径保持默认 False 只取启用人格。
+    """
     yaml_path = Path(path) if path else _PERSONA_YAML
     if not yaml_path.exists():
         return []
@@ -196,6 +203,7 @@ def list_personas(path: Path | str | None = None) -> list[dict[str, Any]]:
                 "name": p.get("name"),
                 "version": p.get("version", "v1.0"),
                 "capital": p.get("capital", 0),
+                "enabled": p.get("enabled", True),
                 "philosophy": p.get("philosophy", []),
                 "preferred_holding_days": p.get("preferred_holding_days", [1, 5]),
                 "preferred_setups": p.get("preferred_setups", []),
@@ -207,7 +215,7 @@ def list_personas(path: Path | str | None = None) -> list[dict[str, Any]]:
                 "daily_pipeline": p.get("daily_pipeline", True),
             }
             for p in personas_data
-            if p.get("enabled", True)
+            if include_disabled or p.get("enabled", True)
         ]
     except Exception as e:  # noqa: BLE001
         logger.error("列出 personas 失败: %s", e)

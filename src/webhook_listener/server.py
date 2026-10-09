@@ -840,10 +840,52 @@ async def strategy_weights():
 
 @app.get("/api/personas")
 async def get_personas():
-    """返回所有交易人格列表。"""
+    """返回所有交易人格（含停用）及各自的实盘统计。
+
+    stats 字段：open_positions / closed_trades / wins / losses /
+    win_rate / realized_pnl / last_closed_at。
+    """
     try:
         from src.agents.cio.trading_persona import list_personas
-        personas = list_personas()
+        personas = list_personas(include_disabled=True)
+
+        stats_map: dict[str, dict] = {}
+        try:
+            brain = _get_brain()
+            conn = brain.store._conn()
+            rows = conn.execute(
+                """
+                SELECT persona_id,
+                       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
+                       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_trades,
+                       SUM(CASE WHEN status = 'closed' AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN status = 'closed' AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+                       SUM(CASE WHEN status = 'closed' THEN COALESCE(realized_pnl, 0) ELSE 0 END) AS realized_pnl,
+                       MAX(CASE WHEN status = 'closed' THEN closed_at END) AS last_closed_at
+                FROM positions
+                GROUP BY persona_id
+                """
+            ).fetchall()
+            for r in rows:
+                d = dict(r)
+                closed = d.get("closed_trades") or 0
+                d["win_rate"] = round(d["wins"] / closed, 4) if closed else None
+                stats_map[d["persona_id"]] = d
+        except Exception as e:
+            logger.warning("persona stats 查询失败（不影响人格列表）: %s", e)
+
+        for p in personas:
+            s = stats_map.get(p["id"]) or {}
+            p["stats"] = {
+                "open_positions": s.get("open_positions") or 0,
+                "closed_trades": s.get("closed_trades") or 0,
+                "wins": s.get("wins") or 0,
+                "losses": s.get("losses") or 0,
+                "win_rate": s.get("win_rate"),
+                "realized_pnl": round(s.get("realized_pnl") or 0, 2),
+                "last_closed_at": s.get("last_closed_at"),
+            }
+
         return {"personas": personas}
     except Exception as e:
         logger.error("get_personas error: %s", e)
