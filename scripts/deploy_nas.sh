@@ -87,6 +87,8 @@ set -e
 cd ${NAS_PATH}
 tar -xzf ${STAGE}
 find ${NAS_PATH}/src ${NAS_PATH}/scripts ${NAS_PATH}/config -name \"._*\" -type f -delete
+# compose 的权威源是 docker/docker-compose.nas.yml — 同步到 compose 实际读取的根文件
+cp -f docker/docker-compose.nas.yml docker-compose.yml
 test -f src/graph/guards.py
 test -f scripts/scheduler.py
 test -f scripts/scheduler_watchdog.py
