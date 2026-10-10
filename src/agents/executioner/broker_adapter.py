@@ -366,8 +366,9 @@ class SafeBrokerAdapter(BrokerAdapter):
     def _in_trading_hours(self) -> bool:
         """检查当前是否在交易时间内。"""
         now = datetime.now()
-        # 周末不交易
-        if now.weekday() >= 5:
+        # 周末 / 法定休市日不交易
+        from src.infra.trading_calendar import is_trading_day
+        if not is_trading_day(now):
             return False
 
         current_time = now.strftime("%H:%M")

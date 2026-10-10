@@ -25,6 +25,7 @@ from src.agents.executioner.executor import ExecutionEngine
 from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
 from src.agents.reviewer.intraday_loop import _execute_review_action
 from src.central_brain import get_central_brain
+from src.infra.notify import notify_ops
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
 from src.stock_analyzer.detectors.ultra_short_momentum import (
     STRATEGY_ID,
@@ -396,13 +397,29 @@ async def execute_force_close_ultra_short(
         if entry_date_str and entry_date_str < today_str:
             symbol = pos["symbol"]
             name = pos.get("name", symbol)
-            entry_price = float(pos["entry_price"])
 
+            # 必须拿到真实行情才能成交：禁止用成本价/假价格伪造平仓（会产生 0% 假盈亏）
+            current_price = 0.0
             try:
                 snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="1", bar_limit=5)
-                current_price = snapshot.current_price if (snapshot.current_price and not getattr(snapshot, "is_mock", False)) else entry_price
-            except Exception:  # noqa: BLE001
-                current_price = entry_price
+                if snapshot.current_price and not getattr(snapshot, "is_mock", False):
+                    current_price = float(snapshot.current_price)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[FORCE-CLOSE] %s 拉取行情异常: %s", symbol, e)
+            if current_price <= 0:
+                logger.error("🚫 [FORCE-CLOSE] %s %s 无真实行情，跳过强平（交由后续 hard_scan / 人工处理）", symbol, name)
+                notify_ops(
+                    "隔夜强平跳过：无真实行情",
+                    f"persona={persona_id} symbol={symbol} entry_date={entry_date_str}",
+                )
+                closed_items.append({
+                    "symbol": symbol,
+                    "name": name,
+                    "price": None,
+                    "executed": False,
+                    "error": "no_real_quote",
+                })
+                continue
 
             reason = f"持仓已达 1 个交易日 (入场日期: {entry_date_str})，触发隔夜短线强制清仓纪律"
             logger.info("🚨 [FORCE-CLOSE] 强制清仓: %s %s @ %.2f (%s)", symbol, name, current_price, reason)

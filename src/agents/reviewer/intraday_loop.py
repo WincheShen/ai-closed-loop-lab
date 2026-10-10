@@ -30,8 +30,9 @@ def is_trading_hours() -> bool:
     now = datetime.now().time()
     morning = time(9, 15) <= now <= time(11, 30)
     afternoon = time(13, 0) <= now <= time(15, 0)
-    # 周末不交易
-    if datetime.now().weekday() >= 5:
+    # 周末 / 法定休市日不交易
+    from src.infra.trading_calendar import is_trading_day
+    if not is_trading_day():
         return False
     return morning or afternoon
 
@@ -300,6 +301,28 @@ def _expire_stale_pending_signals(brain) -> None:
     expire_stale_signals(brain)
 
 
+def _sold_today(brain, persona_id: str | None, symbol: str) -> bool:
+    """该人格今日是否已卖出过该标的（用于 REDUCE 每日一次的限制）。"""
+    try:
+        conn = brain.store._conn()
+        today = date.today().isoformat()
+        if persona_id:
+            row = conn.execute(
+                "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? AND lower(side) = 'sell' "
+                "AND filled_at LIKE ? LIMIT 1",
+                (persona_id, symbol, f"{today}%"),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT 1 FROM fills WHERE symbol = ? AND lower(side) = 'sell' AND filled_at LIKE ? LIMIT 1",
+                (symbol, f"{today}%"),
+            ).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        logger.debug("_sold_today 查询失败，按未卖出处理", exc_info=True)
+        return False
+
+
 async def _execute_review_action(
     brain,
     session_id: str,
@@ -311,8 +334,18 @@ async def _execute_review_action(
     action = review["action"]
     symbol = position["symbol"]
     position_id = position["position_id"]
-    current_price = review.get("current_price", position["entry_price"])
+    current_price = float(review.get("current_price") or 0)
     effective_persona_id = persona_id or position.get("persona_id")
+
+    # 卖出/加仓必须基于真实成交价；禁止回退到成本价伪造成交（会产生 0% 假盈亏）
+    if action in ("ADD", "REDUCE", "EXIT") and current_price <= 0:
+        logger.error("[%s] %s 缺少真实行情价，拒绝执行", symbol, action)
+        return {"executed": False, "reason": "缺少真实行情价，拒绝执行"}
+
+    # REDUCE 每持仓每日最多一次：防止每 30 分钟复审连续减半，一天内把仓位"切香肠"卖光
+    if action == "REDUCE" and _sold_today(brain, effective_persona_id, symbol):
+        logger.info("[%s] 今日已减仓过，跳过本次 REDUCE（每日上限 1 次）", symbol)
+        return {"executed": False, "reason": "今日已减仓过，REDUCE 每日上限 1 次"}
 
     # 强制从数据库读取最新持仓（防止使用过期的 position 对象）
     fresh_position = brain.store.get_position(position_id)

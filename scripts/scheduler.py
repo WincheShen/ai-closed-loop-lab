@@ -50,17 +50,17 @@ logger = logging.getLogger(__name__)
 # --- 交易日检查 ---
 
 def is_trading_day() -> bool:
-    """检查今天是否是交易日（非周末）。"""
-    weekday = datetime.now().weekday()
-    return weekday < 5  # 0-4 是周一到周五
+    """检查今天是否是 A 股交易日（周末与法定休市日返回 False）。"""
+    from src.infra.trading_calendar import is_trading_day as _is_trading_day
+    return _is_trading_day()
 
 
 def skip_if_weekend(func):
-    """装饰器：周末跳过执行。"""
+    """装饰器：非交易日（周末 / 法定休市日）跳过执行。"""
     @wraps(func)
     def wrapper(*args, **kwargs):
         if not is_trading_day():
-            logger.info("今天是周末，跳过 %s", func.__name__)
+            logger.info("今天非交易日（周末/休市），跳过 %s", func.__name__)
             return None
         return func(*args, **kwargs)
     return wrapper
@@ -168,6 +168,9 @@ def job_intraday_review() -> None:
     for p in personas:
         persona_id = p["id"]
         persona_name = p.get("name", persona_id)
+        if not p.get("intraday_llm_review", True):
+            logger.info("人格 %s 配置 intraday_llm_review=false，跳过 LLM 盘中复审（出场由 hard_scan 负责）", persona_name)
+            continue
         logger.info("开始复审人格: %s (%s)", persona_name, persona_id)
         try:
             results = asyncio.run(run_intraday_review(persona_id=persona_id))
@@ -636,6 +639,8 @@ def job_stale_position_check() -> None:
     for p in personas:
         persona_id = p["id"]
         persona_name = p.get("name", persona_id)
+        if not p.get("intraday_llm_review", True):
+            continue
         try:
             stale = check_stale_positions(persona_id=persona_id)
             if not stale:

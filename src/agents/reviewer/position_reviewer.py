@@ -15,7 +15,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any, Literal
 
-from src.agents.reviewer.hard_rules import evaluate_hard_exit
+from src.agents.reviewer.hard_rules import evaluate_hard_exit, is_value_position
 from src.central_brain import get_central_brain
 from src.infra.model_adapter import get_llm
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
@@ -325,6 +325,22 @@ class PositionReviewAgent:
             logger.info("无持仓，跳过复审")
             return []
 
+        from src.agents.cio.trading_persona import persona_allows_llm_review
+        allowed = {}
+        kept = []
+        for pos in positions:
+            pid = pos.get("persona_id") or self.persona_id
+            if pid not in allowed:
+                allowed[pid] = persona_allows_llm_review(pid)
+            if allowed[pid]:
+                kept.append(pos)
+            else:
+                logger.info("[%s] 人格 %s 配置 intraday_llm_review=false，跳过 LLM 复审", pos.get("symbol"), pid)
+        positions = kept
+        if not positions:
+            logger.info("无需 LLM 复审的持仓，跳过复审")
+            return []
+
         force_map = force_review_map or {}
         logger.info(
             "开始复审 %d 只持仓 (persona=%s, include_unassigned=%s)",
@@ -553,8 +569,28 @@ class PositionReviewAgent:
                     "rule_override": True,
                 }
 
-        # 规则 3: 浮亏超 8% 且 LLM HOLD → 强制 EXIT
-        if pnl_pct <= -8.0 and result["action"] == "HOLD":
+        # 规则 2c: 价值持仓屏蔽 LLM 盘中噪音离场 — 只有硬止损/目标价（上面规则）
+        # 或 LLM 明确判定论点失效 (thesis=invalidated) 才允许卖出
+        value_position = is_value_position(position)
+        if (
+            value_position
+            and result["action"] in ("REDUCE", "EXIT")
+            and not result.get("rule_override")
+            and result.get("thesis_status", "intact") != "invalidated"
+        ):
+            logger.info(
+                "[%s] Rule Override: 价值持仓忽略 LLM 盘中%s（论点未失效）→ HOLD",
+                symbol, result["action"],
+            )
+            return {
+                **result,
+                "action": "HOLD",
+                "reason": f"价值持仓不因盘中波动离场（LLM原判定: {result['action']}，论点未失效）: {result.get('reason', '')}",
+                "rule_override": True,
+            }
+
+        # 规则 3: 浮亏超 8% 且 LLM HOLD → 强制 EXIT（仅短线；价值持仓由宽止损约束）
+        if pnl_pct <= -8.0 and result["action"] == "HOLD" and not value_position:
             logger.info(
                 "[%s] Rule Override: 浮亏 %.1f%% 超过阈值 → EXIT", symbol, pnl_pct,
             )
@@ -618,14 +654,7 @@ class PositionReviewAgent:
                     return result
 
                 # 价值投资持仓: 使用长周期阈值（不适用短线规则）
-                strategy = position.get("original_strategy", "")
-                persona_id = position.get("persona_id", "")
-                is_value_position = (
-                    any(k in (persona_id or "") for k in ("duan", "buffett", "value"))
-                    or any(k in (strategy or "") for k in ("价值投资", "护城河", "ROE", "分红"))
-                )
-
-                if is_value_position:
+                if value_position:
                     # 价值投资: 持仓 90 天内不触发超期
                     # 90天后浮亏才减仓（正常波动不干预）
                     if days_held <= 90:

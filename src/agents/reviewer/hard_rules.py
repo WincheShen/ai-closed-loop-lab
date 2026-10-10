@@ -1,6 +1,6 @@
 """确定性持仓硬规则 — 不经过 LLM。
 
-止损 / -8% 熔断 / 目标价减仓必须和盘中复审、回测引擎共用这一份。
+止损 / -8% 熔断（仅短线）/ 目标价减仓必须和盘中复审、回测引擎共用这一份。
 """
 from __future__ import annotations
 
@@ -15,6 +15,20 @@ def position_pnl_pct(position: dict, current_price: float) -> float:
     if position.get("side") == "short":
         pnl = -pnl
     return round(pnl, 6)
+
+
+_VALUE_PERSONA_KEYS = ("duan", "buffett", "value")
+_VALUE_STRATEGY_KEYS = ("value_investing", "价值投资", "护城河", "ROE", "分红")
+
+
+def is_value_position(position: dict) -> bool:
+    """价值投资持仓：长周期持有，不适用短线的 -8% 熔断与盘中噪音离场。"""
+    persona_id = position.get("persona_id") or ""
+    strategy = f"{position.get('strategy_id') or ''} {position.get('original_strategy') or ''}"
+    return (
+        any(k in persona_id for k in _VALUE_PERSONA_KEYS)
+        or any(k in strategy for k in _VALUE_STRATEGY_KEYS)
+    )
 
 
 def evaluate_hard_exit(position: dict, current_price: float) -> dict[str, Any] | None:
@@ -81,7 +95,9 @@ def evaluate_hard_exit(position: dict, current_price: float) -> dict[str, Any] |
             "rule_override": True,
         }
 
-    if pnl_pct <= -8.0:
+    # -8% 熔断只适用于短线；价值持仓由其宽止损 (stop_loss) 约束，
+    # 否则正常的 8% 波动就会把月级持仓打掉（历史 4 笔价值股全部死在 -8.0x%）
+    if pnl_pct <= -8.0 and not is_value_position(position):
         return {
             "action": "EXIT",
             "confidence": 1.0,

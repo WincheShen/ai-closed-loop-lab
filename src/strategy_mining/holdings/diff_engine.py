@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import akshare as ak
@@ -33,28 +33,10 @@ from ..db import connection_scope
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Simple trading-day calendar (SH/SZ markets are roughly Mon-Fri minus holidays).
-# For this short-range analysis we just count calendar days; gaps >=3 days
-# across weekends are flagged conservatively.
-# ---------------------------------------------------------------------------
-def _is_weekend(d: date) -> bool:
-    return d.weekday() >= 5
-
-
 def _trading_day_gap(a: date, b: date) -> int:
-    """Rough trading-day gap between two dates (positive if b > a)."""
-    if b <= a:
-        return 0
-    delta = (b - a).days
-    # weekends subtract 2 per full week + any remaining
-    wk = 0
-    dtmp = a
-    while dtmp < b:
-        if _is_weekend(dtmp):
-            wk += 1
-        dtmp += timedelta(days=1)
-    return max(0, delta - wk)
+    """a、b 之间的交易日间隔（用统一 A 股交易日历）。"""
+    from src.infra.trading_calendar import trading_days_between
+    return trading_days_between(a, b)
 
 
 # ---------------------------------------------------------------------------

@@ -131,6 +131,8 @@ personas:
     enabled: true
     # 入场只允许走 14:35 tail_hunt 规则路径；禁止 15:30 LLM 日常管线为该账户开仓
     daily_pipeline: false
+    # 出场只走 hard_scan 规则 + 14:30 强平；禁止 LLM 盘中复审（避免第二条出场路径）
+    intraday_llm_review: false
     version: "v1.0"
     name: 极速动量隔夜客
     capital: 300000  # 30万独立子账户

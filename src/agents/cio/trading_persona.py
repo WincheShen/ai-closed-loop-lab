@@ -213,6 +213,7 @@ def list_personas(
                 "social_style": p.get("social_style", {}),
                 "stock_selection_rules": p.get("stock_selection_rules", {}),
                 "daily_pipeline": p.get("daily_pipeline", True),
+                "intraday_llm_review": p.get("intraday_llm_review", True),
             }
             for p in personas_data
             if include_disabled or p.get("enabled", True)
@@ -260,3 +261,13 @@ def get_persona(persona_id: str | None = None, reload: bool = False) -> TradingP
     if key not in _persona_cache or reload:
         _persona_cache[key] = load_persona(persona_id=persona_id)
     return _persona_cache[key]
+
+
+def persona_allows_llm_review(persona_id: str | None) -> bool:
+    """该人格的持仓是否允许 LLM 盘中复审（默认允许）。"""
+    if not persona_id:
+        return True
+    for p in list_personas(include_disabled=True):
+        if p.get("id") == persona_id:
+            return bool(p.get("intraday_llm_review", True))
+    return True

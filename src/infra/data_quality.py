@@ -82,16 +82,9 @@ def strategy_blocked_by_quality(strategy_id: str, regime: dict[str, Any] | None)
 
 
 def trading_days_between(start: date, end: date) -> int:
-    """start 之后到 end（含）的工作日数。周末不计。"""
-    if end <= start:
-        return 0
-    n = 0
-    cur = start + timedelta(days=1)
-    while cur <= end:
-        if cur.weekday() < 5:
-            n += 1
-        cur += timedelta(days=1)
-    return n
+    """start 之后到 end（含）的交易日数（周末与法定休市日不计）。"""
+    from src.infra.trading_calendar import trading_days_between as _tdb
+    return _tdb(start, end)
 
 
 def parse_trade_date(raw: str | None) -> date | None:
