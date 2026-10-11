@@ -75,6 +75,8 @@ interface PortfolioSummary {
   loss_count: number
   win_rate: number
   pnl_curve: { date: string; cumulative_pnl: number }[]
+  clean?: { closed_trades: number; wins: number; losses: number; win_rate: number | null; realized_pnl: number }
+  excluded?: { position_id: string }[]
 }
 
 // ── 辅助 ──
@@ -200,13 +202,20 @@ export default function Portfolio() {
           </div>
         </div>
         <div className="data-card">
-          <div className="text-xs text-muted-foreground mb-1">胜率</div>
+          <div className="text-xs text-muted-foreground mb-1">胜率（清洗后）</div>
           <div className="flex items-baseline gap-1.5">
-            <span className="text-xl font-bold text-foreground">{summary?.win_rate ?? 0}%</span>
+            <span className="text-xl font-bold text-foreground">
+              {summary?.clean?.win_rate != null ? (summary.clean.win_rate * 100).toFixed(1) : summary?.win_rate ?? 0}%
+            </span>
             <span className="text-[11px] text-muted-foreground">
-              {summary?.win_count ?? 0}W / {summary?.loss_count ?? 0}L
+              {summary?.clean?.wins ?? summary?.win_count ?? 0}W / {summary?.clean?.losses ?? summary?.loss_count ?? 0}L
             </span>
           </div>
+          {(summary?.excluded?.length ?? 0) > 0 && (
+            <div className="text-[10px] text-muted-foreground mt-1" title="休市日成交 / 成本价伪平仓 / 价格超涨跌停">
+              原始 {summary?.win_rate}% · 剔除 {summary?.excluded?.length} 笔无效
+            </div>
+          )}
         </div>
       </div>
 

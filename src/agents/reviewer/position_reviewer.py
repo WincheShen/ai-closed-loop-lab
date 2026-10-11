@@ -485,7 +485,22 @@ class PositionReviewAgent:
     ) -> dict | None:
         """Pre-LLM 硬规则检查 — 与 hard_scan / 回测共用 evaluate_hard_exit。"""
         del pnl_pct  # 由 evaluate_hard_exit 内部重算，签名保持兼容
-        return evaluate_hard_exit(position, current_price)
+        decision = evaluate_hard_exit(position, current_price)
+        if self._stop_unconfirmed(position, decision, current_price):
+            return None
+        return decision
+
+    @staticmethod
+    def _stop_unconfirmed(position: dict, decision: dict | None, current_price: float) -> bool:
+        """常规止损类退出统一由 hard_scan（含二次确认）执行，复审不抢先清仓；灾难性击穿除外。"""
+        from src.agents.reviewer import stop_confirm
+        if not stop_confirm.requires_confirmation(position, decision, current_price):
+            return False
+        logger.info(
+            "[%s] 止损击穿待 hard_scan 二次确认，复审不抢先清仓 (现价 %.2f)",
+            position.get("symbol", ""), current_price,
+        )
+        return True
 
     def _apply_rule_override(
         self, result: dict, position: dict, current_price: float, pnl_pct: float,
@@ -523,8 +538,11 @@ class PositionReviewAgent:
                     "rule_override": True,
                 }
 
-        # 规则 1: 硬止损
-        if stop_loss > 0 and current_price <= stop_loss:
+        # 规则 1: 硬止损（单 tick 击穿需 hard_scan 二次确认，见 stop_confirm）
+        stop_hit = {"action": "EXIT", "risk_flag": "stop_loss_triggered"}
+        if stop_loss > 0 and current_price <= stop_loss and not self._stop_unconfirmed(
+            position, stop_hit, current_price,
+        ):
             if result["action"] != "EXIT":
                 logger.info(
                     "[%s] Rule Override: 跌破止损 %.2f (当前 %.2f) → EXIT",
@@ -590,7 +608,14 @@ class PositionReviewAgent:
             }
 
         # 规则 3: 浮亏超 8% 且 LLM HOLD → 强制 EXIT（仅短线；价值持仓由宽止损约束）
-        if pnl_pct <= -8.0 and result["action"] == "HOLD" and not value_position:
+        if (
+            pnl_pct <= -8.0
+            and result["action"] == "HOLD"
+            and not value_position
+            and not self._stop_unconfirmed(
+                position, {"action": "EXIT", "risk_flag": "max_loss_exceeded"}, current_price,
+            )
+        ):
             logger.info(
                 "[%s] Rule Override: 浮亏 %.1f%% 超过阈值 → EXIT", symbol, pnl_pct,
             )

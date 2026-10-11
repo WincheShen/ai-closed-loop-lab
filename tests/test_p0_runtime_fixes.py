@@ -183,9 +183,80 @@ def test_value_thesis_invalidated_exit_allowed():
 
 def test_minus8_override_only_for_short():
     v = _reviewer()._apply_rule_override({"action": "HOLD", "reason": ""}, _VALUE_POS, 113.0, -8.7)
-    s = _reviewer()._apply_rule_override({"action": "HOLD", "reason": ""}, _SHORT_POS, 91.0, -9.0)
     assert v["action"] == "HOLD"
-    assert s["action"] == "EXIT"
+    # 短线 -9%：常规止损交给 hard_scan 二次确认，复审不抢先清仓
+    s = _reviewer()._apply_rule_override({"action": "HOLD", "reason": ""}, _SHORT_POS, 91.0, -9.0)
+    assert s["action"] != "EXIT"
+    # 灾难性 -13%：复审立即清仓
+    c = _reviewer()._apply_rule_override({"action": "HOLD", "reason": ""}, _SHORT_POS, 87.0, -13.0)
+    assert c["action"] == "EXIT"
+
+
+# ── P1 止损二次确认 ──────────────────────────────────────────
+
+from src.agents.reviewer import stop_confirm  # noqa: E402
+
+_STOP = {"action": "EXIT", "risk_flag": "stop_loss_triggered"}
+
+
+def test_stop_confirm_requires_two_consecutive_breaches():
+    stop_confirm.reset()
+    t0 = datetime(2026, 10, 12, 9, 35)
+    assert stop_confirm.requires_confirmation(_SHORT_POS, _STOP, 84.5)
+    assert stop_confirm.register_breach("POS-S", t0) is False
+    assert stop_confirm.register_breach("POS-S", t0 + timedelta(minutes=5)) is True
+
+
+def test_stop_confirm_resets_after_recovery_or_timeout():
+    stop_confirm.reset()
+    t0 = datetime(2026, 10, 12, 9, 35)
+    stop_confirm.register_breach("POS-S", t0)
+    stop_confirm.clear_breach("POS-S")  # 价格收复
+    assert stop_confirm.register_breach("POS-S", t0 + timedelta(minutes=5)) is False
+    # 超出窗口的旧击穿不算连续
+    assert stop_confirm.register_breach("POS-S", t0 + timedelta(minutes=40)) is False
+
+
+def test_stop_confirm_exemptions():
+    # 灾难性击穿（止损下方 3% 以上）立即出
+    assert not stop_confirm.requires_confirmation(_SHORT_POS, _STOP, 80.0)
+    # 隔夜极速动量窄止损保持即时（与回测语义一致）
+    ultra = {**_SHORT_POS, "persona_id": "ultra_short_momentum_v1", "strategy_id": "ultra_short_momentum"}
+    assert not stop_confirm.requires_confirmation(ultra, _STOP, 97.0)
+    # 目标价减仓不受影响
+    assert not stop_confirm.requires_confirmation(_SHORT_POS, {"action": "REDUCE", "risk_flag": ""}, 121.0)
+
+
+@pytest.mark.asyncio
+async def test_hard_scan_needs_second_breach(tmp_path, monkeypatch):
+    from src.agents.reviewer import hard_scan
+
+    stop_confirm.reset()
+    brain = _MockBrain(tmp_path)
+    brain.store.open_position(
+        position_id="POS-HS-1", symbol="002487", name="大金重工",
+        entry_price=46.29, qty=1000, entry_date="2026-10-08",
+        persona_id="short_term_hot_rotation_v1", stop_loss=45.13,
+    )
+    prices = iter([44.91, 46.0, 44.95, 44.90])  # 击穿 → 收复 → 击穿 → 再击穿
+    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **kw: (next(prices), False))
+
+    async def _no_pending(*a, **kw):
+        return []
+    monkeypatch.setattr("src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending)
+    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
+
+    def status():
+        return brain.store.get_position("POS-HS-1")["status"]
+
+    r1 = await hard_scan.run_hard_scan("short_term_hot_rotation_v1", force=True, brain=brain)
+    assert r1[0]["risk_flag"] == "stop_breach_pending" and status() == "open"
+    await hard_scan.run_hard_scan("short_term_hot_rotation_v1", force=True, brain=brain)  # 收复
+    await hard_scan.run_hard_scan("short_term_hot_rotation_v1", force=True, brain=brain)  # 重新首次击穿
+    assert status() == "open"
+    r4 = await hard_scan.run_hard_scan("short_term_hot_rotation_v1", force=True, brain=brain)
+    assert r4[0]["action"] == "EXIT" and r4[0].get("executed") is True
+    assert status() == "closed"
 
 
 # ── P0.4 隔夜客退出 LLM 复审 ──────────────────────────────────

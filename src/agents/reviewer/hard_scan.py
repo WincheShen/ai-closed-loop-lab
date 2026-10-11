@@ -8,6 +8,7 @@ import logging
 import uuid
 from datetime import date, datetime
 
+from src.agents.reviewer import stop_confirm
 from src.agents.reviewer.hard_rules import evaluate_hard_exit, position_pnl_pct
 from src.central_brain import get_central_brain
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
@@ -66,9 +67,26 @@ async def run_hard_scan(
             logger.warning("[HARD] %s 无真实行情，跳过硬止损", symbol)
             continue
         decision = evaluate_hard_exit(pos, price)
+        if not stop_confirm.is_stop_decision(decision):
+            stop_confirm.clear_breach(pos["position_id"])
         if decision is None:
             continue
         pnl_pct = position_pnl_pct(pos, price)
+        if stop_confirm.requires_confirmation(pos, decision, price) and not stop_confirm.register_breach(
+            pos["position_id"],
+        ):
+            logger.info("[HARD] %s 首次击穿止损 @ %.2f (PnL=%.2f%%)，等待下一轮扫描确认", symbol, price, pnl_pct)
+            exits.append({
+                "symbol": symbol,
+                "position_id": pos["position_id"],
+                "action": "HOLD",
+                "current_price": price,
+                "pnl_pct": round(pnl_pct, 2),
+                "reason": f"首次击穿止损，等待二次确认（原判定: {decision.get('reason', '')}）",
+                "risk_flag": "stop_breach_pending",
+                "executed": False,
+            })
+            continue
         review = {
             **decision,
             "symbol": symbol,

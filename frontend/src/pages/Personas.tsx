@@ -1,13 +1,60 @@
 import { useEffect, useState } from 'react'
 
-interface PersonaStats {
-  open_positions: number
+interface StatBlock {
   closed_trades: number
   wins: number
   losses: number
   win_rate: number | null
   realized_pnl: number
+}
+
+interface ExcludedTrade {
+  position_id: string
+  symbol: string
+  entry_date: string
+  closed_at: string
+  realized_pnl: number | null
+  flags: string[]
+}
+
+interface PersonaStats extends StatBlock {
+  open_positions: number
   last_closed_at: string | null
+  clean?: StatBlock
+  excluded_count?: number
+  excluded?: ExcludedTrade[]
+}
+
+const FLAG_LABELS: Record<string, string> = {
+  holiday_entry: '休市日入场',
+  holiday_exit: '休市日平仓',
+  cost_price_exit: '成本价伪平仓',
+  implausible_price: '价格超涨跌停',
+}
+
+function StatGrid({ s }: { s: StatBlock }) {
+  return (
+    <div className="grid grid-cols-3 gap-2 text-center">
+      <div>
+        <div className="text-base font-bold text-foreground">
+          {s.win_rate != null ? `${(s.win_rate * 100).toFixed(1)}%` : '—'}
+        </div>
+        <div className="text-[10px] text-muted-foreground">胜率</div>
+      </div>
+      <div>
+        <div className="text-base font-bold text-foreground">
+          {s.wins}<span className="text-muted-foreground text-xs">/{s.closed_trades}</span>
+        </div>
+        <div className="text-[10px] text-muted-foreground">胜/总平仓</div>
+      </div>
+      <div>
+        <div className={`text-base font-bold ${pnlColor(s.realized_pnl)}`}>
+          {s.realized_pnl >= 0 ? '+' : ''}{s.realized_pnl.toFixed(0)}
+        </div>
+        <div className="text-[10px] text-muted-foreground">已实现盈亏</div>
+      </div>
+    </div>
+  )
 }
 
 interface Persona {
@@ -126,26 +173,29 @@ export default function Personas() {
               <div className="border-t border-panel-border pt-3">
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">历史战绩</div>
                 {stats && stats.closed_trades > 0 ? (
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    <div>
-                      <div className="text-base font-bold text-foreground">
-                        {stats.win_rate != null ? `${(stats.win_rate * 100).toFixed(1)}%` : '—'}
-                      </div>
-                      <div className="text-[10px] text-muted-foreground">胜率</div>
-                    </div>
-                    <div>
-                      <div className="text-base font-bold text-foreground">
-                        {stats.wins}<span className="text-muted-foreground text-xs">/{stats.closed_trades}</span>
-                      </div>
-                      <div className="text-[10px] text-muted-foreground">胜/总平仓</div>
-                    </div>
-                    <div>
-                      <div className={`text-base font-bold ${pnlColor(stats.realized_pnl)}`}>
-                        {stats.realized_pnl >= 0 ? '+' : ''}{stats.realized_pnl.toFixed(0)}
-                      </div>
-                      <div className="text-[10px] text-muted-foreground">已实现盈亏</div>
-                    </div>
-                  </div>
+                  <>
+                    <StatGrid s={stats.clean ?? stats} />
+                    {(stats.excluded_count ?? 0) > 0 && (
+                      <details className="mt-2 text-[11px] text-muted-foreground">
+                        <summary className="cursor-pointer select-none">
+                          已剔除 {stats.excluded_count} 笔无效成交 · 查看原始口径
+                        </summary>
+                        <div className="mt-2 opacity-70">
+                          <div className="text-[10px] mb-1">原始口径（含无效成交）</div>
+                          <StatGrid s={stats} />
+                        </div>
+                        <ul className="mt-2 space-y-0.5 font-mono">
+                          {stats.excluded?.map(e => (
+                            <li key={e.position_id} className="flex justify-between gap-2">
+                              <span>{e.symbol} {e.entry_date?.slice(5, 10)}→{e.closed_at?.slice(5, 10)}</span>
+                              <span>{e.flags.map(f => FLAG_LABELS[f] ?? f).join('/')}</span>
+                              <span className={pnlColor(e.realized_pnl ?? 0)}>{(e.realized_pnl ?? 0).toFixed(0)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </>
                 ) : (
                   <div className="text-xs text-muted-foreground">尚无平仓记录</div>
                 )}

@@ -683,7 +683,14 @@ async def get_positions(status: str = "open", persona_id: str | None = None):
 
         sql = f"SELECT * FROM positions {where_clause} {order_clause}"
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        from src.infra.trade_validity import position_validity_flags
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("status") == "closed":
+                d["validity_flags"] = position_validity_flags(d)
+            out.append(d)
+        return out
     except Exception as e:
         logger.error("get_positions error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -769,9 +776,11 @@ async def portfolio_summary(persona_id: str | None = None):
 
         # 已平仓统计
         closed_rows = conn.execute(
-            f"SELECT realized_pnl, closed_at FROM positions {where_closed} ORDER BY closed_at",
+            f"SELECT * FROM positions {where_closed} ORDER BY closed_at",
             params_closed
         ).fetchall()
+        from src.infra.trade_validity import summarize_closed
+        clean_summary = summarize_closed(dict(r) for r in closed_rows)
         total_realized_pnl = sum(r["realized_pnl"] or 0 for r in closed_rows)
         win_count = sum(1 for r in closed_rows if (r["realized_pnl"] or 0) > 0)
         loss_count = sum(1 for r in closed_rows if (r["realized_pnl"] or 0) < 0)
@@ -799,6 +808,8 @@ async def portfolio_summary(persona_id: str | None = None):
             "loss_count": loss_count,
             "win_rate": win_rate,
             "pnl_curve": pnl_curve,
+            "clean": clean_summary["clean"],
+            "excluded": clean_summary["excluded"],
         }
     except Exception as e:
         logger.error("portfolio_summary error: %s", e)
@@ -843,7 +854,8 @@ async def get_personas():
     """返回所有交易人格（含停用）及各自的实盘统计。
 
     stats 字段：open_positions / closed_trades / wins / losses /
-    win_rate / realized_pnl / last_closed_at。
+    win_rate / realized_pnl / last_closed_at（原始口径）；
+    clean（剔除休市日/成本价伪平仓/坏价格后的口径）、excluded_count、excluded。
     """
     try:
         from src.agents.cio.trading_persona import list_personas
@@ -851,29 +863,28 @@ async def get_personas():
 
         stats_map: dict[str, dict] = {}
         try:
+            from src.infra.trade_validity import summarize_closed
             brain = _get_brain()
             conn = brain.store._conn()
-            rows = conn.execute(
-                """
-                SELECT persona_id,
-                       SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_positions,
-                       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_trades,
-                       SUM(CASE WHEN status = 'closed' AND realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                       SUM(CASE WHEN status = 'closed' AND realized_pnl < 0 THEN 1 ELSE 0 END) AS losses,
-                       SUM(CASE WHEN status = 'closed' THEN COALESCE(realized_pnl, 0) ELSE 0 END) AS realized_pnl,
-                       MAX(CASE WHEN status = 'closed' THEN closed_at END) AS last_closed_at
-                FROM positions
-                GROUP BY persona_id
-                """
-            ).fetchall()
+            rows = [dict(r) for r in conn.execute("SELECT * FROM positions")]
+            by_persona: dict[str, list[dict]] = {}
             for r in rows:
-                d = dict(r)
-                closed = d.get("closed_trades") or 0
-                d["win_rate"] = round(d["wins"] / closed, 4) if closed else None
-                stats_map[d["persona_id"]] = d
+                by_persona.setdefault(r.get("persona_id"), []).append(r)
+            for pid, items in by_persona.items():
+                closed = [r for r in items if r.get("status") == "closed"]
+                summ = summarize_closed(closed)
+                stats_map[pid] = {
+                    "open_positions": sum(1 for r in items if r.get("status") == "open"),
+                    "last_closed_at": max((r.get("closed_at") or "" for r in closed), default="") or None,
+                    **summ["raw"],
+                    "clean": summ["clean"],
+                    "excluded_count": len(summ["excluded"]),
+                    "excluded": summ["excluded"],
+                }
         except Exception as e:
             logger.warning("persona stats 查询失败（不影响人格列表）: %s", e)
 
+        empty = {"closed_trades": 0, "wins": 0, "losses": 0, "win_rate": None, "realized_pnl": 0}
         for p in personas:
             s = stats_map.get(p["id"]) or {}
             p["stats"] = {
@@ -884,6 +895,9 @@ async def get_personas():
                 "win_rate": s.get("win_rate"),
                 "realized_pnl": round(s.get("realized_pnl") or 0, 2),
                 "last_closed_at": s.get("last_closed_at"),
+                "clean": s.get("clean") or empty,
+                "excluded_count": s.get("excluded_count") or 0,
+                "excluded": s.get("excluded") or [],
             }
 
         return {"personas": personas}
