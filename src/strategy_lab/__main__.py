@@ -7,7 +7,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from src.strategy_lab.data import DEFAULT_UNIVERSE, fetch_or_load
+from src.strategy_lab.data import DEFAULT_UNIVERSE, cached_symbols, fetch_or_load
 from src.strategy_lab.engine import run_backtest
 from src.strategy_lab.gates import gates_to_dict
 from src.strategy_lab.synthetic import universe_for
@@ -30,9 +30,9 @@ def _load_series(strategy_id: str, symbols: list[str], refresh: bool, synthetic:
     return series
 
 
-def _write_report(report, gate: dict) -> Path:
+def _write_report(report, gate: dict, universe: dict) -> Path:
     _REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {**report.to_dict(), "gates": gate}
+    payload = {**report.to_dict(), "gates": gate, "universe": universe}
     payload.pop("fills", None)
     path = _REPORT_DIR / f"{report.strategy_id}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -41,6 +41,7 @@ def _write_report(report, gate: dict) -> Path:
         f"# {report.strategy_id}",
         "",
         f"- assumptions: {report.assumptions}",
+        f"- universe: {universe['name']} ({universe['n_symbols']} symbols)",
         f"- n={report.n} wr={report.win_rate:.1%} pf={report.profit_factor} dd={report.max_drawdown_pct}",
         f"- oos_n={report.oos_n} oos_wr={report.oos_win_rate:.1%} expired={report.expired}",
         f"- passed={gate['passed']}",
@@ -57,12 +58,24 @@ def main() -> int:
     parser.add_argument("--strategy", required=True)
     parser.add_argument("--start", default="2024-01-01")
     parser.add_argument("--symbols", default="")
+    parser.add_argument(
+        "--universe", choices=("default", "cached"), default="default",
+        help="default=策略默认股票池；cached=本地全部缓存日线（全池）",
+    )
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--synthetic", action="store_true", help="用确定性合成行情（不算研究过闸）")
     parser.add_argument("--hold-days", type=int, default=0, help="覆盖默认持仓天数")
     args = parser.parse_args()
 
-    symbols = [s for s in args.symbols.split(",") if s] or DEFAULT_UNIVERSE.get(args.strategy, [])
+    if args.symbols:
+        universe_name = "custom"
+        symbols = [s for s in args.symbols.split(",") if s]
+    elif args.universe == "cached":
+        universe_name = "cached"
+        symbols = cached_symbols()
+    else:
+        universe_name = "default"
+        symbols = DEFAULT_UNIVERSE.get(args.strategy, [])
     series = _load_series(args.strategy, symbols, args.refresh, args.synthetic)
     if not series:
         print(json.dumps({"ok": False, "reason": "无日线"}, ensure_ascii=False))
@@ -89,7 +102,7 @@ def main() -> int:
     if args.synthetic:
         gate["passed"] = False
         gate["note"] = "synthetic universe is not research evidence"
-    path = _write_report(report, gate)
+    path = _write_report(report, gate, {"name": universe_name, "n_symbols": len(series)})
     out = {
         "ok": True,
         "strategy": args.strategy,

@@ -57,6 +57,33 @@ def test_bottom_reversal_requires_cross() -> None:
     assert detect_bottom(BarContext("000002", bars)) is None
 
 
+def test_bottom_reversal_hits_after_bottom_then_cross() -> None:
+    # 高位横盘 → 跌 ~10% 见底 → 几日企稳 → 放量阳线完成 MA5 上穿 MA10
+    closes = [20.0] * 6 + [19.4, 18.8, 18.2, 18.0, 18.0, 18.05, 18.1, 18.1, 18.15, 18.2, 18.2]
+    bars = _bars(closes)
+    last = bars[-1]
+    bars.append(KlineBar(
+        date=last.date + timedelta(days=3), open=18.2, high=19.0, low=18.15, close=18.9,
+        volume=1e6, turnover=2e8,
+    ))
+    hit = detect_bottom(BarContext("000002", bars))
+    assert hit is not None
+    assert hit.strategy_id == "bottom_reversal"
+    assert hit.evidence["drop_pct"] >= 6
+
+
+def test_bottom_reversal_skips_stale_bottom() -> None:
+    # 低点在 10 日之前，之后已反弹走完 → 不追
+    closes = [20.0, 19.0, 18.0] + [18.2 + i * 0.05 for i in range(13)]
+    bars = _bars(closes)
+    last = bars[-1]
+    bars.append(KlineBar(
+        date=last.date + timedelta(days=3), open=18.8, high=19.5, low=18.8, close=19.4,
+        volume=1e6, turnover=2e8,
+    ))
+    assert detect_bottom(BarContext("000002", bars)) is None
+
+
 def test_value_skips_new_high() -> None:
     closes = [10 + i * 0.3 for i in range(20)]
     bars = _bars(closes)

@@ -568,58 +568,33 @@ class ExplorerScanner:
             return {"current_price": current_price, "trend": "error"}
 
     def _detect_bottom_reversal(self, bars: list, avg_vol: float) -> dict | None:
-        """底部启动形态检测：连跌 + 放量收阳 + MA5 上穿 MA10。
+        """底部启动形态检测 — 与 strategy_lab 回测共用同一检测器（G-bt-7 同源）。
+
+        旧实现是独立的 3 选 2 打分（连跌/放量阳/金叉 满足 2 项即提示 LLM），
+        与回测定义不一致；现在只有完整命中才提示。
 
         Returns:
             None: 不符合形态
-            dict: {"score": 0-3, "decline_days": N, "vol_ratio": X, "ma_cross": bool, "detail": str}
+            dict: {"score": 3, "drop_pct": X, "days_since_bottom": N, "vol_ratio": Y, "ma_cross": True, "detail": str}
         """
-        if len(bars) < 11:
+        from src.stock_analyzer.detectors.bottom_reversal import detect
+        from src.stock_analyzer.detectors.types import BarContext
+
+        hit = detect(BarContext(symbol="", bars=list(bars)))
+        if hit is None:
             return None
-
-        closes = [b.close for b in bars]
-        n = len(closes)
-
-        # 条件1: 连跌 — 最近一根之前连续 N 天下跌
-        decline_days = 0
-        for i in range(n - 2, -1, -1):
-            if bars[i].change_pct < 0:
-                decline_days += 1
-            else:
-                break
-        has_decline = decline_days >= 3
-
-        # 条件2: 放量收阳 — 最后一根 K 线阳线 + 量比 > 1.5
-        latest = bars[-1]
-        vol_ratio = latest.volume / avg_vol if avg_vol > 0 else 0
-        has_volume_yang = latest.change_pct > 0 and vol_ratio >= 1.5
-
-        # 条件3: MA5 上穿 MA10（金叉）
-        ma5_now = sum(closes[-5:]) / 5
-        ma10_now = sum(closes[-10:]) / 10
-        ma5_prev = sum(closes[-6:-1]) / 5
-        ma10_prev = sum(closes[-11:-1]) / 10
-        has_ma_cross = ma5_now > ma10_now and ma5_prev <= ma10_prev
-
-        # 评分 (0-3)
-        score = int(has_decline) + int(has_volume_yang) + int(has_ma_cross)
-        if score < 2:
-            return None
-
-        detail_parts = []
-        if has_decline:
-            detail_parts.append(f"连跌{decline_days}日")
-        if has_volume_yang:
-            detail_parts.append(f"放量收阳(量比{vol_ratio:.1f})")
-        if has_ma_cross:
-            detail_parts.append("MA5上穿MA10")
-
+        ev = hit.evidence
+        vol_ratio = bars[-1].volume / avg_vol if avg_vol > 0 else 0
         return {
-            "score": score,
-            "decline_days": decline_days,
+            "score": 3,
+            "drop_pct": ev.get("drop_pct"),
+            "days_since_bottom": ev.get("days_since_bottom"),
             "vol_ratio": round(vol_ratio, 2),
-            "ma_cross": has_ma_cross,
-            "detail": " + ".join(detail_parts),
+            "ma_cross": True,
+            "detail": (
+                f"近15日回撤{ev.get('drop_pct')}%、{ev.get('days_since_bottom')}日前见底"
+                f" + 放量收阳(量比{vol_ratio:.1f}) + MA5上穿MA10"
+            ),
         }
 
     def _detect_institutional_accumulation(self, symbol: str, bars: list, avg_vol: float) -> dict | None:

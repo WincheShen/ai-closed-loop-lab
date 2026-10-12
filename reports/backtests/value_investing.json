@@ -1,14 +1,14 @@
 {
   "strategy_id": "value_investing",
-  "n": 3254,
-  "wins": 1545,
-  "losses": 1709,
-  "win_rate": 0.47480024585125996,
-  "profit_factor": 1.269,
-  "avg_pnl_pct": 0.683,
-  "max_drawdown_pct": -951.672,
-  "oos_n": 406,
-  "oos_win_rate": 0.4433497536945813,
+  "n": 619,
+  "wins": 284,
+  "losses": 335,
+  "win_rate": 0.4588,
+  "profit_factor": 1.027,
+  "avg_pnl_pct": 0.052,
+  "max_drawdown_pct": -32.234,
+  "oos_n": 107,
+  "oos_win_rate": 0.3925,
   "expired": 0,
   "assumptions": "immediate=next_open*1.002; pullback=5d_low<=entry; breakout=5d_high>=entry*1.002; stop=daily_low then close; hard_exit=evaluate_hard_exit; hold<=10d",
   "gates": {
@@ -19,27 +19,27 @@
       {
         "name": "G-bt-2",
         "ok": true,
-        "detail": "n=3254 need>=200"
+        "detail": "n=619 need>=200"
       },
       {
         "name": "G-bt-3",
         "ok": false,
-        "detail": "wr=47.5% need>=55%"
+        "detail": "wr=45.9% need>=55%"
       },
       {
         "name": "G-bt-4",
-        "ok": true,
-        "detail": "pf=1.269 need>=1.2"
+        "ok": false,
+        "detail": "pf=1.027 need>=1.2"
       },
       {
         "name": "G-bt-5",
         "ok": false,
-        "detail": "dd=-951.672 need<=25.0"
+        "detail": "dd=-32.234 need<=25.0"
       },
       {
         "name": "G-bt-6",
         "ok": true,
-        "detail": "oos_n=406 oos_wr=44.3% floor=39.5%"
+        "detail": "oos_n=107 oos_wr=39.2% floor=37.9%"
       },
       {
         "name": "G-bt-7",
@@ -47,11 +47,11 @@
         "detail": "detectors imported from stock_analyzer.detectors"
       }
     ],
-    "n": 3254,
-    "win_rate": 0.47480024585125996,
-    "profit_factor": 1.269,
-    "max_drawdown_pct": -951.672,
-    "oos_n": 406,
-    "oos_win_rate": 0.4433497536945813
+    "n": 619,
+    "win_rate": 0.4588,
+    "profit_factor": 1.027,
+    "max_drawdown_pct": -32.234,
+    "oos_n": 107,
+    "oos_win_rate": 0.3925
   }
 }

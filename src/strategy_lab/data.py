@@ -63,6 +63,11 @@ def load_cached(symbol: str) -> list[KlineBar]:
     return records_to_bars(data.get("bars") or [])
 
 
+def cached_symbols() -> list[str]:
+    """本地已缓存日线的全部标的（全池回测，避免手挑股票池的幸存者偏差）。"""
+    return sorted(p.stem for p in CACHE_DIR.glob("*.json")) if CACHE_DIR.exists() else []
+
+
 def save_cached(symbol: str, bars: list[KlineBar]) -> Path:
     path = cache_path(symbol)
     path.parent.mkdir(parents=True, exist_ok=True)
