@@ -608,7 +608,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 总原则：**每个阶段都可独立部署、先影子后切换、可一键回滚**。回滚方式统一为把对应绑定的 `mode` 从 `live` 改回 `shadow`，旧路径在该阶段验收完成前不删除。
 
-### Phase 0 — 骨架与协议（不改变任何线上行为）
+### Phase 0 — 骨架与协议（不改变任何线上行为）✅ 已实现
+
+`src/wheel/`（protocol / registry / runner / config / floor / exit_gateway / persona / shadow + data/ + factors/）、`config/wheels.yaml`、迁移 `004_wheel_tables`、合并规则单测已落地。
 
 | 任务 | 产出 |
 |---|---|
@@ -620,7 +622,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：全量测试通过；部署后线上行为零差异；新表在 NAS 库中创建成功。
 
-### Phase 1 — 出场转盘 + ExitGateway（优先，直接修复 P1）
+### Phase 1 — 出场转盘 + ExitGateway（优先，直接修复 P1）✅ 影子模式已实现
+
+`exit_confirm` / `exit_confirm_ultra` / `overnight_force_close` / `llm_position_review` 四个转盘已接进 hard_scan / intraday_review / force_close 三条旧路径并行运行（mode=shadow，只写 `wheel_decisions` 不执行）；止损确认状态落 `wheel_factor_state`；16:00 health_check 输出 `wheel_shadow_report`。待 1.8 连续 5 个交易日"转盘更松=0"后切 live。
 
 | 任务 | 产出 |
 |---|---|

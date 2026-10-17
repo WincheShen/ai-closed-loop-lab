@@ -374,6 +374,25 @@ def job_health_check() -> None:
     except Exception as e:
         logger.warning("[HealthCheck] AKShare 健康检查异常: %s", e)
 
+    # 决策转盘影子对比：当日 shadow 决策 vs 旧路径实际动作（Phase 1.6）
+    try:
+        from src.wheel.shadow import daily_shadow_report
+        report = daily_shadow_report(brain, day=today)
+        checks["wheel_shadow"] = {
+            "decisions": report["wheel_decisions"],
+            "agree": report["agree"],
+            "stricter": report["wheel_stricter"],
+            "looser": report["wheel_looser"],
+        }
+        if report["wheel_looser"] > 0:
+            notify_ops(
+                "转盘影子比旧路径更松",
+                f"date={today} looser={report['wheel_looser']} "
+                f"items={[i['position_id'] for i in report['looser_items']]}",
+            )
+    except Exception as e:
+        logger.warning("[HealthCheck] 转盘影子对比异常: %s", e)
+
 
 @tracked_job("weekly_feedback")
 def job_weekly_feedback() -> None:
@@ -668,6 +687,15 @@ def job_stale_position_check() -> None:
 
 def setup_schedule() -> None:
     """配置所有定时任务。"""
+    # wheels.yaml 启动校验：配置损坏时拒绝启动并告警，而不是运行时报错
+    try:
+        from src.wheel.config import load_wheel_config
+        load_wheel_config()
+        logger.info("wheels.yaml 校验通过")
+    except Exception as e:
+        notify_ops("wheels.yaml 校验失败，scheduler 拒绝启动", str(e))
+        raise
+
     # 盘中每 30 分钟持仓复审 (9:30 - 14:30)
     for hour in range(9, 15):
         for minute in (0, 30):

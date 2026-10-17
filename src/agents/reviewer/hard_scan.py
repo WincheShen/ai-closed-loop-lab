@@ -12,6 +12,7 @@ from src.agents.reviewer import stop_confirm
 from src.agents.reviewer.hard_rules import evaluate_hard_exit, position_pnl_pct
 from src.central_brain import get_central_brain
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
+from src.wheel.shadow import run_exit_shadow
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ async def run_hard_scan(
             continue
 
         price, is_mock = _price_for(symbol, pos, intraday, price_cache)
+        # 决策转盘影子模式：转盘并行评估出场，写 wheel_decisions(mode=shadow)，不执行
+        run_exit_shadow(
+            brain, pos, price=price, is_mock=is_mock,
+            event_type="clock.intraday_5m", source="hard_scan",
+        )
         if is_mock or price <= 0:
             logger.warning("[HARD] %s 无真实行情，跳过硬止损", symbol)
             continue

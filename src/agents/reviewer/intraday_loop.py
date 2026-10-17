@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from datetime import date, datetime, time
@@ -21,6 +20,7 @@ from src.agents.memory.trade_attribution import TradeAttributor
 from src.central_brain import get_central_brain
 from src.infra.config import cfg
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
+from src.wheel.shadow import run_exit_shadow
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,24 @@ async def run_intraday_review(
         logger.info("无持仓或无复审结果 — 仍检查 pending 条件单")
         triggered = await _check_pending_signals(brain, session_id, force=force)
         return triggered
+
+    # 1.5 决策转盘影子模式：LLM 复审结果并行过 llm_position_review 转盘，
+    # 写 wheel_decisions(mode=shadow)，不执行。复用已算好的 review（不重复调 LLM）。
+    for review in reviews:
+        position_id = review.get("position_id")
+        if not position_id:
+            continue
+        position = brain.store.get_position(position_id)
+        if not position:
+            continue
+        run_exit_shadow(
+            brain, position,
+            price=float(review.get("current_price") or 0),
+            is_mock=bool(review.get("data_guard")),
+            event_type="clock.intraday_30m",
+            source="intraday_review",
+            extra={"llm_review": review},
+        )
 
     # 2. Execute actions for non-HOLD results
     action_results = []
@@ -304,20 +322,7 @@ def _expire_stale_pending_signals(brain) -> None:
 def _sold_today(brain, persona_id: str | None, symbol: str) -> bool:
     """该人格今日是否已卖出过该标的（用于 REDUCE 每日一次的限制）。"""
     try:
-        conn = brain.store._conn()
-        today = date.today().isoformat()
-        if persona_id:
-            row = conn.execute(
-                "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? AND lower(side) = 'sell' "
-                "AND filled_at LIKE ? LIMIT 1",
-                (persona_id, symbol, f"{today}%"),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT 1 FROM fills WHERE symbol = ? AND lower(side) = 'sell' AND filled_at LIKE ? LIMIT 1",
-                (symbol, f"{today}%"),
-            ).fetchone()
-        return row is not None
+        return brain.store.sold_today(persona_id, symbol)
     except Exception:  # noqa: BLE001
         logger.debug("_sold_today 查询失败，按未卖出处理", exc_info=True)
         return False

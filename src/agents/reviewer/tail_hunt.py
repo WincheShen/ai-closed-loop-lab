@@ -27,6 +27,7 @@ from src.agents.reviewer.intraday_loop import _execute_review_action
 from src.central_brain import get_central_brain
 from src.infra.notify import notify_ops
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
+from src.wheel.shadow import run_exit_shadow
 from src.stock_analyzer.detectors.ultra_short_momentum import (
     STRATEGY_ID,
     _CONT_CLOSE_POS,
@@ -400,12 +401,21 @@ async def execute_force_close_ultra_short(
 
             # 必须拿到真实行情才能成交：禁止用成本价/假价格伪造平仓（会产生 0% 假盈亏）
             current_price = 0.0
+            saw_mock = False
             try:
                 snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="1", bar_limit=5)
-                if snapshot.current_price and not getattr(snapshot, "is_mock", False):
+                saw_mock = bool(getattr(snapshot, "is_mock", False))
+                if snapshot.current_price and not saw_mock:
                     current_price = float(snapshot.current_price)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[FORCE-CLOSE] %s 拉取行情异常: %s", symbol, e)
+
+            # 决策转盘影子模式：overnight_force_close 转盘并行评估（无行情时 floor 否决），不执行
+            run_exit_shadow(
+                brain, pos, price=current_price, is_mock=saw_mock or current_price <= 0,
+                event_type="clock.1430", source="force_close",
+            )
+
             if current_price <= 0:
                 logger.error("🚫 [FORCE-CLOSE] %s %s 无真实行情，跳过强平（交由后续 hard_scan / 人工处理）", symbol, name)
                 notify_ops(

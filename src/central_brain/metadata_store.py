@@ -13,8 +13,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
-from pathlib import Path
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from src.central_brain.position_repo import PositionRepoMixin
@@ -443,6 +442,50 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         ]),
         ("003_position_strategy_id", [
             "ALTER TABLE positions ADD COLUMN strategy_id TEXT",
+        ]),
+        # --- 决策转盘：事件 / Factor 状态 / 决策记录 ---
+        ("004_wheel_tables", [
+            """CREATE TABLE IF NOT EXISTS wheel_events (
+                event_id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                persona_id TEXT,
+                subject_json TEXT NOT NULL DEFAULT '{}',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                source TEXT NOT NULL,
+                parent_event_id TEXT,
+                attempt INTEGER NOT NULL DEFAULT 1,
+                max_attempts INTEGER NOT NULL DEFAULT 1,
+                due_at TEXT NOT NULL,
+                expires_at TEXT,
+                status TEXT NOT NULL DEFAULT 'due',
+                started_at TEXT, finished_at TEXT, error TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_wheel_events_due ON wheel_events(status, due_at)",
+            """CREATE TABLE IF NOT EXISTS wheel_factor_state (
+                persona_id TEXT NOT NULL,
+                factor TEXT NOT NULL,
+                subject_key TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (persona_id, factor, subject_key)
+            )""",
+            """CREATE TABLE IF NOT EXISTS wheel_decisions (
+                decision_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL,
+                wheel TEXT NOT NULL,
+                persona_id TEXT NOT NULL,
+                subject_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                qty_pct REAL,
+                mode TEXT NOT NULL,
+                executed INTEGER NOT NULL DEFAULT 0,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE (event_id, wheel, subject_key)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_wheel_decisions_subject ON wheel_decisions(subject_key, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_wheel_decisions_day ON wheel_decisions(created_at, mode)",
         ]),
         # --- 未来迁移追加到这里 ---
     ]
@@ -1471,6 +1514,238 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         conn = self._conn()
         rows = conn.execute("SELECT * FROM accounts ORDER BY created_at").fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # 卖出限频辅助
+    # ------------------------------------------------------------------
+
+    def list_sell_fills(self, day: str) -> list[dict]:
+        """当日所有卖出成交（影子对比等审计查询用）。"""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM fills WHERE lower(side) = 'sell' AND filled_at LIKE ?",
+            (f"{day}%",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_position_reviews_today(self, day: str) -> list[dict]:
+        """当日全部持仓复审记录。"""
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM position_reviews WHERE review_at LIKE ?",
+            (f"{day}%",),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def sold_today(
+        self, persona_id: str | None, symbol: str, today: date | None = None,
+    ) -> bool:
+        """该人格今日是否已卖出过该标的（REDUCE 每日一次的限制）。"""
+        conn = self._conn()
+        day = (today or date.today()).isoformat()
+        if persona_id:
+            row = conn.execute(
+                "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? AND lower(side) = 'sell' "
+                "AND filled_at LIKE ? LIMIT 1",
+                (persona_id, symbol, f"{day}%"),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT 1 FROM fills WHERE symbol = ? AND lower(side) = 'sell' AND filled_at LIKE ? LIMIT 1",
+                (symbol, f"{day}%"),
+            ).fetchone()
+        return row is not None
+
+    # ------------------------------------------------------------------
+    # 决策转盘：wheel_events / wheel_factor_state / wheel_decisions
+    # ------------------------------------------------------------------
+
+    def insert_wheel_event(self, event: dict) -> bool:
+        """幂等写入事件；event_id 重复时忽略。返回是否真正插入。"""
+        conn = self._conn()
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO wheel_events
+            (event_id, type, persona_id, subject_json, payload_json, source,
+             parent_event_id, attempt, max_attempts, due_at, expires_at,
+             status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'due', ?)""",
+            (
+                event["event_id"], event["type"], event.get("persona_id"),
+                json.dumps(event.get("subject") or {}, ensure_ascii=False),
+                json.dumps(event.get("payload") or {}, ensure_ascii=False),
+                event.get("source", "scheduler"),
+                event.get("parent_event_id"),
+                int(event.get("attempt", 1)), int(event.get("max_attempts", 1)),
+                event["due_at"], event.get("expires_at"),
+                datetime.now().isoformat(),
+            ),
+        )
+        self._auto_commit()
+        return cur.rowcount > 0
+
+    def due_wheel_events(self, now: datetime) -> list[dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            """SELECT * FROM wheel_events
+            WHERE status = 'due' AND due_at <= ?
+            ORDER BY due_at""",
+            (now.isoformat(),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_wheel_event_status(
+        self, event_id: str, status: str, error: str | None = None,
+    ) -> None:
+        conn = self._conn()
+        if status == "running":
+            conn.execute(
+                "UPDATE wheel_events SET status = ?, started_at = ? WHERE event_id = ?",
+                (status, datetime.now().isoformat(), event_id),
+            )
+        elif status in ("done", "failed", "cancelled", "expired"):
+            conn.execute(
+                "UPDATE wheel_events SET status = ?, finished_at = ?, error = ? WHERE event_id = ?",
+                (status, datetime.now().isoformat(), error, event_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE wheel_events SET status = ? WHERE event_id = ?",
+                (status, event_id),
+            )
+        self._auto_commit()
+
+    def cancel_wheel_events_for_position(self, position_id: str) -> int:
+        """持仓平掉后，作废其所有在途后续事件。"""
+        conn = self._conn()
+        frag = f'%"position_id": "{position_id}"%'
+        cur = conn.execute(
+            """UPDATE wheel_events SET status = 'cancelled', finished_at = ?
+            WHERE status = 'due' AND subject_json LIKE ?""",
+            (datetime.now().isoformat(), frag),
+        )
+        self._auto_commit()
+        return cur.rowcount
+
+    def get_factor_state(
+        self, persona_id: str, factor: str, subject_key: str,
+    ) -> dict | None:
+        conn = self._conn()
+        row = conn.execute(
+            """SELECT state_json FROM wheel_factor_state
+            WHERE persona_id = ? AND factor = ? AND subject_key = ?""",
+            (persona_id, factor, subject_key),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["state_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def set_factor_state(
+        self, persona_id: str, factor: str, subject_key: str, state: dict,
+    ) -> None:
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO wheel_factor_state
+            (persona_id, factor, subject_key, state_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)""",
+            (
+                persona_id, factor, subject_key,
+                json.dumps(state, ensure_ascii=False, default=str),
+                datetime.now().isoformat(),
+            ),
+        )
+        self._auto_commit()
+
+    def clear_factor_state(
+        self, persona_id: str, factor: str, subject_key: str,
+    ) -> None:
+        conn = self._conn()
+        conn.execute(
+            """DELETE FROM wheel_factor_state
+            WHERE persona_id = ? AND factor = ? AND subject_key = ?""",
+            (persona_id, factor, subject_key),
+        )
+        self._auto_commit()
+
+    def record_wheel_decision(
+        self,
+        decision_id: str,
+        event_id: str,
+        wheel: str,
+        persona_id: str,
+        subject_key: str,
+        action: str,
+        qty_pct: float | None,
+        mode: str,
+        reason: str,
+    ) -> None:
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO wheel_decisions
+            (decision_id, event_id, wheel, persona_id, subject_key,
+             action, qty_pct, mode, executed, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+            (
+                decision_id, event_id, wheel, persona_id, subject_key,
+                action, qty_pct, mode, reason, datetime.now().isoformat(),
+            ),
+        )
+        self._auto_commit()
+
+    def mark_wheel_decision_executed(self, decision_id: str) -> None:
+        conn = self._conn()
+        conn.execute(
+            "UPDATE wheel_decisions SET executed = 1 WHERE decision_id = ?",
+            (decision_id,),
+        )
+        self._auto_commit()
+
+    def list_wheel_decisions(
+        self,
+        day: str | None = None,
+        mode: str | None = None,
+        subject_key: str | None = None,
+    ) -> list[dict]:
+        conn = self._conn()
+        conditions, params = [], []
+        if day:
+            conditions.append("created_at LIKE ?")
+            params.append(f"{day}%")
+        if mode:
+            conditions.append("mode = ?")
+            params.append(mode)
+        if subject_key:
+            conditions.append("subject_key = ?")
+            params.append(subject_key)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = conn.execute(
+            f"SELECT * FROM wheel_decisions {where} ORDER BY created_at", params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def recent_wheel_decision(
+        self,
+        subject_key: str,
+        actions: tuple[str, ...],
+        within_seconds: int,
+        executed_only: bool = False,
+    ) -> dict | None:
+        """窗口内该 subject 最强的一条已执行出场决策（用于同窗口去重）。"""
+        conn = self._conn()
+        placeholders = ",".join("?" for _ in actions)
+        since = (datetime.now() - timedelta(seconds=within_seconds)).isoformat()
+        sql = (
+            f"SELECT * FROM wheel_decisions WHERE subject_key = ? "
+            f"AND action IN ({placeholders}) AND created_at >= ?"
+        )
+        params: list[Any] = [subject_key, *actions, since]
+        if executed_only:
+            sql += " AND executed = 1"
+        sql += " ORDER BY created_at DESC LIMIT 1"
+        row = conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
 
 
 # 别名以保持向后兼容
