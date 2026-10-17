@@ -48,6 +48,7 @@ scheduler(时钟) ─▶ job ─▶ 决策(LangGraph / 规则 / LLM) ─▶ Exec
 4. **系统底线与单一出场出口不可配置、不可绕过**。
 5. **线上与回测同源**：同一转盘可在历史数据上回放。
 6. **决策全程可追溯**：每次转盘运行留下完整轨迹，监控页直接展示。
+7. **角色 = 身份 + 行为配置 + 记忆**：在转盘外加载为只读档案；记忆按角色隔离；规则修改必须经审批。
 
 ### 1.4 非目标
 
@@ -327,7 +328,128 @@ class WheelResult:
 
 ---
 
-## 7. 数据模型（均在 `central_brain.db` 内，经 MemoryStore 迁移）
+## 7. 角色档案（Persona Profile）
+
+### 7.1 结论
+
+- **角色本身不是转盘**，是转盘读写的状态。角色档案在**转盘外**加载：事件进来时一次性装配成只读快照，放进 `Context.persona`，转盘内所有步骤只读。
+- **形成和更新角色的过程是转盘**：归因、观察池维护、复盘总结，都是由事件触发的"记忆类转盘"。
+
+### 7.2 三层模型
+
+| 层 | 内容 | 谁来改 | 变化频率 | 存储 |
+|---|---|---|---|---|
+| ① 身份 Identity | 投资哲学、风格、风险偏好、持仓周期、资金规模、社交口吻 | **只能由人改** | 很少 | `config/trading_persona.yaml` |
+| ② 行为配置 Policy | 事件绑定、转盘参数、允许策略、是否接受 LLM 意见 | **人审批后改**（可由提议发起，见 7.6） | 偶尔 | `config/wheels.yaml` 中该角色段落 |
+| ③ 记忆 Memory | 历史交易与归因、教训、总结的经验、观察中的股票、冷却与黑名单、Factor 状态 | **系统自动写** | 持续 | `central_brain.db` |
+
+身份决定"他是谁"，行为配置决定"他怎么做"，记忆决定"他经历过什么、现在盯着什么"。
+
+### 7.3 加载协议
+
+```python
+@dataclass(frozen=True)
+class PersonaProfile:
+    persona_id: str
+    identity: Identity            # 来自 trading_persona.yaml（只读）
+    policy: PersonaPolicy         # 来自 wheels.yaml（只读）
+    memory: MemoryViews           # 按 as_of 截取的记忆视图（惰性加载、只读）
+    as_of: datetime               # = Context.now；回测时为模拟时间
+```
+
+规则：
+
+1. **加载时机**：Dispatcher 在分发 `(event, persona)` 时装配一次，同一事件下的 chain 中多个转盘共用同一份档案。
+2. **只读**：转盘与 Factor 不得修改档案；记忆变更只能通过记忆类转盘的输出写库（见 7.5）。
+3. **按时刻截取（as_of）**：所有记忆视图只包含 `as_of` 之前的数据，回测回放历史某日时不得看到未来信息。
+4. **惰性加载**：记忆视图按转盘声明的依赖按需查询，未声明的不加载。
+5. **配置变更生效时机**：身份与行为配置在交易时段内不热更新，只在 scheduler 重启或 15:00 后的配置重载点生效，避免盘中行为突变。
+
+### 7.4 记忆视图（以 DataStep 形式提供）
+
+| 视图 | 内容 | 现有来源 | 隔离 |
+|---|---|---|---|
+| `persona.trade_history(days)` | 近期开平仓、盈亏、退出原因 | `positions`、`fills` | 按角色 |
+| `persona.attributions(days)` | 平仓归因 | `trade_attributions`（经 position_id 关联角色） | 按角色 |
+| `persona.lessons(top)` | 按相关度排序的教训 | `lessons`（经 attribution 关联角色） | 按角色 |
+| `persona.stock_memory(symbol)` | 该角色在该股票上的历史与冷却 | `experience_layer.StockMemory` | **按角色**（现状为全局，需改造） |
+| `persona.strategy_stats` | 该角色各策略的近期表现 | `experience_layer.StrategyLedger` | **按角色**（现状为全局，需改造） |
+| `persona.blacklist` | 动态黑名单 | `experience_layer.DynamicBlacklist` | 按角色（已支持） |
+| `persona.watchlist` | 观察中的股票 | `watchlist` | **按角色**（现状无 persona 字段，需改造） |
+| `persona.factor_state` | 止损确认等 Factor 状态 | `wheel_factor_state` | 按角色 |
+| `shared.stock_flags(symbol)` | 跨角色共享的事实（财务造假、退市风险、重大违规） | 新增 | 全局共享 |
+
+**记忆默认按角色隔离**。现状问题：`StockMemory` 与 `StrategyLedger` 不区分角色，短线角色在某股票上的止损会让价值角色也进入该股冷却；`watchlist` 无 persona 字段，defend 日任何角色存入的信号，次日都可能被其他角色的 strategist 读到。只有客观事实（7.4 末行）全局共享。
+
+转盘中的使用方式：
+
+- **规则 Factor** 读 `policy.params`：同一个 `rule.stop_loss`，被不同角色调用表现为不同手法。
+- **记忆**由转盘在 `data:` 中声明依赖，判断步骤只读 Context。
+- **LLM Factor** 的提示词由 `identity` + 声明的记忆视图拼成；角色"像不像巴菲特"由输入决定，不写死在代码话术里。
+
+### 7.5 记忆类转盘
+
+| 转盘 | 触发事件 | 写入 | 自动 |
+|---|---|---|---|
+| `attribution` | `position.closed` | `trade_attributions`、`lessons`、`persona.stock_memory` 冷却 | 是 |
+| `watchlist_maintain` | `clock.1530`（各角色可绑定不同参数） | `watchlist`（按角色） | 是 |
+| `daily_journal` | `clock.close` | 当日决策摘要（复用 `closing_analysis`） | 是 |
+| `weekly_reflection` | `clock.weekly` | 教训归纳 + **规则修改提议** `persona_proposals` | 只写提议 |
+
+记忆类转盘与决策类转盘使用同一套协议（DataStep / Factor / 轨迹），区别只在输出写入记忆表而不是产生交易决策。
+
+### 7.6 经验与规则：提议 → 闸门 → 审批
+
+"总结的策略"拆为两类，处理方式不同：
+
+| | 经验/教训（记忆） | 规则修改（行为配置） |
+|---|---|---|
+| 例子 | "600809 曾因盘中放量下跌被误卖""本周热点轮动过快" | "止损 5%→3%""停用 hot_sector_pullback""隔夜客加入 morning_watch" |
+| 生效方式 | 自动写入记忆，供 LLM 参考或作为冷却/黑名单软过滤 | 只生成提议；需通过回测闸门（含随机买点对照）并经人工批准后改配置 |
+| 能否自动 | 可以 | **不可以** |
+
+提议通道：
+
+```
+weekly_reflection ─▶ persona_proposals(status=proposed)
+                       │ 附：依据的交易样本、预期影响
+                       ▼
+                 strategy_lab 自动回测（参数变更类） ─▶ status=backtested + 报告
+                       ▼
+                 页面人工审批 ─▶ approved：生成 wheels.yaml 变更（git 提交）
+                               rejected：记录原因，进入记忆避免重复提议
+```
+
+- 身份层（①）不接受任何自动提议，只能人工修改。
+- 现有 `experience_layer.persona_updater`（`PERSONA_AUTO_UPDATE` 开关）与 `meta_rule_synthesizer` 迁移为提议的生产者，不再直接回写配置。
+- 少于研究闸门样本要求的提议（如基于十几笔交易）只能标记为"观察"，不进入审批。
+
+### 7.7 配置示例
+
+```yaml
+# config/trading_persona.yaml —— 身份（人写）
+warren_buffett_v1:
+  identity:
+    name: 巴菲特
+    philosophy: [买好公司并长期持有, 别人恐惧时贪婪]
+    holding_period: months
+    risk_appetite: low
+    capital: 300000
+
+# config/wheels.yaml —— 行为配置（人审批）
+personas:
+  warren_buffett_v1:
+    policy:
+      kind: value
+      allowed_strategies: [value_investing]
+      params: { stop_pct: 25, llm_mode: advisory, value_noise_filter: true }
+      memory_views: [trade_history(days=180), lessons(top=10), stock_memory, watchlist]
+    bindings: { ... }     # 见 §4
+```
+
+`kind: value` 取代当前通过 persona_id 子串（duan/buffett/value）判断价值股的做法。
+
+## 8. 数据模型（均在 `central_brain.db` 内，经 MemoryStore 迁移）
 
 ```sql
 CREATE TABLE IF NOT EXISTS wheel_events (
@@ -371,15 +493,36 @@ CREATE TABLE IF NOT EXISTS wheel_decisions (
     created_at TEXT NOT NULL,
     UNIQUE (event_id, wheel, subject_key)
 );
+
+CREATE TABLE IF NOT EXISTS persona_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    persona_id TEXT NOT NULL,
+    kind TEXT NOT NULL,                     -- param_change / binding_change / strategy_toggle
+    change_json TEXT NOT NULL,              -- 拟修改的 wheels.yaml 片段
+    rationale TEXT NOT NULL,
+    evidence_json TEXT,                     -- 依据的交易样本、归因
+    backtest_report TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed',-- proposed/observe/backtested/approved/rejected
+    reviewer TEXT, review_note TEXT,
+    created_at TEXT NOT NULL, reviewed_at TEXT
+);
 ```
 
-- `wheel_decisions.mode=shadow` 用于影子期对比（见 9.1）。
+记忆按角色隔离的迁移（兼容旧数据）：
+
+```sql
+ALTER TABLE watchlist ADD COLUMN persona_id TEXT;          -- 旧数据按 strategy_id/source 回填，无法判定的置 NULL（视为共享候选）
+ALTER TABLE trade_attributions ADD COLUMN persona_id TEXT; -- 经 position_id 从 positions 回填
+ALTER TABLE lessons ADD COLUMN persona_id TEXT;            -- 经 attribution_id 回填
+```
+
+- `wheel_decisions.mode=shadow` 用于影子期对比（见 10.1）。
 - 止损二次确认的击穿记录迁入 `wheel_factor_state`，修复进程重启丢失（P7）。
 - 新增表一律通过 `MemoryStore` 方法读写，新代码禁止直接 `_conn()`。
 
 ---
 
-## 8. 模块布局
+## 9. 模块布局
 
 ```
 src/wheel/                       # 新包（不放在 src/ai_platform/）
@@ -390,6 +533,8 @@ src/wheel/                       # 新包（不放在 src/ai_platform/）
   config.py                      # 读取 config/wheels.yaml，启动时做 schema 校验
   floor.py                       # SystemFloor
   exit_gateway.py                # ExitGateway
+  persona.py                     # PersonaProfile 装配、as_of 记忆视图
+  proposals.py                   # persona_proposals 读写与审批流转
   data/                          # DataStep 实现（live / historical 两套）
   factors/
     floor_*.py  rule_*.py  mod_*.py  screen_*.py  detector_*.py  llm_*.py
@@ -401,9 +546,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 ---
 
-## 9. 可观测性、测试与回测
+## 10. 可观测性、测试与回测
 
-### 9.1 影子模式
+### 10.1 影子模式
 
 每个阶段先以 `mode=shadow` 运行：转盘照常运行并写 `wheel_decisions`，但不调用 ExecutionEngine；同时旧路径照常执行。每日 16:00 health_check 输出对比报告：
 
@@ -413,14 +558,14 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 转盘更严 | 旧路径卖/买，转盘 HOLD（需逐条确认是否为预期，如 301697 类） |
 | 转盘更松 | 旧路径 HOLD，转盘卖/买（必须为零或逐条解释后才能切换） |
 
-### 9.2 测试层次
+### 10.2 测试层次
 
 1. **Factor 单测**：每个 Factor 输入 Context fixture，断言 Opinion。
 2. **转盘黄金用例**：用生产真实场景固化回归用例，至少包含：600383（同日买卖）、002487（单 tick 击穿后收复）、301697（LLM 绕过止损确认）、002285（09:30 旧数据）、600809（价值股 -8% 噪音）、休市日、无真实行情强平。
 3. **配置校验测试**：`config/wheels.yaml` 全量加载、每个绑定可解析。
 4. **Dispatcher 测试**：后续事件的次数上限、截止时间、午休顺延、持仓平仓后作废、幂等。
 
-### 9.3 回测同源
+### 10.3 回测同源
 
 - `strategy_lab` 增加 `WheelReplay`：按交易日生成 `clock.*` 事件，DataStep 使用历史实现，对同一 `config/wheels.yaml` 运行。
 - 日线回测只能回放日级事件；分钟级转盘（如 `morning_watch`）需要分钟 K 线数据，在具备之前只能以模拟盘验证，报告中必须注明。
@@ -428,7 +573,7 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 ---
 
-## 10. 现有代码映射
+## 11. 现有代码映射
 
 | 现有代码 | 新架构中的位置 |
 |---|---|
@@ -451,10 +596,15 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | `regime_drift._trigger_emergency_review` | 写 `market.regime_drift` 事件，绑定 `llm_position_review`（修复 P5） |
 | `stale_position_check` | `rule.held_too_long`（propose） |
 | `ShortTermWatchlistManager.run_daily_maintenance` | `watchlist_maintain_ultra` 转盘 |
+| `trading_persona.yaml` 的哲学/风格/资金 | 角色档案 · 身份层 |
+| `daily_pipeline` / `intraday_llm_review` 开关、persona_id 子串判断价值股 | 角色档案 · 行为配置（bindings、`kind`） |
+| `experience_layer.StockMemory` / `StrategyLedger` / `DynamicBlacklist` | 记忆视图 `persona.stock_memory` / `strategy_stats` / `blacklist`（改为按角色隔离） |
+| `agents/memory/trade_attribution.py`、`closing_analysis` | `attribution` / `daily_journal` 记忆类转盘 |
+| `meta_rule_synthesizer`、`persona_updater`、`weekly_feedback` | `weekly_reflection` 转盘，只产出 `persona_proposals` |
 
 ---
 
-## 11. 实施计划
+## 12. 实施计划
 
 总原则：**每个阶段都可独立部署、先影子后切换、可一键回滚**。回滚方式统一为把对应绑定的 `mode` 从 `live` 改回 `shadow`，旧路径在该阶段验收完成前不删除。
 
@@ -507,8 +657,11 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 3.3 | `pending_trigger` 转盘：从 hard_scan 中拆出条件单触发 |
 | 3.4 | 短线/价值：`market_screen`（funnel，复用 scanner 步骤）+ `entry_confirm`（detector + LLM 排序 + risk_governor 修饰）；LangGraph 节点函数作为 Factor/DataStep 复用，管线结构迁移完成后 `workflow.py` 仅保留兼容入口 |
 | 3.5 | 执行器白名单、`daily_pipeline` 开关改为读 PersonaPolicy，删除硬编码 |
+| 3.6 | 角色档案加载：`PersonaProfile` 装配、as_of 截取、惰性加载记忆视图；`kind` 取代价值股子串判断 |
+| 3.7 | 记忆按角色隔离：`watchlist` / `trade_attributions` / `lessons` 增加 persona_id 并回填；`StockMemory`、`StrategyLedger` 按角色查询；新增 `shared.stock_flags` |
+| 3.8 | `attribution`、`watchlist_maintain` 记忆类转盘替代现有归因回补与观察池维护 job |
 
-验收：新开仓全部为盘中或开盘可成交的价格；入场决策轨迹可在监控页逐条解释；隔夜客硬编码清零。
+验收：新开仓全部为盘中或开盘可成交的价格；入场决策轨迹可在监控页逐条解释；隔夜客硬编码清零；一个角色的止损/冷却不再影响其他角色。
 
 ### Phase 4 — 账户风控事件
 
@@ -520,6 +673,18 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 4.4 | 执行器熔断改为读 PersonaPolicy，账户事件与执行器熔断共用同一计算函数 |
 
 验收：人格配置中的账户级风险限制全部按人格生效，有代码执行路径与测试。
+
+### Phase 4b — 复盘提议通道
+
+| 任务 | 产出 |
+|---|---|
+| 4b.1 | `persona_proposals` 表与 MemoryStore 方法 |
+| 4b.2 | `weekly_reflection` 转盘：归纳教训写记忆；规则类结论只写提议；样本不足标记 `observe` |
+| 4b.3 | `meta_rule_synthesizer` / `persona_updater` 改为提议生产者，移除直接回写配置的路径 |
+| 4b.4 | 参数变更类提议自动触发 strategy_lab 回测（含随机买点对照），报告挂到提议上 |
+| 4b.5 | 前端审批页：查看依据与回测报告，批准后生成 `wheels.yaml` 变更并提交 git |
+
+验收：系统中不存在任何未经审批即修改行为配置或身份配置的代码路径。
 
 ### Phase 5 — 回测同源
 
@@ -542,7 +707,7 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 ---
 
-## 12. 风险与对策
+## 13. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
@@ -552,10 +717,13 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 分钟级后续事件依赖实时行情稳定性 | `floor.real_quote_required`：无真实行情时后续事件顺延而不是决策；连续失败告警 |
 | 抽象过度、工期拉长 | 每个 Phase 只迁移一类动作，Phase 1 单独即可交付价值；Phase 5/6 可视情况推迟 |
 | LLM Factor 输出不稳定 | LLM 只输出结构化 Opinion，schema 校验失败视为 `skip`；优先级固定低于规则 |
+| 角色从少量交易中"学坏" | 经验只写记忆；规则修改必须走提议→回测闸门→人工审批；样本不足只能 `observe` |
+| 记忆串角色 | 记忆默认按角色隔离；只有客观事实进入 `shared.stock_flags` |
+| 回测使用未来记忆 | 记忆视图强制 as_of 截取，回放测试覆盖 |
 
 ---
 
-## 13. 与 AGENTS.md 约束的对照
+## 14. 与 AGENTS.md 约束的对照
 
 | 约束 | 本设计 |
 |---|---|
@@ -564,4 +732,4 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 禁止往 Prompt 里加新策略名 | 新策略只以 `detector.*` Factor 形式加入 |
 | 硬规则必须是代码 | SystemFloor、ExitGateway、`rule.*`、`mod.*` 全为确定性代码；LLM 只能提议 |
 | `SIGNAL_FACTORY=1` 需过闸 | 入场转盘中 `detector.*` 的启用仍受研究闸门约束 |
-| 自动回写 persona/prompt 默认关闭 | 转盘不写回任何配置文件 |
+| 自动回写 persona/prompt 默认关闭 | 转盘不写回任何配置文件；复盘只产生 `persona_proposals`，经回测与人工审批后才修改 `wheels.yaml`，身份层只能人工修改 |
