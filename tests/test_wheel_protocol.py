@@ -852,6 +852,7 @@ def test_binding_param_typo_rejected(tmp_path):
         "wheels:\n  w1:\n    kind: decision\n"
         "    data: [position, quote_realtime]\n"
         "    propose: [rule.max_loss]\n"
+        "    output: exit_proposal\n"
         "personas:\n  p1:\n    kind: short\n    bindings:\n"
         "      clock.x: { wheel: w1, params: { max_loss_pt: 9 } }\n",
     )
@@ -862,6 +863,7 @@ def test_binding_param_typo_rejected(tmp_path):
         "wheels:\n  w1:\n    kind: decision\n"
         "    data: [position, quote_realtime]\n"
         "    propose: [rule.max_loss]\n"
+        "    output: exit_proposal\n"
         "personas:\n  p1:\n    kind: short\n    bindings:\n"
         "      clock.x: { wheel: w1, params: { max_loss_pct: 9 } }\n",
     )
@@ -1179,8 +1181,9 @@ def test_overnight_expired_today_not_configurable(tmp_path):
     bad.write_text(
         "wheels:\n  w1:\n    kind: decision\n"
         "    propose: [rule.overnight_expired]\n"
+        "    output: exit_proposal\n"
         "personas:\n  p1:\n    kind: short\n    bindings:\n"
         "      clock.x: { wheel: w1, params: { today: '2026-01-01' } }\n",
     )
-    with pytest.raises(WheelConfigError):
+    with pytest.raises(WheelConfigError, match="today"):
         load_wheel_config(bad)

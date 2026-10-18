@@ -1076,15 +1076,7 @@ async def wheel_decisions(day: str | None = None, limit: int = 300):
     """决策转盘裁决记录（wheel_decisions）：含 decided_by / gateway 结果。"""
     try:
         brain = _get_central_brain()
-        conn = brain.store._conn()
-        sql = "SELECT * FROM wheel_decisions WHERE 1=1"
-        params: list = []
-        if day:
-            sql += " AND created_at LIKE ?"
-            params.append(f"{day}%")
-        sql += " ORDER BY created_at DESC LIMIT ?"
-        params.append(min(limit, 1000))
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        return brain.store.list_wheel_decisions(day=day, limit=max(1, min(limit, 1000)))
     except Exception as e:
         logger.error("wheel_decisions error: %s", e)
         return []

@@ -73,6 +73,11 @@ class WheelConfig:
         )
 
 
+# 转盘输出去向：exit_proposal → ExitGateway；urgent_review → Dispatcher 逐持仓展开；
+# candidates → 入场漏斗（Phase 3）。拼错会静默跳过网关，必须启动时拒绝
+_VALID_OUTPUTS = frozenset({"exit_proposal", "urgent_review", "candidates"})
+
+
 def _require(cond: bool, msg: str) -> None:
     if not cond:
         raise WheelConfigError(msg)
@@ -179,6 +184,10 @@ def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
             _require(resolve == "priority", f"{where}.resolve 仅支持 priority: {resolve!r}")
         if kind == "funnel":
             _require(steps, f"{where} funnel 必须配置 steps")
+        _require(
+            output in _VALID_OUTPUTS,
+            f"{where}.output 非法: {output!r}（允许: {sorted(_VALID_OUTPUTS)}）",
+        )
 
         wheels[wname] = WheelDef(
             name=wname, kind=kind,

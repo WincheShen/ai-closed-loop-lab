@@ -1792,7 +1792,9 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         day: str | None = None,
         mode: str | None = None,
         subject_key: str | None = None,
+        limit: int | None = None,
     ) -> list[dict]:
+        """limit 给定时按 created_at 倒序取最近 N 条（监控页），否则正序全量（报告）。"""
         conn = self._conn()
         conditions, params = [], []
         if day:
@@ -1805,9 +1807,11 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             conditions.append("subject_key = ?")
             params.append(subject_key)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        rows = conn.execute(
-            f"SELECT * FROM wheel_decisions {where} ORDER BY created_at", params,
-        ).fetchall()
+        sql = f"SELECT * FROM wheel_decisions {where} ORDER BY created_at"
+        if limit:
+            sql += " DESC LIMIT ?"
+            params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def recent_wheel_decision(
@@ -1817,8 +1821,14 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         within_seconds: int,
         executed_only: bool = False,
         now: datetime | None = None,
+        wheels: frozenset[str] | set[str] | None = None,
+        mode: str | None = None,
     ) -> dict | None:
-        """窗口内该 subject 最强的一条已执行出场决策（用于同窗口去重）。"""
+        """窗口内该 subject 最强的一条已执行出场决策（用于同窗口去重）。
+
+        wheels：只看这些转盘的决策（影子模式按转盘组隔离去重）。
+        mode：只看该模式的决策（live 去重不能被影子"会执行"挡掉）。
+        """
         conn = self._conn()
         placeholders = ",".join("?" for _ in actions)
         since = (
@@ -1831,6 +1841,12 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         params: list[Any] = [subject_key, *actions, since]
         if executed_only:
             sql += " AND executed = 1"
+        if wheels:
+            sql += f" AND wheel IN ({','.join('?' for _ in wheels)})"
+            params.extend(sorted(wheels))
+        if mode:
+            sql += " AND mode = ?"
+            params.append(mode)
         sql += " ORDER BY created_at DESC LIMIT 1"
         row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None

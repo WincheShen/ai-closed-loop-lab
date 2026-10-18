@@ -664,6 +664,11 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 2.5 | 首次 LLM 复审事件从 09:30 改为 10:00 | ⏸ 待 Phase 1 切 live（改变旧路径时序） |
 | — | `daily_shadow_report` 只统计 Phase 1 四个出场转盘（GATE_WHEELS），其余转盘单列 `other_wheels` | ✅ 已实现 |
 
+回审修复：
+- 影子模式同窗口去重按转盘组隔离（`protocol.wheel_cohort`：GATE_WHEELS 一组，其余各自一组）——新转盘的影子"会执行"不得把门槛转盘的"更松"掩盖成"网关拒绝"；live 去重只看 live 决策、不分转盘。
+- 行情暂时不可用（`floor.real_quote_required` 否决）时，观察类修饰（`observer=True`，只登记后续事件）照常运行，链条不因一次网络抖动断掉；次数上限/截止时间不变。
+- `output` 启动校验（`exit_proposal` / `urgent_review` / `candidates`）；广播逐持仓隔离异常。
+
 验收：后续事件不会越过截止时间、不会无限复查、持仓平仓后在途事件自动作废；`morning_watch` 影子 10 个交易日，人工复核其决策后再切 live。
 
 ### Phase 3 — 入场转盘（修复 P6，统一入场语义）

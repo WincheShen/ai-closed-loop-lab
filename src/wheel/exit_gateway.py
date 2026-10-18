@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from src.wheel.protocol import Context, Decision
+from src.wheel.protocol import Context, Decision, wheel_cohort
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class ExitGateway:
             return self._skip(decision, "exit_in_progress")
 
         # 3. 同一窗口去重：已有相同或更强动作在执行/已执行
-        if self._duplicate_in_window(position_id, decision, ctx.now):
+        if self._duplicate_in_window(position_id, decision, ctx.now, mode=ctx.mode):
             return self._skip(decision, "duplicate_in_window")
 
         # 4. 真实价校验
@@ -167,8 +167,15 @@ class ExitGateway:
         except Exception:  # noqa: BLE001
             logger.warning("wheel_decision executed 标记失败 %s", decision_id, exc_info=True)
 
-    def _duplicate_in_window(self, position_id: str, decision: Decision, now: datetime) -> bool:
-        """同一分钟内已有相同/更强出场决策被执行 → 本次跳过（EXIT 最强）。"""
+    def _duplicate_in_window(
+        self, position_id: str, decision: Decision, now: datetime, *, mode: str = "live",
+    ) -> bool:
+        """同一分钟内已有相同/更强出场决策被执行 → 本次跳过（EXIT 最强）。
+
+        live：只看 live 决策、不分转盘（同一持仓只有一个出场方；影子的
+        "会执行"不能挡掉真实卖出）。shadow：只看同组转盘的影子决策 — 新转盘
+        的影子"会执行"不能挡掉门槛转盘，否则会把"转盘更松"掩盖成"网关拒绝"。
+        """
         try:
             recent = self.store.recent_wheel_decision(
                 subject_key=position_id,
@@ -176,6 +183,8 @@ class ExitGateway:
                 within_seconds=DEDUP_WINDOW_S,
                 executed_only=True,
                 now=now,
+                wheels=None if mode == "live" else wheel_cohort(decision.wheel),
+                mode="live" if mode == "live" else "shadow",
             )
         except Exception:  # noqa: BLE001
             return False

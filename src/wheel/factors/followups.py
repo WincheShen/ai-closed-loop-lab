@@ -19,10 +19,12 @@ class WatchFollowupModifier:
 
     放在 modify 段尾部：能读到 ctx.resolved，持仓已 EXIT 就不再登记。
     返回 verdict=pass，不修改动作（modify 只许调弱，它本来就不动）。
+    observer=True：行情暂时不可用被底线否决时仍会运行（见 runner）。
     """
 
     name = "mod.watch_followup"
     stage = "modify"
+    observer = True
     requires = ("position",)
     param_keys = ("interval_seconds", "max_attempts", "until", "event_type")
 

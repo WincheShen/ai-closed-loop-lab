@@ -29,6 +29,20 @@ ACTION_STRENGTH: dict[str, int] = {
 }
 
 
+# Phase 1 出场转盘 — 观察门槛报告只统计这几个转盘；影子模式下同窗口去重
+# 也只在同组内生效（新转盘的影子决策不得去重掉门槛转盘，否则会把
+# "转盘更松"掩盖成"网关拒绝"）。live 模式不分组：同一持仓只有一个出场方。
+GATE_WHEELS = frozenset({
+    "exit_confirm", "exit_confirm_ultra",
+    "overnight_force_close", "llm_position_review",
+})
+
+
+def wheel_cohort(wheel: str) -> frozenset[str]:
+    """影子去重分组：门槛转盘一组；其他转盘各自独立成组。"""
+    return GATE_WHEELS if wheel in GATE_WHEELS else frozenset({wheel})
+
+
 def is_weaker(new_action: str | None, old_action: str | None) -> bool:
     """modify 合法性检查：新动作不得强于旧动作。"""
     return ACTION_STRENGTH.get(new_action or "HOLD", 1) <= ACTION_STRENGTH.get(

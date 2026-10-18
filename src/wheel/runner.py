@@ -148,6 +148,21 @@ def _decision_from_veto(ctx: Context, wheel: WheelDef, op: Opinion) -> Decision:
     )
 
 
+# 暂时性底线否决：否决后仍允许观察类修饰（observer=True）登记后续事件
+_OBSERVE_THROUGH_VETOES = frozenset({"floor.real_quote_required"})
+
+
+def _run_observers(wheel: WheelDef, ctx: Context, trace: list[Opinion]) -> None:
+    for name, args in _parse_steps(list(wheel.modify), "modify"):
+        try:
+            fac = registry.factor(name)
+        except KeyError:
+            continue
+        if not getattr(fac, "observer", False):
+            continue
+        _eval(name, ctx, {**ctx.persona.params, **args}, trace)
+
+
 def run_decision(wheel: WheelDef, ctx: Context) -> WheelResult:
     trace: list[Opinion] = []
     result = WheelResult(wheel=wheel.name, trace=trace)
@@ -160,6 +175,11 @@ def run_decision(wheel: WheelDef, ctx: Context) -> WheelResult:
         if op.verdict == "veto":
             ctx.resolved = _decision_from_veto(ctx, wheel, op)
             result.decisions.append(ctx.resolved)
+            if op.factor in _OBSERVE_THROUGH_VETOES:
+                # 暂时性否决（行情拉取失败）：动作仍是 HOLD，但观察类修饰
+                # （只登记后续事件、从不改动作）照常运行，避免一次网络抖动
+                # 就让后续观察链悄悄断掉；次数上限/截止时间约束不变
+                _run_observers(wheel, ctx, trace)
             return result
 
     # ② propose：收集全部提议

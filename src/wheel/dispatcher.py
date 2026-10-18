@@ -163,22 +163,39 @@ def _run_bound(cfg, binding, event, persona_pid, brain, now, subject=None) -> No
 
 
 def _dispatch_binding(cfg, row: dict, brain, now) -> None:
-    """对一个 persona+binding 执行。urgent_review 输出逐持仓展开。"""
+    """对一个 persona+binding 执行。urgent_review 输出逐持仓展开。
+
+    单个角色/持仓失败不影响其余：逐个隔离异常，全部跑完后若有失败再整体
+    上抛（事件记 failed，错误信息带失败对象）。
+    """
     store = brain.store
+    failures: list[str] = []
+
+    def _safe(label: str, **kw) -> None:
+        try:
+            _run_bound(cfg, binding, _row_to_event(row), binding_persona, brain, now, **kw)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[Dispatcher] %s 执行失败: %s", label, e, exc_info=True)
+            failures.append(f"{label}: {e}"[:120])
+
     for binding_persona, binding in row["_bindings"]:
         wheel = cfg.wheels[binding.wheel] if binding.wheel else None
-        if binding.chain or wheel is None:
-            _run_bound(cfg, binding, _row_to_event(row), binding_persona, brain, now)
-            continue
-        if wheel.output == "urgent_review":
+        if wheel is not None and not binding.chain and wheel.output == "urgent_review":
             # 市场事件 → 对每个在持持仓各跑一次（subject 展开）
-            for pos in store.list_positions(status="open", persona_id=binding_persona):
-                _run_bound(
-                    cfg, binding, _row_to_event(row), binding_persona, brain, now,
+            try:
+                positions = store.list_positions(status="open", persona_id=binding_persona)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"{binding_persona}: list_positions {e}"[:120])
+                continue
+            for pos in positions:
+                _safe(
+                    f"{binding_persona}/{pos['position_id']}",
                     subject={"position_id": pos["position_id"]},
                 )
         else:
-            _run_bound(cfg, binding, _row_to_event(row), binding_persona, brain, now)
+            _safe(binding_persona)
+    if failures:
+        raise RuntimeError(f"{len(failures)} 个对象失败: " + "; ".join(failures[:3]))
 
 
 def dispatch_once(brain, now: datetime | None = None) -> dict[str, int]:

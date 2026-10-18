@@ -14,17 +14,12 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-from src.wheel.protocol import Decision, WheelEvent
+from src.wheel.protocol import GATE_WHEELS, Decision, WheelEvent
 
 logger = logging.getLogger(__name__)
 
-# Phase 1 出场转盘 — 对比门槛报告只统计这几个转盘。
-# Phase 2 起新转盘（morning_watch / urgent_review 等）的影子决策
-# 不混入出场对比，单列 other_wheels 观察。
-GATE_WHEELS = frozenset({
-    "exit_confirm", "exit_confirm_ultra",
-    "overnight_force_close", "llm_position_review",
-})
+# 门槛报告只统计 GATE_WHEELS（Phase 1 出场转盘）；Phase 2 起新转盘
+# （morning_watch / urgent_review 等）的影子决策单列 other_wheels 观察。
 
 DEFAULT_PERSONA = "short_term_hot_rotation_v1"
 

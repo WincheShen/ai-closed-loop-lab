@@ -1,3 +1,4 @@
+"""内置 Factor 注册入口。"""
 from __future__ import annotations
 
 from src.wheel import registry
