@@ -868,6 +868,42 @@ def test_binding_param_typo_rejected(tmp_path):
     assert load_wheel_config(good).binding_for("p1", "clock.x").params["max_loss_pct"] == 9
 
 
+# ── live 让位测试公共桩 ──
+
+def _freeze_shadow_now(monkeypatch, now: datetime = datetime(2026, 10, 12, 10, 0)):
+    """run_exit_shadow 默认取 datetime.now() — 冻结到交易日盘中，测试与星期几无关。"""
+    import src.wheel.shadow as shadow_mod
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(shadow_mod, "datetime", _Frozen)
+
+
+def _live_5m(monkeypatch):
+    from src.wheel import config as wheel_config
+
+    cfg_obj = wheel_config.load_wheel_config()
+    pcfg = cfg_obj.personas["short_term_hot_rotation_v1"]
+    pcfg.bindings["clock.intraday_5m"] = dataclasses.replace(
+        pcfg.bindings["clock.intraday_5m"], mode="live",
+    )
+    monkeypatch.setattr(wheel_config, "_cache", cfg_obj)
+
+
+def _stub_hard_scan(monkeypatch, hard_scan, *, price: float):
+    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **kw: (price, False))
+    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
+
+    async def _no_pending(*a, **kw):
+        return []
+    monkeypatch.setattr(
+        "src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending,
+    )
+
+
 # ── 修复回归 2：价值豁免 / live 让位兜底 / fill 映射 / 网关超时锁 ──
 
 def test_stop_confirm_value_max_loss_exempt(tmp_path):
@@ -996,30 +1032,16 @@ def test_report_fill_maps_to_closed_window_when_no_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_hard_scan_live_yields_to_wheel(tmp_path, monkeypatch):
-    """绑定 live：转盘产出决策后旧路径让位（evaluate_hard_exit 不被调用）。"""
+    """绑定 live：转盘产出决策并经网关执行，旧路径让位（evaluate_hard_exit 不被调用）。"""
     from src.agents.reviewer import hard_scan, stop_confirm
-    from src.wheel import config as wheel_config
 
     stop_confirm.reset()
+    _freeze_shadow_now(monkeypatch)
     brain = _MockBrain(tmp_path)
     pos = {**_SHORT_POS, "position_id": "POS-LIVE"}
     _open(brain, pos)
-
-    cfg_obj = wheel_config.load_wheel_config()
-    pcfg = cfg_obj.personas["short_term_hot_rotation_v1"]
-    pcfg.bindings["clock.intraday_5m"] = dataclasses.replace(
-        pcfg.bindings["clock.intraday_5m"], mode="live",
-    )
-    monkeypatch.setattr(wheel_config, "_cache", cfg_obj)
-
-    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **kw: (80.0, False))
-    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
-
-    async def _no_pending(*a, **kw):
-        return []
-    monkeypatch.setattr(
-        "src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending,
-    )
+    _live_5m(monkeypatch)
+    _stub_hard_scan(monkeypatch, hard_scan, price=80.0)   # 灾难性击穿，即时 EXIT
     called: list = []
     monkeypatch.setattr(hard_scan, "evaluate_hard_exit", lambda *a, **k: called.append(1))
 
@@ -1031,43 +1053,26 @@ async def test_hard_scan_live_yields_to_wheel(tmp_path, monkeypatch):
         "SELECT mode, action, gateway FROM wheel_decisions "
         "WHERE subject_key='POS-LIVE'",
     ).fetchone()
-    assert row and row["mode"] == "live"
-    if row["action"] == "EXIT":   # 交易日：灾难性击穿即时执行
-        assert row["gateway"] == "executed"
-        assert brain.store.get_position("POS-LIVE")["status"] == "closed"
-    else:                          # 非交易日：底线否决，但决策已产出 → 已让位
-        assert brain.store.get_position("POS-LIVE")["status"] == "open"
+    assert row["mode"] == "live" and row["action"] == "EXIT"
+    assert row["gateway"] == "executed"
+    assert brain.store.get_position("POS-LIVE")["status"] == "closed"
 
 
 @pytest.mark.asyncio
 async def test_hard_scan_live_falls_back_when_wheel_fails(tmp_path, monkeypatch):
     """live 绑定但转盘未产出决策（None）→ 告警 + 旧路径兜底（fail-safe）。"""
     from src.agents.reviewer import hard_scan, stop_confirm
-    from src.wheel import config as wheel_config
 
     stop_confirm.reset()
     brain = _MockBrain(tmp_path)
     pos = {**_SHORT_POS, "position_id": "POS-FB"}
     _open(brain, pos)
-
-    cfg_obj = wheel_config.load_wheel_config()
-    pcfg = cfg_obj.personas["short_term_hot_rotation_v1"]
-    pcfg.bindings["clock.intraday_5m"] = dataclasses.replace(
-        pcfg.bindings["clock.intraday_5m"], mode="live",
-    )
-    monkeypatch.setattr(wheel_config, "_cache", cfg_obj)
-
+    _live_5m(monkeypatch)
+    _stub_hard_scan(monkeypatch, hard_scan, price=84.0)
     monkeypatch.setattr(hard_scan, "run_exit_shadow", lambda *a, **k: None)
-    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **kw: (84.0, False))
-    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
     alerts: list = []
     monkeypatch.setattr(hard_scan, "notify_ops", lambda *a, **k: alerts.append(a))
 
-    async def _no_pending(*a, **kw):
-        return []
-    monkeypatch.setattr(
-        "src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending,
-    )
     exits = await hard_scan.run_hard_scan(
         "short_term_hot_rotation_v1", force=True, brain=brain,
     )
@@ -1075,6 +1080,78 @@ async def test_hard_scan_live_falls_back_when_wheel_fails(tmp_path, monkeypatch)
     assert brain.store.get_position("POS-FB")["status"] == "open"
     # 旧路径按自己的确认语义处理了首次击穿
     assert exits[0]["risk_flag"] == "stop_breach_pending"
+
+
+@pytest.mark.asyncio
+async def test_hard_scan_live_gateway_error_no_double_sell(tmp_path, monkeypatch):
+    """网关执行中异常（可能已成交）→ 转盘仍返回决策，旧路径让位，不重复卖出。"""
+    from src.agents.reviewer import hard_scan, intraday_loop, stop_confirm
+
+    stop_confirm.reset()
+    _freeze_shadow_now(monkeypatch)
+    brain = _MockBrain(tmp_path)
+    pos = {**_SHORT_POS, "position_id": "POS-ERR"}
+    _open(brain, pos)
+    _live_5m(monkeypatch)
+    _stub_hard_scan(monkeypatch, hard_scan, price=80.0)
+    sells: list = []
+
+    def _exec_then_fail(self, ctx, position, decision):
+        sells.append("wheel")                       # 已成交
+        raise RuntimeError("database is locked")    # 成交后 close_position 前异常
+    monkeypatch.setattr(ExitGateway, "_execute", _exec_then_fail)
+
+    async def _legacy(*a, **k):
+        sells.append("legacy")
+        return {"executed": True}
+    monkeypatch.setattr(intraday_loop, "_execute_review_action", _legacy)
+    alerts: list = []
+    monkeypatch.setattr("src.infra.notify.notify_ops", lambda *a, **k: alerts.append(a))
+
+    await hard_scan.run_hard_scan(
+        "short_term_hot_rotation_v1", force=True, brain=brain,
+    )
+    assert sells == ["wheel"]
+    assert alerts and alerts[0][0] == "出场网关执行结果不确定"
+    row = brain.store._conn().execute(
+        "SELECT gateway FROM wheel_decisions WHERE subject_key='POS-ERR'",
+    ).fetchone()
+    assert row["gateway"] == "error:execute_error"
+    assert ExitGateway(brain)._locked("POS-ERR", datetime(2026, 10, 12, 10, 0))
+
+
+def test_report_fill_same_day_sell_then_rebuy(tmp_path):
+    """同日旧仓止损卖出、下午重新买入：卖出 fill 归旧仓，新仓不出现假"更严"。"""
+    brain = _MockBrain(tmp_path)
+    store = brain.store
+    today = date.today().isoformat()
+    store.open_position(
+        position_id="OLD", symbol="002487", entry_price=46.0, qty=1000,
+        entry_date="2026-10-08", persona_id="short_term_hot_rotation_v1",
+    )
+    conn = store._conn()
+    conn.execute(
+        """INSERT INTO fills (fill_id, order_id, symbol, side, quantity,
+           avg_price, filled_at, persona_id) VALUES (?,?,?,?,?,?,?,?)""",
+        ("F1", "O1", "002487", "sell", 1000, 44.9, f"{today}T10:05:00",
+         "short_term_hot_rotation_v1"),
+    )
+    conn.commit()
+    store.close_position("OLD", 44.9, -1100.0, closed_at=f"{today}T10:05:01")
+    store.open_position(
+        position_id="NEW", symbol="002487", entry_price=45.5, qty=1000,
+        entry_date=today, persona_id="short_term_hot_rotation_v1",
+    )
+    store.record_wheel_decision("D1", "e1", "exit_confirm", "p", "OLD",
+                                "EXIT", None, "shadow", "r")
+    store.set_wheel_decision_gateway("D1", "accepted")
+    store.record_wheel_decision("D2", "e2", "exit_confirm", "p", "NEW",
+                                "HOLD", None, "shadow", "r")
+
+    report = daily_shadow_report(brain, day=today)
+    assert report["agree"] == 1
+    assert report["wheel_stricter"] == 0
+    assert report["uncovered"] == 0
 
 
 def test_gateway_timeout_keeps_lock(tmp_path, monkeypatch):
@@ -1089,6 +1166,7 @@ def test_gateway_timeout_keeps_lock(tmp_path, monkeypatch):
         gw, "_execute",
         lambda *a, **k: {"executed": False, "reason": "execute_timeout"},
     )
+    monkeypatch.setattr("src.infra.notify.notify_ops", lambda *a, **k: None)
     res = gw.submit(d, ctx)
     assert res["reason"] == "execute_timeout"
     assert gw._locked("POS-S", _TRADING_NOW) is True

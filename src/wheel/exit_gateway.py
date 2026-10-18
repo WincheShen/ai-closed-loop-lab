@@ -88,20 +88,28 @@ class ExitGateway:
 
         # 7. live：加锁 → 执行 → 取消后续事件
         self._acquire(position_id, ctx.now)
-        timed_out = False
         try:
             result = self._execute(ctx, fresh, decision)
-            timed_out = result.get("reason") == "execute_timeout"
-            if result.get("executed"):
-                self._mark_executed(decision_id)
-                self._cancel_follow_ups(position_id)
-            return {"accepted": True, "executed": bool(result.get("executed")),
-                    "reason": result.get("reason", ""), "result": result}
-        finally:
-            # 超时时执行线程可能仍在跑 — 锁保留至 TTL 到期，
-            # 挡住下一轮扫描对同一持仓的重复提交
-            if not timed_out:
-                self._release(position_id)
+        except Exception as e:  # noqa: BLE001
+            # 执行中异常：可能已成交（如成交后 close_position 失败）。不上抛 —
+            # 上抛会让调用方拿到 None 走旧路径兜底，造成重复卖出。
+            logger.error(
+                "[ExitGateway] %s %s 执行异常（可能已成交）: %s",
+                symbol, decision.action, e, exc_info=True,
+            )
+            self._notify_ambiguous(persona_id, symbol, decision, f"execute_error: {e}")
+            # 锁保留至 TTL 到期，挡住下一轮扫描对同一持仓的重复提交
+            return {"accepted": True, "executed": False, "reason": "execute_error"}
+        if result.get("reason") == "execute_timeout":
+            # 超时时执行线程可能仍在跑 — 同样保留锁
+            self._notify_ambiguous(persona_id, symbol, decision, "execute_timeout")
+        else:
+            self._release(position_id)
+        if result.get("executed"):
+            self._mark_executed(decision_id)
+            self._cancel_follow_ups(position_id)
+        return {"accepted": True, "executed": bool(result.get("executed")),
+                "reason": result.get("reason", ""), "result": result}
 
     # ------------------------------------------------------------------
 
@@ -111,6 +119,18 @@ class ExitGateway:
             decision.subject_key, decision.action, reason,
         )
         return {"accepted": False, "executed": False, "reason": reason}
+
+    @staticmethod
+    def _notify_ambiguous(persona_id: str, symbol: str, decision: Decision, reason: str) -> None:
+        try:
+            from src.infra.notify import notify_ops
+            notify_ops(
+                "出场网关执行结果不确定",
+                f"persona={persona_id} symbol={symbol} action={decision.action} "
+                f"reason={reason} — 请人工核对成交与持仓",
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("notify_ops 失败", exc_info=True)
 
     def _locked(self, position_id: str, now: datetime) -> bool:
         try:

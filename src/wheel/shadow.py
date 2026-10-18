@@ -125,8 +125,10 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
             wheel_by_pos[d["subject_key"]] = d
 
     # 持仓索引：fill → position_id。同一 (persona, symbol) 会反复交易
-    # （隔夜客常重复做同一批动量股）——优先匹配未平仓持仓；
-    # 否则按成交日落在 [entry_date, closed_at] 窗口内的已平仓持仓，取最近一笔
+    # （隔夜客常重复做同一批动量股；短线止损后当日可能重新买入）：
+    # 1) 当日平仓且 filled_at <= closed_at 的持仓（这笔卖出就是它的平仓单）
+    # 2) 未平仓持仓
+    # 3) 成交日落在 [entry_date, closed_at] 窗口内的已平仓持仓，取最近一笔
     open_by_key: dict[tuple[str | None, str], str] = {}
     closed_positions: list[dict] = []
     for pos in store.list_positions():
@@ -138,9 +140,18 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
 
     def _position_for_fill(fill: dict) -> str | None:
         key = (fill.get("persona_id"), fill.get("symbol"))
+        filled_at = str(fill.get("filled_at") or "")
+        fday = filled_at[:10]
+        closing = [
+            p for p in closed_positions
+            if (p.get("persona_id"), p.get("symbol")) == key
+            and str(p.get("closed_at") or "")[:10] == fday
+            and filled_at <= str(p.get("closed_at") or "")
+        ]
+        if closing:
+            return min(closing, key=lambda p: str(p.get("closed_at") or ""))["position_id"]
         if key in open_by_key:
             return open_by_key[key]
-        fday = str(fill.get("filled_at") or "")[:10]
         best: dict | None = None
         for pos in closed_positions:
             if (pos.get("persona_id"), pos.get("symbol")) != key:

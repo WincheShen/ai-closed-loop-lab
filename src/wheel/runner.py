@@ -276,10 +276,12 @@ def run_wheel(
         d = result.decisions[0]
         gw = ExitGateway(brain).submit(d, ctx, decision_id=d.decision_id)
         if d.action in ("EXIT", "REDUCE") and d.decision_id:
+            reason = str(gw.get("reason", ""))
             outcome = (
                 "executed" if gw.get("executed")
+                else f"error:{reason}" if reason in ("execute_error", "execute_timeout")
                 else "accepted" if gw.get("accepted")
-                else f"rejected:{gw.get('reason', '')}"
+                else f"rejected:{reason}"
             )
             _record_gateway(brain, d.decision_id, outcome)
 
