@@ -28,8 +28,14 @@ class ExitGateway:
         self.brain = brain
         self.store = brain.store
 
-    def submit(self, decision: Decision, ctx: Context) -> dict:
-        """提交一个出场决策。返回 {"accepted", "executed", "reason"}。"""
+    def submit(
+        self, decision: Decision, ctx: Context, *, decision_id: str = "",
+    ) -> dict:
+        """提交一个出场决策。返回 {"accepted", "executed", "reason"}。
+
+        decision_id 对应 wheel_decisions 主键：通过网关（shadow=会执行、
+        live=已执行）时打 executed 标记，同窗口去重依赖该标记。
+        """
         if decision.action not in ("EXIT", "REDUCE"):
             return {"accepted": False, "executed": False, "reason": "非卖出动作"}
 
@@ -75,6 +81,9 @@ class ExitGateway:
                 "[ExitGateway:shadow] %s %s %s — 不执行 (%s)",
                 persona_id, decision.action, symbol, decision.reason,
             )
+            # shadow 模式通过网关即视为"会执行" — executed 标记让同窗口
+            # 去重在影子模式下也生效，影子语义与 live 一致
+            self._mark_executed(decision_id)
             return {"accepted": True, "executed": False, "reason": "shadow"}
 
         # 7. live：加锁 → 执行 → 取消后续事件
@@ -82,6 +91,7 @@ class ExitGateway:
         try:
             result = self._execute(ctx, fresh, decision)
             if result.get("executed"):
+                self._mark_executed(decision_id)
                 self._cancel_follow_ups(position_id)
             return {"accepted": True, "executed": bool(result.get("executed")),
                     "reason": result.get("reason", ""), "result": result}
@@ -124,6 +134,14 @@ class ExitGateway:
         except Exception:  # noqa: BLE001
             pass
 
+    def _mark_executed(self, decision_id: str) -> None:
+        if not decision_id:
+            return
+        try:
+            self.store.mark_wheel_decision_executed(decision_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("wheel_decision executed 标记失败 %s", decision_id, exc_info=True)
+
     def _duplicate_in_window(self, position_id: str, decision: Decision, now: datetime) -> bool:
         """同一分钟内已有相同/更强出场决策被执行 → 本次跳过（EXIT 最强）。"""
         try:
@@ -132,6 +150,7 @@ class ExitGateway:
                 actions=("EXIT", "REDUCE"),
                 within_seconds=DEDUP_WINDOW_S,
                 executed_only=True,
+                now=now,
             )
         except Exception:  # noqa: BLE001
             return False

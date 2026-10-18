@@ -20,7 +20,7 @@ from src.agents.memory.trade_attribution import TradeAttributor
 from src.central_brain import get_central_brain
 from src.infra.config import cfg
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
-from src.wheel.shadow import run_exit_shadow
+from src.wheel.shadow import run_exit_shadow, wheel_exit_mode
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,15 @@ async def run_intraday_review(
         position = brain.store.get_position(position_id) if position_id else None
         if not position:
             logger.warning("Position %s not found, skipping", position_id)
+            action_results.append(review)
+            continue
+
+        # 卖出类动作：llm_position_review 转盘 live 时由 ExitGateway 已执行，
+        # 旧路径必须让位 — 同一持仓只有一个出场执行方
+        if action in ("EXIT", "REDUCE") and wheel_exit_mode(
+            position.get("persona_id") or persona_id, "clock.intraday_30m",
+        ) == "live":
+            review["executed_via"] = "wheel"
             action_results.append(review)
             continue
 

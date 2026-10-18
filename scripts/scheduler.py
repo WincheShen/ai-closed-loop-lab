@@ -383,12 +383,20 @@ def job_health_check() -> None:
             "agree": report["agree"],
             "stricter": report["wheel_stricter"],
             "looser": report["wheel_looser"],
+            "gateway_rejected": report["gateway_rejected"],
+            "uncovered": report["uncovered"],
         }
         if report["wheel_looser"] > 0:
             notify_ops(
                 "转盘影子比旧路径更松",
                 f"date={today} looser={report['wheel_looser']} "
                 f"items={[i['position_id'] for i in report['looser_items']]}",
+            )
+        if report["uncovered"] > 0:
+            notify_ops(
+                "转盘影子存在覆盖缺口",
+                f"date={today} uncovered={report['uncovered']} "
+                f"items={[i['position_id'] for i in report['uncovered_items']]}",
             )
     except Exception as e:
         logger.warning("[HealthCheck] 转盘影子对比异常: %s", e)

@@ -36,6 +36,19 @@ def _make_event(
     )
 
 
+def wheel_exit_mode(persona_id: str | None, event_type: str) -> str:
+    """该 persona 在该事件上的出场模式：live / shadow / off（未绑定或异常 → off）。
+
+    live 时旧路径必须让位 — 同一持仓只有一个出场执行方（ExitGateway）。
+    """
+    try:
+        from src.wheel.config import get_config
+        binding = get_config().binding_for(persona_id or DEFAULT_PERSONA, event_type)
+        return binding.mode if binding else "off"
+    except Exception:  # noqa: BLE001
+        return "off"
+
+
 def run_exit_shadow(
     brain,
     position: dict,
@@ -134,22 +147,41 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
         if cur is None or _STRENGTH.get(row["action"], 0) > _STRENGTH.get(cur["action"], 0):
             legacy[row["position_id"]] = dict(row)
 
-    agree, stricter, looser = [], [], []
+    agree, stricter, looser, uncovered, gw_rejected = [], [], [], [], []
     for pid, wd in wheel_by_pos.items():
         leg = legacy.get(pid)
-        wheel_sells = wd["action"] in _SELL_ACTIONS
+        gateway = str(wd.get("gateway") or "")
+        proposed_sell = wd["action"] in _SELL_ACTIONS
+        wheel_sells = proposed_sell and not gateway.startswith("rejected")
         leg_sells = bool(leg) and leg.get("action") in _SELL_ACTIONS
         item = {
             "position_id": pid,
-            "wheel": {"wheel": wd["wheel"], "action": wd["action"], "reason": wd.get("reason", "")},
+            "wheel": {
+                "wheel": wd["wheel"], "action": wd["action"],
+                "decided_by": wd.get("decided_by", ""),
+                "reason": wd.get("reason", ""),
+            },
+            "gateway": gateway or None,
             "legacy": {"action": leg.get("action") if leg else None},
         }
-        if wheel_sells and leg_sells:
+        if proposed_sell and gateway.startswith("rejected"):
+            gw_rejected.append(item)
+        elif wheel_sells and leg_sells:
             agree.append(item)
         elif leg_sells and not wheel_sells:
             stricter.append(item)
         elif wheel_sells and not leg_sells:
             looser.append(item)
+
+    # 覆盖缺口：旧路径卖了、但转盘当天没评估过该持仓 — 单独列出，
+    # 不计入更严/更松，但必须逐条解释后才能切 live
+    for pid, leg in legacy.items():
+        if pid in wheel_by_pos or leg.get("action") not in _SELL_ACTIONS:
+            continue
+        uncovered.append({
+            "position_id": pid,
+            "legacy": {"action": leg.get("action"), "source": leg.get("source")},
+        })
 
     report = {
         "day": day,
@@ -157,13 +189,18 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
         "agree": len(agree),
         "wheel_stricter": len(stricter),
         "wheel_looser": len(looser),
+        "gateway_rejected": len(gw_rejected),
+        "uncovered": len(uncovered),
         "stricter_items": stricter,
         "looser_items": looser,
+        "uncovered_items": uncovered,
     }
 
     logger.info(
-        "[WheelShadow] %s 决策=%d | 一致=%d | 转盘更严=%d | 转盘更松=%d",
+        "[WheelShadow] %s 决策=%d | 一致=%d | 转盘更严=%d | 转盘更松=%d | "
+        "网关拒绝=%d | 未覆盖=%d",
         day, len(decisions), len(agree), len(stricter), len(looser),
+        len(gw_rejected), len(uncovered),
     )
     for item in stricter:
         logger.info(
@@ -175,6 +212,11 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
             "[WheelShadow] 更松 %s: legacy=%s → wheel=%s (%s)",
             item["position_id"], item["legacy"]["action"],
             item["wheel"]["action"], item["wheel"]["reason"],
+        )
+    for item in uncovered:
+        logger.warning(
+            "[WheelShadow] 未覆盖 %s: legacy=%s (%s) 但转盘当天无该持仓决策",
+            item["position_id"], item["legacy"]["action"], item["legacy"].get("source"),
         )
 
     if hasattr(brain, "log_agent_event"):

@@ -8,6 +8,7 @@ from src.wheel.protocol import Context, Opinion
 class _FloorFactor:
     stage = "veto"
     requires: tuple[str, ...] = ()
+    param_keys: tuple = ()
 
     def _veto(self, reason: str) -> Opinion:
         return Opinion(factor=self.name, verdict="veto", reason=reason)

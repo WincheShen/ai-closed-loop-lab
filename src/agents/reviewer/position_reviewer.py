@@ -180,6 +180,8 @@ class PositionReviewAgent:
             pre_llm_result["symbol"] = symbol
             pre_llm_result["current_price"] = current_price
             pre_llm_result["pnl_pct"] = round(pnl_pct, 2)
+            # 未调用 LLM（硬规则直接命中）— 无原始判断可供 llm.* 消费
+            pre_llm_result["llm_raw_action"] = None
             return pre_llm_result
 
         # 2. Generate market summary
@@ -248,7 +250,15 @@ class PositionReviewAgent:
             pnl_pct = -pnl_pct
 
         # 6.5 Rule Override: 止盈/止损硬约束（优先于 LLM 判断）
+        # 先留档 LLM 原始判断 — 决策转盘的 llm.* Factor 只消费原始字段；
+        # 带 rule_override 的动作由 rule.review_override 表达，不走 llm.* 降噪。
+        llm_raw_action = result.get("action")
+        llm_raw_thesis = result.get("thesis_status")
+        llm_raw_reason = result.get("reason")
         result = self._apply_rule_override(result, position, current_price, pnl_pct)
+        result["llm_raw_action"] = llm_raw_action
+        result["llm_raw_thesis_status"] = llm_raw_thesis
+        result["llm_raw_reason"] = llm_raw_reason
 
         # 6.6 最低持仓期保护 — 短线持仓入场当天 LLM REDUCE 过早，降级为 HOLD
         # 仅对 LLM 主动 REDUCE 生效，不影响规则层触发的 EXIT/REDUCE（止损、目标价等）

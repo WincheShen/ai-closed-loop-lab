@@ -103,13 +103,22 @@ def _parse_steps(names: list[str], where: str) -> list[tuple[str, dict]]:
                 k, v = part.split("=", 1)
                 k, v = k.strip(), v.strip()
                 try:
-                    args[k] = float(v) if "." in v else int(v)
+                    args[k] = float(v) if "." in v or "e" in v.lower() else int(v)
                 except ValueError:
                     args[k] = v
             parsed.append((name.strip(), args))
         else:
             parsed.append((item, {}))
     return parsed
+
+
+def _declared_params(factor_name: str) -> set[str]:
+    """Factor 声明接受的参数名；未声明一律不接受（防止参数名写错被静默忽略）。"""
+    try:
+        fac = registry.factor(factor_name)
+    except KeyError:
+        return set()
+    return set(getattr(fac, "param_keys", ()) or ())
 
 
 def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
@@ -148,11 +157,23 @@ def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
         for name, _args in _parse_steps(propose, f"{where}.propose"):
             _require(name in registry.factor_names(), f"{where}.propose 未注册: {name}")
             _require(registry.factor(name).stage == "propose", f"{where}.propose {name} stage 不是 propose")
+            _require(
+                set(_args) <= _declared_params(name),
+                f"{where}.propose {name} 不接受参数: {sorted(set(_args) - _declared_params(name))}",
+            )
         for name, _args in _parse_steps(modify, f"{where}.modify"):
             _require(name in registry.factor_names(), f"{where}.modify 未注册: {name}")
             _require(registry.factor(name).stage == "modify", f"{where}.modify {name} stage 不是 modify")
+            _require(
+                set(_args) <= _declared_params(name),
+                f"{where}.modify {name} 不接受参数: {sorted(set(_args) - _declared_params(name))}",
+            )
         for name, _args in _parse_steps(steps, f"{where}.steps"):
             _require(name in registry.factor_names(), f"{where}.steps 未注册: {name}")
+            _require(
+                set(_args) <= _declared_params(name),
+                f"{where}.steps {name} 不接受参数: {sorted(set(_args) - _declared_params(name))}",
+            )
 
         if kind == "decision":
             _require(resolve == "priority", f"{where}.resolve 仅支持 priority: {resolve!r}")
@@ -189,6 +210,21 @@ def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
                 _require(wheel in wheels, f"{bwhere}.wheel 未定义: {wheel}")
             for wname in chain:
                 _require(wname in wheels, f"{bwhere}.chain 引用未定义转盘: {wname}")
+            # binding.params 只允许填写所绑转盘各 Factor 声明过的参数名
+            declared: set[str] = set()
+            for wname in ((wheel,) if wheel else chain):
+                wdef = wheels[wname]
+                for fname, _fargs in (
+                    _parse_steps(list(wdef.veto) + list(wdef.propose)
+                                 + list(wdef.modify) + list(wdef.steps), bwhere)
+                ):
+                    declared |= _declared_params(fname)
+            unknown = set(params) - declared
+            _require(
+                not unknown,
+                f"{bwhere}.params 含未声明参数 {sorted(unknown)}"
+                f"（该绑定可用参数: {sorted(declared) or '无'}）",
+            )
             bindings[event_type] = Binding(
                 event_type=event_type, wheel=wheel or "",
                 chain=tuple(chain), params=params, mode=mode,

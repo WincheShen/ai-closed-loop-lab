@@ -119,16 +119,26 @@ def test_veto_truncates_wheel(tmp_path):
 
 
 def test_priority_resolve_picks_rule_over_llm(tmp_path):
-    """同事件里规则提议与 LLM 提议冲突时，LLM（priority>=500）只能让步。"""
+    """同事件里规则提议与 LLM 提议冲突时，LLM（priority>=500）只能让步。
+
+    rule.target_reduce(20) 提议 REDUCE + llm(500) 提议 EXIT → 取规则提议。
+    """
+    from src.wheel.config import WheelDef
+
     brain = _MockBrain(tmp_path)
-    cfg = get_config()
-    wheel = cfg.wheels["exit_confirm"]
-    # 跌破止损 85 → rule.stop_loss EXIT；无需 LLM 因子参与即可裁决
-    ctx = _ctx(brain, _SHORT_POS, 84.0)
+    wheel = WheelDef(
+        name="t_rule_vs_llm", kind="decision",
+        data=("position", "quote_realtime"),
+        propose=("rule.target_reduce", "llm.position_review"),
+        resolve="priority",
+    )
+    review = {"action": "EXIT", "reason": "LLM 想清仓", "thesis_status": "weakened"}
+    ctx = _ctx(brain, _SHORT_POS, 121.0, extra={"llm_review": review})  # 达目标价 120
     result = run_wheel(wheel, ctx.event, ctx.persona, brain, mode="shadow",
                        preloaded=ctx.data, now=ctx.now)
-    assert result.decisions[0].action == "EXIT"
-    assert result.decisions[0].decided_by == "rule.stop_loss"
+    d = result.decisions[0]
+    assert d.action == "REDUCE"
+    assert d.proposed_by == "rule.target_reduce"
 
 
 def test_llm_proposal_only_when_no_rule(tmp_path):
@@ -144,17 +154,35 @@ def test_llm_proposal_only_when_no_rule(tmp_path):
 
 
 def test_modify_cannot_strengthen(tmp_path):
-    """modify 试图把 HOLD 调成 EXIT → 被忽略，结论保持 HOLD。"""
-    brain = _MockBrain(tmp_path)
-    cfg = get_config()
-    wheel = cfg.wheels["llm_position_review"]
-    # LLM 提议 HOLD，但股价击穿止损：mod.stop_confirm 只会在 EXIT 时动作；
-    # 构造一个 EXIT→(stop_confirm 不动作) — 验证 modify 不会凭空加强
-    review = {"action": "HOLD", "reason": "平静", "thesis_status": "intact"}
-    ctx = _ctx(brain, _SHORT_POS, 100.0, extra={"llm_review": review})
-    result = run_wheel(wheel, ctx.event, ctx.persona, brain, mode="shadow",
-                       preloaded=ctx.data, now=ctx.now)
-    assert result.decisions[0].action == "HOLD"
+    """modify 试图把 HOLD 调成 EXIT → 被忽略并告警，结论保持 HOLD。"""
+    from src.wheel import registry
+    from src.wheel.config import WheelDef
+
+    class _Strengthen:
+        name = "mod.test_strengthen"
+        stage = "modify"
+        requires: tuple = ()
+        param_keys: tuple = ()
+
+        def evaluate(self, ctx, params):
+            return Opinion(factor=self.name, verdict="modify",
+                           action="EXIT", reason="试图调强")
+
+    registry.register_factor(_Strengthen())
+    try:
+        brain = _MockBrain(tmp_path)
+        wheel = WheelDef(
+            name="t_strengthen", kind="decision",
+            data=("position", "quote_realtime"),
+            propose=(), modify=("mod.test_strengthen",),
+        )
+        ctx = _ctx(brain, _SHORT_POS, 100.0)  # 无提议 → resolved HOLD
+        result = run_wheel(wheel, ctx.event, ctx.persona, brain, mode="shadow",
+                           preloaded=ctx.data, now=ctx.now)
+        assert result.decisions[0].action == "HOLD"
+        assert result.decisions[0].decided_by == "none"
+    finally:
+        registry._FACTORS.pop("mod.test_strengthen", None)
 
 
 # ── rule.* Factor ─────────────────────────────────────────────
@@ -216,7 +244,7 @@ def test_stop_confirm_two_breaches_persisted(tmp_path):
                          preloaded=ctx.data, now=now).decisions[0]
 
     d1 = run(44.91, 0)   # 首次击穿 → HOLD，登记
-    assert d1.action == "HOLD" and "首次击穿" in d1.reason
+    assert d1.action == "HOLD" and "未确认" in d1.reason
     state = brain.store.get_factor_state(
         "short_term_hot_rotation_v1", "mod.stop_confirm", "POS-002487")
     assert state and state["breach_count"] == 1
@@ -464,7 +492,7 @@ async def test_gateway_lock_and_dedup(tmp_path):
     brain.store.record_wheel_decision(
         decision_id="WD-DUP", event_id="e1", wheel="exit_confirm",
         persona_id="p", subject_key="POS-S", action="EXIT",
-        qty_pct=None, mode="live", reason="r",
+        qty_pct=None, mode="live", reason="r", now=_TRADING_NOW,
     )
     brain.store.mark_wheel_decision_executed("WD-DUP")
     res = gw.submit(d, ctx)
@@ -632,3 +660,208 @@ def test_evaluate_hard_exit_parity_after_refactor():
     # 价值: -8.7% 不出，宽止损破→EXIT
     assert evaluate_hard_exit(_VALUE_POS, 113.0) is None
     assert evaluate_hard_exit(_VALUE_POS, 92.0)["action"] == "EXIT"
+
+
+# ── 修复回归：同分钟双转盘不重复计数 / -8% 熔断窗口 / rule_override / 底线 fail-closed ──
+
+def test_stop_confirm_same_tick_two_wheels_not_double_counted(tmp_path):
+    """同一时刻 hard_scan + LLM 复审各跑一次转盘 → 只算一次击穿（A 修复）。
+
+    10:00:00 exit_confirm 判 HOLD 登记一次；10:00:20 llm_position_review
+    看到 LLM EXIT 也恰逢止损位，但观测间隔 <180s → 不计数，仍 HOLD。
+    """
+    brain = _MockBrain(tmp_path)
+    _open(brain, _002487_POS)
+    t0 = _TRADING_NOW
+    d1 = run_exit_shadow(
+        brain, _002487_POS, price=44.9, is_mock=False,
+        event_type="clock.intraday_5m", source="hard_scan", now=t0,
+    )
+    assert d1.action == "HOLD"
+    d2 = run_exit_shadow(
+        brain, _002487_POS, price=44.9, is_mock=False,
+        event_type="clock.intraday_30m", source="intraday_review",
+        extra={"llm_review": {"action": "EXIT", "reason": "走弱",
+                              "thesis_status": "weakened"}},
+        now=t0 + timedelta(seconds=20),
+    )
+    assert d2.action == "HOLD"
+    state = brain.store.get_factor_state(
+        "short_term_hot_rotation_v1", "mod.stop_confirm", "POS-002487")
+    assert state["breach_count"] == 1
+    # ≥180s 后的下一次观测才计数 → 第二次有效击穿 → 确认 EXIT
+    d3 = run_exit_shadow(
+        brain, _002487_POS, price=44.9, is_mock=False,
+        event_type="clock.intraday_30m", source="intraday_review",
+        extra={"llm_review": {"action": "EXIT", "reason": "走弱",
+                              "thesis_status": "weakened"}},
+        now=t0 + timedelta(minutes=5),
+    )
+    assert d3.action == "EXIT"
+
+
+def test_stop_confirm_max_loss_window_enforced(tmp_path):
+    """-8% 熔断（价格仍在止损线上方）也要走确认窗口（B 修复）。"""
+    brain = _MockBrain(tmp_path)
+    pos = {**_SHORT_POS, "position_id": "POS-ML", "entry_price": 100.0,
+           "stop_loss": 85.0, "target_price": 120.0}
+    _open(brain, pos)
+
+    def scan(now):
+        return run_exit_shadow(
+            brain, pos, price=91.0, is_mock=False,   # -9% 熔断，价格高于止损
+            event_type="clock.intraday_5m", source="t", now=now,
+        )
+
+    assert scan(_TRADING_NOW).action == "HOLD"                       # 首次观测
+    # 3 小时后仍在 -9%：距上次观测超出 15 分钟窗口 → 重新计为首次，不是确认
+    assert scan(_TRADING_NOW + timedelta(hours=3)).action == "HOLD"
+    # 再过 5 分钟（≥180s）仍 -9% → 第二次有效观测 → 确认
+    assert scan(_TRADING_NOW + timedelta(hours=3, minutes=5)).action == "EXIT"
+
+
+def test_llm_hold_does_not_wipe_breach_state(tmp_path):
+    """LLM HOLD 复审恰好与 hard_scan 同时刻跑 → 不能清掉刚登记的击穿（B 修复附带）。"""
+    brain = _MockBrain(tmp_path)
+    _open(brain, _002487_POS)
+    t0 = _TRADING_NOW
+    run_exit_shadow(
+        brain, _002487_POS, price=44.9, is_mock=False,
+        event_type="clock.intraday_5m", source="hard_scan", now=t0,
+    )
+    run_exit_shadow(
+        brain, _002487_POS, price=44.9, is_mock=False,
+        event_type="clock.intraday_30m", source="intraday_review",
+        extra={"llm_review": {"action": "HOLD", "reason": "观察"}},
+        now=t0 + timedelta(seconds=20),
+    )
+    state = brain.store.get_factor_state(
+        "short_term_hot_rotation_v1", "mod.stop_confirm", "POS-002487")
+    assert state["breach_count"] == 1
+
+
+def test_rule_override_goes_through_rule_factor_not_llm(tmp_path):
+    """C 修复：rule_override 的 REDUCE（如超期减仓）由 rule.review_override 表达，
+    不被 value_noise_filter / min_hold 误拦。"""
+    brain = _MockBrain(tmp_path)
+    _open(brain, _VALUE_POS)
+    review = {
+        "action": "REDUCE", "reason": "价值持仓 133 天浮亏，减仓释放资金",
+        "risk_flag": "stale_position", "rule_override": True,
+        "thesis_status": "intact", "llm_raw_action": "HOLD",
+    }
+    d = run_exit_shadow(
+        brain, _VALUE_POS, price=113.0, is_mock=False,
+        event_type="clock.intraday_30m", source="t",
+        extra={"llm_review": review}, now=_TRADING_NOW,
+    )
+    assert d.action == "REDUCE"
+    assert d.proposed_by == "rule.review_override"
+
+
+def test_llm_raw_action_used_when_no_override(tmp_path):
+    """C 修复：无 rule_override 时 llm.* 读 llm_raw_* 原始字段。"""
+    brain = _MockBrain(tmp_path)
+    _open(brain, _SHORT_POS)
+    review = {
+        "action": "HOLD", "reason": "min_hold 降级后的表面动作",
+        "llm_raw_action": "REDUCE", "llm_raw_reason": "LLM 原本想减仓",
+        "llm_raw_thesis_status": "weakened", "thesis_status": "weakened",
+    }
+    pos = {**_SHORT_POS, "position_id": "POS-RAW", "entry_date": "2026-10-01"}
+    _open(brain, pos)
+    d = run_exit_shadow(
+        brain, pos, price=110.0, is_mock=False,
+        event_type="clock.intraday_30m", source="t",
+        extra={"llm_review": review}, now=_TRADING_NOW,
+    )
+    assert d.action == "REDUCE" and d.proposed_by == "llm.position_review"
+
+
+def test_veto_fail_closed_on_missing_data(tmp_path):
+    """D 修复：veto 阶段依赖缺失 → 否决而非放行。"""
+    brain = _MockBrain(tmp_path)
+    cfg = get_config()
+    ev = _event("clock.intraday_5m", "NOPE", _TRADING_NOW, "short_term_hot_rotation_v1")
+    persona = PersonaPolicy(persona_id="short_term_hot_rotation_v1")
+    result = run_wheel(
+        cfg.wheels["exit_confirm"], ev, persona, brain, mode="shadow",
+        preloaded={"quote": {"price": 44.0, "is_mock": False}},
+        now=_TRADING_NOW,
+    )
+    d = result.decisions[0]
+    assert d.action == "HOLD" and d.decided_by == "floor.t_plus_1"
+    veto_ops = [o for o in result.trace if o.factor == "floor.t_plus_1"]
+    assert veto_ops[0].verdict == "veto"
+
+
+def test_gateway_records_outcome_and_shadow_dedup(tmp_path):
+    """E/P1 修复：网关结果写 wheel_decisions；shadow 下同窗口去重也生效。"""
+    brain = _MockBrain(tmp_path)
+    _open(brain, _002487_POS)
+    t0 = _TRADING_NOW
+    # 灾难性击穿 → shadow 直接放行（mark executed）
+    d1 = run_exit_shadow(
+        brain, _002487_POS, price=43.0, is_mock=False,
+        event_type="clock.intraday_5m", source="t", now=t0,
+    )
+    assert d1.action == "EXIT"
+    # 同一分钟内第二个卖出决策 → 网关去重拒绝
+    run_exit_shadow(
+        brain, _002487_POS, price=43.0, is_mock=False,
+        event_type="clock.intraday_5m", source="t", now=t0 + timedelta(seconds=30),
+    )
+    conn = brain.store._conn()
+    rows = conn.execute(
+        "SELECT action, gateway, executed FROM wheel_decisions WHERE subject_key='POS-002487'",
+    ).fetchall()
+    sells = [dict(r) for r in rows if r["action"] in ("EXIT", "REDUCE")]
+    assert any(r["gateway"] == "accepted" and r["executed"] == 1 for r in sells)
+    assert any(r["gateway"] == "rejected:duplicate_in_window" for r in sells)
+
+
+def test_shadow_report_uncovered_and_gateway_rejected(tmp_path):
+    """报告：legacy 卖了但转盘没评估过 → uncovered；网关拒绝不计入 looser。"""
+    brain = _MockBrain(tmp_path)
+    today = date.today().isoformat()
+    now_iso = datetime.now().isoformat()
+    store = brain.store
+    _open(brain, {**_SHORT_POS, "position_id": "POS-LEG", "symbol": "000003"})
+    _open(brain, {**_SHORT_POS, "position_id": "POS-REJ"})
+    # POS-LEG：legacy 当日平仓，转盘从未评估 → uncovered
+    store.close_position("POS-LEG", 90.0, -100.0, closed_at=now_iso)
+    # POS-REJ：转盘提议 EXIT 但网关拒绝 → 不算 looser
+    store.record_wheel_decision(
+        "D-REJ", "e1", "exit_confirm", "p", "POS-REJ",
+        "EXIT", None, "shadow", "r", now=datetime.now(),
+    )
+    store.set_wheel_decision_gateway("D-REJ", "rejected:duplicate_in_window")
+
+    report = daily_shadow_report(brain, day=today)
+    assert report["uncovered"] == 1
+    assert report["uncovered_items"][0]["position_id"] == "POS-LEG"
+    assert report["gateway_rejected"] == 1
+    assert report["wheel_looser"] == 0
+
+
+def test_binding_param_typo_rejected(tmp_path):
+    """P2 修复：binding.params 里写错参数名 → 配置校验报错。"""
+    bad = tmp_path / "wheels.yaml"
+    bad.write_text(
+        "wheels:\n  w1:\n    kind: decision\n"
+        "    data: [position, quote_realtime]\n"
+        "    propose: [rule.max_loss]\n"
+        "personas:\n  p1:\n    kind: short\n    bindings:\n"
+        "      clock.x: { wheel: w1, params: { max_loss_pt: 9 } }\n",
+    )
+    with pytest.raises(WheelConfigError, match="max_loss_pt"):
+        load_wheel_config(bad)
+    good = tmp_path / "good.yaml"
+    good.write_text(
+        "wheels:\n  w1:\n    kind: decision\n"
+        "    data: [position, quote_realtime]\n"
+        "    propose: [rule.max_loss]\n"
+        "personas:\n  p1:\n    kind: short\n    bindings:\n"
+        "      clock.x: { wheel: w1, params: { max_loss_pct: 9 } }\n",
+    )
+    assert load_wheel_config(good).binding_for("p1", "clock.x").params["max_loss_pct"] == 9

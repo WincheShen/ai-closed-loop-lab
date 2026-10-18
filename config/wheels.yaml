@@ -39,13 +39,14 @@ wheels:
     modify:  []
     output:  exit_proposal
 
-  # LLM 盘中复审：LLM 只能提议（priority>=500）；价值股降噪、最低持仓期、
+  # LLM 盘中复审：LLM 只能提议（priority>=500）；复审里的规则覆盖动作
+  # 由 rule.review_override 以规则优先级表达。价值股降噪、最低持仓期、
   # 恰逢止损位的 EXIT 仍需二次确认（堵住 LLM 绕过止损确认的通道）
   llm_position_review:
     kind: decision
     data:    [position, quote_realtime, llm_review]
     veto:    [floor.trading_day, floor.t_plus_1, floor.real_quote_required]
-    propose: [llm.position_review]
+    propose: [rule.review_override, llm.position_review]
     resolve: priority
     modify:  [mod.value_noise_filter, mod.min_hold, mod.stop_confirm, mod.reduce_daily_cap]
     output:  exit_proposal

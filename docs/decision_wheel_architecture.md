@@ -624,7 +624,18 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 ### Phase 1 — 出场转盘 + ExitGateway（优先，直接修复 P1）✅ 影子模式已实现
 
-`exit_confirm` / `exit_confirm_ultra` / `overnight_force_close` / `llm_position_review` 四个转盘已接进 hard_scan / intraday_review / force_close 三条旧路径并行运行（mode=shadow，只写 `wheel_decisions` 不执行）；止损确认状态落 `wheel_factor_state`；16:00 health_check 输出 `wheel_shadow_report`。待 1.8 连续 5 个交易日"转盘更松=0"后切 live。
+`exit_confirm` / `exit_confirm_ultra` / `overnight_force_close` / `llm_position_review` 四个转盘已接进 hard_scan / intraday_review / force_close 三条旧路径并行运行（mode=shadow，只写 `wheel_decisions` 不执行）；止损确认状态落 `wheel_factor_state`；16:00 health_check 输出 `wheel_shadow_report`。
+
+复审后修复（影子语义与 live 对齐）：
+- 止损确认最小观测间隔 ≥180s，同一时刻多转盘评估不再重复计数；
+- "-8% 熔断"收复判定看止损条件本身而非价格是否高于止损价（修窗口绕过）；
+- 复审中的规则覆盖动作经 `rule.review_override` 以规则优先级表达，
+  `llm.*` 只消费 `llm_raw_*` 原始判断，不再被降噪/最低持仓误拦；
+- veto 阶段缺数据/异常一律否决（fail-closed）；
+- `wheel_decisions` 记录 `decided_by`/`gateway` 结果；live 时旧路径自动让位；
+- 对比报告新增 gateway_rejected / uncovered 两桶，未覆盖单独告警。
+
+待 1.8 连续 5 个交易日"转盘更松=0 且 uncovered 可解释"后切 live（mode 切 live 即自动让旧路径让位，改回 shadow 即回滚）。
 
 | 任务 | 产出 |
 |---|---|

@@ -90,10 +90,12 @@ class Decision:
     action: str                         # HOLD/EXIT/REDUCE/ADD/BUY/WATCH/SKIP
     qty_pct: float | None = None
     reason: str = ""
-    decided_by: str = ""                # 做出结论的 Factor（或 floor / none）
+    decided_by: str = ""                # 最后落笔的 Factor（提议者或修饰者）
+    proposed_by: str = ""               # 裁决段提议者 — modify 不改写，修饰 Factor 据此判断来源
     risk_flag: str = ""
     price: float = 0.0
     evidence: dict = field(default_factory=dict)
+    decision_id: str = ""               # wheel_decisions 表主键，runner 落库后回填
 
 
 @dataclass(frozen=True)

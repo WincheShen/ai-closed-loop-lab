@@ -487,6 +487,10 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             "CREATE INDEX IF NOT EXISTS idx_wheel_decisions_subject ON wheel_decisions(subject_key, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_wheel_decisions_day ON wheel_decisions(created_at, mode)",
         ]),
+        ("005_wheel_decisions_gateway", [
+            "ALTER TABLE wheel_decisions ADD COLUMN decided_by TEXT",
+            "ALTER TABLE wheel_decisions ADD COLUMN gateway TEXT",
+        ]),
         # --- 未来迁移追加到这里 ---
     ]
 
@@ -1161,6 +1165,10 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             WHERE position_id = ?""",
             (close_price, realized_pnl, ts, position_id),
         )
+        conn.execute(
+            "DELETE FROM wheel_factor_state WHERE subject_key = ?",
+            (position_id,),
+        )
         self._auto_commit()
 
     def save_position_review(
@@ -1617,11 +1625,11 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
     def cancel_wheel_events_for_position(self, position_id: str) -> int:
         """持仓平掉后，作废其所有在途后续事件。"""
         conn = self._conn()
-        frag = f'%"position_id": "{position_id}"%'
         cur = conn.execute(
             """UPDATE wheel_events SET status = 'cancelled', finished_at = ?
-            WHERE status = 'due' AND subject_json LIKE ?""",
-            (datetime.now().isoformat(), frag),
+            WHERE status = 'due'
+              AND json_extract(subject_json, '$.position_id') = ?""",
+            (datetime.now().isoformat(), position_id),
         )
         self._auto_commit()
         return cur.rowcount
@@ -1669,6 +1677,16 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         )
         self._auto_commit()
 
+    def clear_factor_state_for_subject(self, subject_key: str) -> int:
+        """持仓关闭后清除其全部 Factor 状态（止损确认、网关锁等），避免无限累积。"""
+        conn = self._conn()
+        cur = conn.execute(
+            "DELETE FROM wheel_factor_state WHERE subject_key = ?",
+            (subject_key,),
+        )
+        self._auto_commit()
+        return cur.rowcount
+
     def record_wheel_decision(
         self,
         decision_id: str,
@@ -1680,17 +1698,29 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         qty_pct: float | None,
         mode: str,
         reason: str,
+        decided_by: str = "",
+        now: datetime | None = None,
     ) -> None:
         conn = self._conn()
         conn.execute(
             """INSERT OR REPLACE INTO wheel_decisions
             (decision_id, event_id, wheel, persona_id, subject_key,
-             action, qty_pct, mode, executed, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+             action, qty_pct, mode, executed, reason, decided_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
             (
                 decision_id, event_id, wheel, persona_id, subject_key,
-                action, qty_pct, mode, reason, datetime.now().isoformat(),
+                action, qty_pct, mode, reason, decided_by,
+                (now or datetime.now()).isoformat(),
             ),
+        )
+        self._auto_commit()
+
+    def set_wheel_decision_gateway(self, decision_id: str, outcome: str) -> None:
+        """记录 ExitGateway 对决策的处理结果：accepted/executed/rejected:<原因>。"""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE wheel_decisions SET gateway = ? WHERE decision_id = ?",
+            (outcome, decision_id),
         )
         self._auto_commit()
 
@@ -1731,11 +1761,14 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         actions: tuple[str, ...],
         within_seconds: int,
         executed_only: bool = False,
+        now: datetime | None = None,
     ) -> dict | None:
         """窗口内该 subject 最强的一条已执行出场决策（用于同窗口去重）。"""
         conn = self._conn()
         placeholders = ",".join("?" for _ in actions)
-        since = (datetime.now() - timedelta(seconds=within_seconds)).isoformat()
+        since = (
+            (now or datetime.now()) - timedelta(seconds=within_seconds)
+        ).isoformat()
         sql = (
             f"SELECT * FROM wheel_decisions WHERE subject_key = ? "
             f"AND action IN ({placeholders}) AND created_at >= ?"

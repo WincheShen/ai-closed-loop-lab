@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -79,20 +80,31 @@ def _persist_state(ctx: Context, op: Opinion) -> None:
         logger.warning("factor_state 写入失败 %s", op.factor, exc_info=True)
 
 
-def _eval(factor_name: str, ctx: Context, params: dict, trace: list[Opinion]) -> Opinion:
-    """执行一个 Factor：依赖缺失 → skip；异常 → skip（不能让一个依据挂掉整个转盘）。"""
+def _eval(
+    factor_name: str, ctx: Context, params: dict, trace: list[Opinion],
+    *, fail_closed: bool = False,
+) -> Opinion:
+    """执行一个 Factor。
+
+    依赖缺失或异常时：普通阶段 → skip（不能让一个依据挂掉整个转盘）；
+    veto 阶段（fail_closed=True，系统底线）→ veto，缺数据绝不放行。
+    """
+    fail_verdict = "veto" if fail_closed else "skip"
     try:
         fac = registry.factor(factor_name)
     except KeyError:
-        op = Opinion(factor=factor_name, verdict="skip", reason="未注册")
+        op = Opinion(factor=factor_name, verdict=fail_verdict, reason="未注册")
         trace.append(op)
         return op
     _load_state(ctx, factor_name)
     missing = [k for k in getattr(fac, "requires", ()) if k not in ctx.data or ctx.data.get(k) is None]
     if missing:
         op = Opinion(
-            factor=factor_name, verdict="skip",
-            reason=f"缺少依赖数据: {','.join(missing)}",
+            factor=factor_name, verdict=fail_verdict,
+            reason=(
+                f"底线依赖缺失: {','.join(missing)}" if fail_closed
+                else f"缺少依赖数据: {','.join(missing)}"
+            ),
         )
         trace.append(op)
         _persist_state(ctx, op)
@@ -101,7 +113,10 @@ def _eval(factor_name: str, ctx: Context, params: dict, trace: list[Opinion]) ->
         op = fac.evaluate(ctx, params)
     except Exception as e:  # noqa: BLE001
         logger.error("Factor %s 执行异常: %s", factor_name, e, exc_info=True)
-        op = Opinion(factor=factor_name, verdict="skip", reason=f"执行异常: {e}")
+        op = Opinion(
+            factor=factor_name, verdict=fail_verdict,
+            reason=f"底线检查异常: {e}" if fail_closed else f"执行异常: {e}",
+        )
     trace.append(op)
     _persist_state(ctx, op)
     return op
@@ -139,9 +154,9 @@ def run_decision(wheel: WheelDef, ctx: Context) -> WheelResult:
 
     _run_data_steps(wheel, ctx, trace)
 
-    # ① veto：任何一个说"不行"就停
+    # ① veto：任何一个说"不行"就停；底线缺数据/异常一律按否决处理
     for name in wheel.veto:
-        op = _eval(name, ctx, ctx.persona.params, trace)
+        op = _eval(name, ctx, ctx.persona.params, trace, fail_closed=True)
         if op.verdict == "veto":
             ctx.resolved = _decision_from_veto(ctx, wheel, op)
             result.decisions.append(ctx.resolved)
@@ -167,6 +182,7 @@ def run_decision(wheel: WheelDef, ctx: Context) -> WheelResult:
             qty_pct=winner.qty_pct,
             reason=winner.reason,
             decided_by=winner.factor,
+            proposed_by=winner.factor,
             risk_flag=str(winner.evidence.get("risk_flag", "")),
             price=float(winner.evidence.get("price") or (ctx.data.get("quote") or {}).get("price") or 0),
             evidence=dict(winner.evidence),
@@ -174,7 +190,7 @@ def run_decision(wheel: WheelDef, ctx: Context) -> WheelResult:
     else:
         ctx.resolved = Decision(
             wheel=wheel.name, subject_key=_subject_key(ctx),
-            action=HOLD, reason="无提议", decided_by="none",
+            action=HOLD, reason="无提议", decided_by="none", proposed_by="none",
             price=float((ctx.data.get("quote") or {}).get("price") or 0),
         )
 
@@ -196,6 +212,7 @@ def run_decision(wheel: WheelDef, ctx: Context) -> WheelResult:
             qty_pct=ctx.resolved.qty_pct,
             reason=f"{ctx.resolved.reason} | {name}: {op.reason}",
             decided_by=name,
+            proposed_by=ctx.resolved.proposed_by,
             risk_flag=ctx.resolved.risk_flag,
             price=ctx.resolved.price,
             evidence={**ctx.resolved.evidence, "modified_by": name},
@@ -246,13 +263,25 @@ def run_wheel(
     )
 
     subject = _subject_key(ctx)
-    for d in result.decisions:
-        _record_decision(brain, event, d, subject, mode, ctx.persona.persona_id)
+    result.decisions = [
+        replace(d, decision_id=_record_decision(
+            brain, event, d, subject, mode, ctx.persona.persona_id, now=ctx.now,
+        ))
+        for d in result.decisions
+    ]
     _log_trace(brain, event, wheel, subject, result, mode)
 
     if wheel.output == "exit_proposal" and result.decisions:
         from src.wheel.exit_gateway import ExitGateway
-        ExitGateway(brain).submit(result.decisions[0], ctx)
+        d = result.decisions[0]
+        gw = ExitGateway(brain).submit(d, ctx, decision_id=d.decision_id)
+        if d.action in ("EXIT", "REDUCE") and d.decision_id:
+            outcome = (
+                "executed" if gw.get("executed")
+                else "accepted" if gw.get("accepted")
+                else f"rejected:{gw.get('reason', '')}"
+            )
+            _record_gateway(brain, d.decision_id, outcome)
 
     result.follow_ups = [
         op.follow_up for op in result.trace if op.follow_up is not None
@@ -261,11 +290,13 @@ def run_wheel(
 
 
 def _record_decision(
-    brain, event: WheelEvent, d: Decision, subject: str, mode: str, persona_id: str,
-) -> None:
+    brain, event: WheelEvent, d: Decision, subject: str, mode: str,
+    persona_id: str, *, now: datetime | None = None,
+) -> str:
     try:
+        decision_id = f"WD-{uuid.uuid4().hex[:10].upper()}"
         brain.store.record_wheel_decision(
-            decision_id=f"WD-{uuid.uuid4().hex[:10].upper()}",
+            decision_id=decision_id,
             event_id=event.event_id,
             wheel=d.wheel,
             persona_id=persona_id,
@@ -274,9 +305,20 @@ def _record_decision(
             qty_pct=d.qty_pct,
             mode=mode,
             reason=d.reason,
+            decided_by=d.decided_by,
+            now=now,
         )
+        return decision_id
     except Exception:  # noqa: BLE001
         logger.warning("wheel_decision 写入失败 %s", subject, exc_info=True)
+        return ""
+
+
+def _record_gateway(brain, decision_id: str, outcome: str) -> None:
+    try:
+        brain.store.set_wheel_decision_gateway(decision_id, outcome)
+    except Exception:  # noqa: BLE001
+        logger.warning("wheel_decision 网关结果写入失败 %s", decision_id, exc_info=True)
 
 
 def _log_trace(

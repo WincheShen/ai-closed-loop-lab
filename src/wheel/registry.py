@@ -52,9 +52,9 @@ def ensure_builtins_registered() -> None:
     global _builtins_ready
     if _builtins_ready:
         return
-    _builtins_ready = True
     from src.wheel import data as _data  # noqa: F401
     from src.wheel import factors as _factors  # noqa: F401
+    _builtins_ready = True
 
 
 def reset_for_tests() -> None:
