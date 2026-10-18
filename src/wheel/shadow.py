@@ -124,10 +124,34 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
         if cur is None or _STRENGTH.get(d["action"], 0) > _STRENGTH.get(cur["action"], 0):
             wheel_by_pos[d["subject_key"]] = d
 
-    # 持仓 symbol 索引（含已平仓），用于把 fills 映射回 position_id
-    pos_by_symbol: dict[tuple[str, str], str] = {}
+    # 持仓索引：fill → position_id。同一 (persona, symbol) 会反复交易
+    # （隔夜客常重复做同一批动量股）——优先匹配未平仓持仓；
+    # 否则按成交日落在 [entry_date, closed_at] 窗口内的已平仓持仓，取最近一笔
+    open_by_key: dict[tuple[str | None, str], str] = {}
+    closed_positions: list[dict] = []
     for pos in store.list_positions():
-        pos_by_symbol.setdefault((pos["persona_id"], pos["symbol"]), pos["position_id"])
+        key = (pos.get("persona_id"), pos["symbol"])
+        if pos.get("status") == "open":
+            open_by_key.setdefault(key, pos["position_id"])
+        else:
+            closed_positions.append(pos)
+
+    def _position_for_fill(fill: dict) -> str | None:
+        key = (fill.get("persona_id"), fill.get("symbol"))
+        if key in open_by_key:
+            return open_by_key[key]
+        fday = str(fill.get("filled_at") or "")[:10]
+        best: dict | None = None
+        for pos in closed_positions:
+            if (pos.get("persona_id"), pos.get("symbol")) != key:
+                continue
+            entry_day = str(pos.get("entry_date") or "")[:10]
+            closed_day = str(pos.get("closed_at") or "")[:10]
+            if not entry_day or fday < entry_day or (closed_day and fday > closed_day):
+                continue
+            if best is None or entry_day > str(best.get("entry_date") or "")[:10]:
+                best = pos
+        return best["position_id"] if best else None
 
     legacy: dict[str, dict] = {}
     # 当日实际平仓 → legacy EXIT
@@ -136,7 +160,7 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
             legacy[pos["position_id"]] = {"action": "EXIT", "source": "closed"}
     # 当日 sell fills → 按 (persona, symbol) 映射回持仓（覆盖 REDUCE 未平仓）
     for fill in store.list_sell_fills(day):
-        pid = pos_by_symbol.get((fill.get("persona_id"), fill.get("symbol")))
+        pid = _position_for_fill(fill)
         if pid:
             legacy.setdefault(pid, {"action": "REDUCE", "source": "fill"})
     # LLM 复审提议（含未执行的）

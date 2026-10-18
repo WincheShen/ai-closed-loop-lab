@@ -1,6 +1,7 @@
 """决策转盘 Phase 0/1 测试：合并规则、Factor、ExitGateway、黄金用例、配置校验。"""
 from __future__ import annotations
 
+import dataclasses
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -865,3 +866,243 @@ def test_binding_param_typo_rejected(tmp_path):
         "      clock.x: { wheel: w1, params: { max_loss_pct: 9 } }\n",
     )
     assert load_wheel_config(good).binding_for("p1", "clock.x").params["max_loss_pct"] == 9
+
+
+# ── 修复回归 2：价值豁免 / live 让位兜底 / fill 映射 / 网关超时锁 ──
+
+def test_stop_confirm_value_max_loss_exempt(tmp_path):
+    """价值持仓 -9%（止损未破）+ 论点失效 EXIT → 不被二次确认拖住。
+
+    check_max_loss 对价值股豁免 -8% 熔断；mod.stop_confirm 的击穿判断
+    必须与 rule.max_loss 同一份语义，否则论点失效的卖出被错误拖延。
+    """
+    brain = _MockBrain(tmp_path)
+    pos = {**_VALUE_POS, "position_id": "POS-V9", "entry_price": 100.0,
+           "stop_loss": 75.0, "entry_date": "2026-08-01"}
+    _open(brain, pos)
+    review = {
+        "action": "EXIT", "reason": "财报暴雷，论点失效",
+        "risk_flag": "thesis_invalidated", "rule_override": True,
+        "llm_raw_action": "HOLD", "llm_raw_thesis_status": "invalidated",
+    }
+    d = run_exit_shadow(
+        brain, pos, price=91.0, is_mock=False,   # -9%，价值股不适用熔断
+        event_type="clock.intraday_30m", source="t",
+        extra={"llm_review": review}, now=_TRADING_NOW,
+    )
+    assert d.action == "EXIT"
+    assert d.proposed_by == "rule.review_override"
+
+
+def test_short_max_loss_still_needs_confirm(tmp_path):
+    """对照组：短线持仓 -9% 熔断仍要求二次有效观测（豁免只给价值股）。"""
+    brain = _MockBrain(tmp_path)
+    pos = {**_SHORT_POS, "position_id": "POS-S9"}
+    _open(brain, pos)
+    review = {
+        "action": "EXIT", "reason": "浮亏超限", "risk_flag": "max_loss_exceeded",
+        "rule_override": True, "llm_raw_action": "HOLD",
+    }
+    d = run_exit_shadow(
+        brain, pos, price=91.0, is_mock=False,
+        event_type="clock.intraday_30m", source="t",
+        extra={"llm_review": review}, now=_TRADING_NOW,
+    )
+    assert d.action == "HOLD"
+
+
+def test_llm_factor_proposes_raw_when_overridden(tmp_path):
+    """rule_override 时 llm.* 仍提议 LLM 原始动作（轨迹完整），由优先级裁决。"""
+    brain = _MockBrain(tmp_path)
+    ctx = _ctx(brain, _SHORT_POS, 90.0, extra={"llm_review": {
+        "action": "REDUCE", "rule_override": True, "reason": "目标价减仓",
+        "llm_raw_action": "HOLD", "llm_raw_thesis_status": "intact",
+    }})
+    op = _eval("llm.position_review", ctx)
+    assert op.verdict == "propose" and op.action == "HOLD"
+    assert op.evidence["overridden"] is True
+    # pre-LLM 硬规则短路：LLM 未被调用 → 无原始判断 → skip
+    ctx2 = _ctx(brain, _SHORT_POS, 90.0, extra={"llm_review": {
+        "action": "EXIT", "rule_override": True, "llm_raw_action": None,
+    }})
+    assert _eval("llm.position_review", ctx2).verdict == "skip"
+
+
+def test_report_fill_maps_repeated_symbol_to_open_position(tmp_path):
+    """同一 (persona, symbol) 反复交易：sell fill 映射到未平仓持仓，不是旧持仓。"""
+    brain = _MockBrain(tmp_path)
+    store = brain.store
+    store.open_position(
+        position_id="OLD-688008", symbol="688008", entry_price=50.0, qty=100,
+        entry_date="2026-09-01", persona_id="ultra_short_momentum_v1",
+    )
+    store.close_position("OLD-688008", 51.0, 100.0, closed_at="2026-09-02T14:30:00")
+    _open(brain, {**_ULTRA_POS, "position_id": "NEW-688008",
+                  "entry_date": date.today().isoformat()})
+
+    today = date.today().isoformat()
+    now_iso = datetime.now().isoformat()
+    conn = store._conn()
+    conn.execute(
+        """INSERT INTO fills (fill_id, order_id, symbol, side, quantity,
+           avg_price, filled_at, persona_id) VALUES (?,?,?,?,?,?,?,?)""",
+        ("F1", "O1", "688008", "sell", 100, 59.0, now_iso,
+         "ultra_short_momentum_v1"),
+    )
+    conn.commit()
+    store.record_wheel_decision("D1", "e1", "exit_confirm_ultra", "u",
+                                "NEW-688008", "EXIT", None, "shadow", "r")
+    store.set_wheel_decision_gateway("D1", "accepted")
+
+    report = daily_shadow_report(brain, day=today)
+    assert report["agree"] == 1
+    assert report["wheel_looser"] == 0
+    assert report["uncovered"] == 0
+
+
+def test_report_fill_maps_to_closed_window_when_no_open(tmp_path):
+    """无未平仓持仓时，fill 按成交日落在持仓窗口内匹配已平仓的那笔。"""
+    brain = _MockBrain(tmp_path)
+    store = brain.store
+    store.open_position(
+        position_id="OLD-688008", symbol="688008", entry_price=50.0, qty=100,
+        entry_date="2026-09-01", persona_id="ultra_short_momentum_v1",
+    )
+    store.close_position("OLD-688008", 51.0, 100.0, closed_at="2026-09-02T14:30:00")
+    # 第二笔同日开仓同日平仓（隔夜客风格）
+    store.open_position(
+        position_id="NEW-688008", symbol="688008", entry_price=60.0, qty=100,
+        entry_date=date.today().isoformat(), persona_id="ultra_short_momentum_v1",
+    )
+    today = date.today().isoformat()
+    store.close_position("NEW-688008", 59.0, 100.0, closed_at=f"{today}T14:30:00")
+
+    conn = store._conn()
+    conn.execute(
+        """INSERT INTO fills (fill_id, order_id, symbol, side, quantity,
+           avg_price, filled_at, persona_id) VALUES (?,?,?,?,?,?,?,?)""",
+        ("F1", "O1", "688008", "sell", 100, 59.0, f"{today}T14:30:00",
+         "ultra_short_momentum_v1"),
+    )
+    conn.commit()
+    store.record_wheel_decision("D1", "e1", "exit_confirm_ultra", "u",
+                                "NEW-688008", "EXIT", None, "shadow", "r")
+    store.set_wheel_decision_gateway("D1", "accepted")
+
+    report = daily_shadow_report(brain, day=today)
+    assert report["agree"] == 1
+    assert report["uncovered"] == 0
+
+
+@pytest.mark.asyncio
+async def test_hard_scan_live_yields_to_wheel(tmp_path, monkeypatch):
+    """绑定 live：转盘产出决策后旧路径让位（evaluate_hard_exit 不被调用）。"""
+    from src.agents.reviewer import hard_scan, stop_confirm
+    from src.wheel import config as wheel_config
+
+    stop_confirm.reset()
+    brain = _MockBrain(tmp_path)
+    pos = {**_SHORT_POS, "position_id": "POS-LIVE"}
+    _open(brain, pos)
+
+    cfg_obj = wheel_config.load_wheel_config()
+    pcfg = cfg_obj.personas["short_term_hot_rotation_v1"]
+    pcfg.bindings["clock.intraday_5m"] = dataclasses.replace(
+        pcfg.bindings["clock.intraday_5m"], mode="live",
+    )
+    monkeypatch.setattr(wheel_config, "_cache", cfg_obj)
+
+    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **kw: (80.0, False))
+    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
+
+    async def _no_pending(*a, **kw):
+        return []
+    monkeypatch.setattr(
+        "src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending,
+    )
+    called: list = []
+    monkeypatch.setattr(hard_scan, "evaluate_hard_exit", lambda *a, **k: called.append(1))
+
+    await hard_scan.run_hard_scan(
+        "short_term_hot_rotation_v1", force=True, brain=brain,
+    )
+    assert called == []   # 旧路径未参与裁决
+    row = brain.store._conn().execute(
+        "SELECT mode, action, gateway FROM wheel_decisions "
+        "WHERE subject_key='POS-LIVE'",
+    ).fetchone()
+    assert row and row["mode"] == "live"
+    if row["action"] == "EXIT":   # 交易日：灾难性击穿即时执行
+        assert row["gateway"] == "executed"
+        assert brain.store.get_position("POS-LIVE")["status"] == "closed"
+    else:                          # 非交易日：底线否决，但决策已产出 → 已让位
+        assert brain.store.get_position("POS-LIVE")["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_hard_scan_live_falls_back_when_wheel_fails(tmp_path, monkeypatch):
+    """live 绑定但转盘未产出决策（None）→ 告警 + 旧路径兜底（fail-safe）。"""
+    from src.agents.reviewer import hard_scan, stop_confirm
+    from src.wheel import config as wheel_config
+
+    stop_confirm.reset()
+    brain = _MockBrain(tmp_path)
+    pos = {**_SHORT_POS, "position_id": "POS-FB"}
+    _open(brain, pos)
+
+    cfg_obj = wheel_config.load_wheel_config()
+    pcfg = cfg_obj.personas["short_term_hot_rotation_v1"]
+    pcfg.bindings["clock.intraday_5m"] = dataclasses.replace(
+        pcfg.bindings["clock.intraday_5m"], mode="live",
+    )
+    monkeypatch.setattr(wheel_config, "_cache", cfg_obj)
+
+    monkeypatch.setattr(hard_scan, "run_exit_shadow", lambda *a, **k: None)
+    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **kw: (84.0, False))
+    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
+    alerts: list = []
+    monkeypatch.setattr(hard_scan, "notify_ops", lambda *a, **k: alerts.append(a))
+
+    async def _no_pending(*a, **kw):
+        return []
+    monkeypatch.setattr(
+        "src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending,
+    )
+    exits = await hard_scan.run_hard_scan(
+        "short_term_hot_rotation_v1", force=True, brain=brain,
+    )
+    assert alerts                       # 决策缺失已告警
+    assert brain.store.get_position("POS-FB")["status"] == "open"
+    # 旧路径按自己的确认语义处理了首次击穿
+    assert exits[0]["risk_flag"] == "stop_breach_pending"
+
+
+def test_gateway_timeout_keeps_lock(tmp_path, monkeypatch):
+    """live 执行超时 → 锁保留至 TTL，挡住下一轮重复提交。"""
+    brain = _MockBrain(tmp_path)
+    _open(brain, _SHORT_POS)
+    ctx = _ctx(brain, _SHORT_POS, 84.0, mode="live")
+    d = Decision(wheel="exit_confirm", subject_key="POS-S", action="EXIT",
+                 decided_by="rule.stop_loss", price=84.0)
+    gw = ExitGateway(brain)
+    monkeypatch.setattr(
+        gw, "_execute",
+        lambda *a, **k: {"executed": False, "reason": "execute_timeout"},
+    )
+    res = gw.submit(d, ctx)
+    assert res["reason"] == "execute_timeout"
+    assert gw._locked("POS-S", _TRADING_NOW) is True
+    assert gw.submit(d, ctx)["reason"] == "exit_in_progress"
+
+
+def test_overnight_expired_today_not_configurable(tmp_path):
+    """today 只能由 ctx.now 注入，写进配置会被校验拒绝。"""
+    bad = tmp_path / "wheels.yaml"
+    bad.write_text(
+        "wheels:\n  w1:\n    kind: decision\n"
+        "    propose: [rule.overnight_expired]\n"
+        "personas:\n  p1:\n    kind: short\n    bindings:\n"
+        "      clock.x: { wheel: w1, params: { today: '2026-01-01' } }\n",
+    )
+    with pytest.raises(WheelConfigError):
+        load_wheel_config(bad)

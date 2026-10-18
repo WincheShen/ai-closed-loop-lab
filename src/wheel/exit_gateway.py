@@ -88,15 +88,20 @@ class ExitGateway:
 
         # 7. live：加锁 → 执行 → 取消后续事件
         self._acquire(position_id, ctx.now)
+        timed_out = False
         try:
             result = self._execute(ctx, fresh, decision)
+            timed_out = result.get("reason") == "execute_timeout"
             if result.get("executed"):
                 self._mark_executed(decision_id)
                 self._cancel_follow_ups(position_id)
             return {"accepted": True, "executed": bool(result.get("executed")),
                     "reason": result.get("reason", ""), "result": result}
         finally:
-            self._release(position_id)
+            # 超时时执行线程可能仍在跑 — 锁保留至 TTL 到期，
+            # 挡住下一轮扫描对同一持仓的重复提交
+            if not timed_out:
+                self._release(position_id)
 
     # ------------------------------------------------------------------
 

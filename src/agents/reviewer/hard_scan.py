@@ -11,6 +11,7 @@ from datetime import date, datetime
 from src.agents.reviewer import stop_confirm
 from src.agents.reviewer.hard_rules import evaluate_hard_exit, position_pnl_pct
 from src.central_brain import get_central_brain
+from src.infra.notify import notify_ops
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
 from src.wheel.shadow import run_exit_shadow, wheel_exit_mode
 
@@ -65,16 +66,23 @@ async def run_hard_scan(
 
         price, is_mock = _price_for(symbol, pos, intraday, price_cache)
         # 决策转盘：shadow 并行评估写 wheel_decisions；live 时经 ExitGateway 执行
-        run_exit_shadow(
+        wheel_decision = run_exit_shadow(
             brain, pos, price=price, is_mock=is_mock,
             event_type="clock.intraday_5m", source="hard_scan",
         )
-        # live 模式转盘已接管出场 — 旧路径让位，同一持仓只有一个执行方
+        # live 模式转盘已接管出场 — 但必须真正产出决策才让位；
+        # 转盘异常/无决策（None）时旧路径兜底，出场侧 fail-safe
         if wheel_exit_mode(
             pos.get("persona_id") or persona_id or "short_term_hot_rotation_v1",
             "clock.intraday_5m",
         ) == "live":
-            continue
+            if wheel_decision is not None:
+                continue
+            logger.error("[HARD] %s 转盘 live 未产出决策，旧路径兜底", symbol)
+            notify_ops(
+                "出场转盘 live 决策缺失",
+                f"persona={pos.get('persona_id') or persona_id} symbol={symbol} 旧路径兜底",
+            )
         if is_mock or price <= 0:
             logger.warning("[HARD] %s 无真实行情，跳过硬止损", symbol)
             continue

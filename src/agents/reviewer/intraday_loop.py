@@ -13,12 +13,13 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date, datetime, time
+from typing import Any
 
 from src.agents.executioner.executor import ExecutionEngine
 from src.agents.reviewer.position_reviewer import PositionReviewAgent
 from src.agents.memory.trade_attribution import TradeAttributor
 from src.central_brain import get_central_brain
-from src.infra.config import cfg
+from src.infra.notify import notify_ops
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
 from src.wheel.shadow import run_exit_shadow, wheel_exit_mode
 
@@ -71,6 +72,7 @@ async def run_intraday_review(
 
     # 1.5 决策转盘影子模式：LLM 复审结果并行过 llm_position_review 转盘，
     # 写 wheel_decisions(mode=shadow)，不执行。复用已算好的 review（不重复调 LLM）。
+    wheel_decisions: dict[str, Any] = {}
     for review in reviews:
         position_id = review.get("position_id")
         if not position_id:
@@ -78,7 +80,7 @@ async def run_intraday_review(
         position = brain.store.get_position(position_id)
         if not position:
             continue
-        run_exit_shadow(
+        wheel_decisions[position_id] = run_exit_shadow(
             brain, position,
             price=float(review.get("current_price") or 0),
             is_mock=bool(review.get("data_guard")),
@@ -103,13 +105,23 @@ async def run_intraday_review(
             continue
 
         # 卖出类动作：llm_position_review 转盘 live 时由 ExitGateway 已执行，
-        # 旧路径必须让位 — 同一持仓只有一个出场执行方
+        # 旧路径必须让位 — 同一持仓只有一个出场执行方。
+        # 但只有转盘真正产出决策才让位；转盘异常（None）时旧路径兜底
         if action in ("EXIT", "REDUCE") and wheel_exit_mode(
             position.get("persona_id") or persona_id, "clock.intraday_30m",
         ) == "live":
-            review["executed_via"] = "wheel"
-            action_results.append(review)
-            continue
+            if wheel_decisions.get(position_id) is not None:
+                review["executed_via"] = "wheel"
+                action_results.append(review)
+                continue
+            logger.error(
+                "[REVIEW] %s 转盘 live 未产出决策，旧路径兜底", position.get("symbol"),
+            )
+            notify_ops(
+                "出场转盘 live 决策缺失",
+                f"persona={position.get('persona_id') or persona_id} "
+                f"symbol={position.get('symbol')} 旧路径兜底",
+            )
 
         try:
             result = await _execute_review_action(
@@ -369,8 +381,6 @@ async def _execute_review_action(
     else:
         current_qty = position.get("current_qty", 0)
         logger.warning("[%s] 无法获取实时持仓，使用传入值: %d", symbol, current_qty)
-
-    mode = cfg().get("trading_mode", "mock")
 
     result: dict = {"executed": False}
 

@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timedelta
 
 from src.agents.reviewer.hard_rules import (
+    check_max_loss,
     is_ultra_short,
     is_value_position,
     position_pnl_pct,
@@ -78,7 +79,11 @@ class StopConfirmModifier:
 
         # 止损条件本身判断"是否已收复"，与本次裁决动作无关
         # （-8% 熔断时价格常在止损线上方，不能用 price > stop 当收复 — 修复窗口绕过）
-        breach_now = (stop > 0 and price <= stop) or pnl_pct <= -max_loss_pct
+        # 熔断与 rule.max_loss 同一份语义：价值持仓不适用 -8% 熔断，
+        # 否则价值股论点失效 EXIT 会被二次确认拖住（check_max_loss 内部含价值豁免）
+        breach_now = (stop > 0 and price <= stop) or (
+            check_max_loss(pos, price, max_loss_pct=max_loss_pct) is not None
+        )
 
         if not breach_now:
             if state:

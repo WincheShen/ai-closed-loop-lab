@@ -26,16 +26,18 @@ class LlmPositionReviewFactor:
 
     def evaluate(self, ctx: Context, params: dict) -> Opinion:
         review = ctx.data.get("llm_review") or {}
-        if review.get("rule_override"):
-            # 动作来自规则层而非 LLM — 交给 rule.review_override 表达，
-            # 避免规则动作被当成 LLM 噪音误拦（反之 LLM 原始判断另算）。
+        overridden = bool(review.get("rule_override"))
+        raw_action = review.get("llm_raw_action")
+        if overridden and not raw_action:
+            # pre-LLM 硬规则短路：LLM 根本没被调用，没有原始判断可表达
             return Opinion(
                 factor=self.name, verdict="skip",
-                reason="动作带 rule_override，由 rule.review_override 表达",
+                reason="无 LLM 原始判断（pre-LLM 硬规则短路）",
             )
-        action = (
-            review.get("llm_raw_action") or review.get("action") or "HOLD"
-        ).upper()
+        # rule_override 时仍提议 LLM 原始动作 — 轨迹要记录"LLM 本来怎么想"；
+        # 卖出类由 rule.review_override 以更高优先级胜出，HOLD 类覆盖
+        # （T+1/价值降噪/论点减弱）由底线与 mod.* 兜底，结果与旧路径一致
+        action = (raw_action or review.get("action") or "HOLD").upper()
         if action not in ("HOLD", "ADD", "REDUCE", "EXIT"):
             return Opinion(
                 factor=self.name, verdict="skip",
@@ -56,6 +58,7 @@ class LlmPositionReviewFactor:
                 ),
                 "risk_flag": review.get("risk_flag", ""),
                 "review_id": review.get("review_id"),
+                "overridden": overridden,
             },
         )
 

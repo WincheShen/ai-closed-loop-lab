@@ -30,6 +30,7 @@ class _HardRuleFactor:
     priority: int = 100
     check: Callable[..., dict[str, Any] | None] = staticmethod(lambda *a, **k: None)
     param_keys: tuple[str, ...] = ()
+    injected_keys: tuple[str, ...] = ()  # 只由 ctx 注入、配置不可写的参数
 
     def _params(self, params: dict) -> dict:
         return {k: params[k] for k in self.param_keys if k in params}
@@ -40,7 +41,7 @@ class _HardRuleFactor:
             return Opinion(factor=self.name, verdict="skip", reason="无持仓或无效行情")
         pos, price = pair
         kwargs = self._params(params)
-        if "today" in self.param_keys and "today" not in kwargs:
+        if "today" in self.injected_keys:
             kwargs["today"] = ctx.now.date().isoformat()
         hit = self.check(pos, price, **kwargs)
         if not hit:
@@ -97,7 +98,8 @@ class OvernightExpiredRule(_HardRuleFactor):
     name = "rule.overnight_expired"
     priority = 10
     check = staticmethod(hard_rules.check_overnight_expired)
-    param_keys = ("today",)
+    param_keys = ()
+    injected_keys = ("today",)  # 只允许 ctx.now 注入，禁止配置写死日期绕过强平
 
 
 def register(reg) -> None:

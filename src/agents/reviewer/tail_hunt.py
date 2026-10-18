@@ -412,14 +412,13 @@ async def execute_force_close_ultra_short(
 
             # 决策转盘：shadow 并行评估（无行情时 floor 否决）；
             # live 时经 ExitGateway 执行后旧路径让位
-            run_exit_shadow(
+            wheel_decision = run_exit_shadow(
                 brain, pos, price=current_price, is_mock=saw_mock or current_price <= 0,
                 event_type="clock.1430", source="force_close",
             )
-            if wheel_exit_mode(
+            live_wheel = wheel_exit_mode(
                 pos.get("persona_id") or persona_id, "clock.1430",
-            ) == "live":
-                continue
+            ) == "live"
 
             if current_price <= 0:
                 logger.error("🚫 [FORCE-CLOSE] %s %s 无真实行情，跳过强平（交由后续 hard_scan / 人工处理）", symbol, name)
@@ -435,6 +434,16 @@ async def execute_force_close_ultra_short(
                     "error": "no_real_quote",
                 })
                 continue
+
+            if live_wheel:
+                # 只有转盘真正产出决策才让位；异常/无决策（None）时旧路径兜底
+                if wheel_decision is not None:
+                    continue
+                logger.error("[FORCE-CLOSE] %s 转盘 live 未产出决策，旧路径兜底", symbol)
+                notify_ops(
+                    "出场转盘 live 决策缺失",
+                    f"persona={pos.get('persona_id') or persona_id} symbol={symbol} 旧路径兜底",
+                )
 
             reason = f"持仓已达 1 个交易日 (入场日期: {entry_date_str})，触发隔夜短线强制清仓纪律"
             logger.info("🚨 [FORCE-CLOSE] 强制清仓: %s %s @ %.2f (%s)", symbol, name, current_price, reason)
