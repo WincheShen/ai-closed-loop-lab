@@ -652,14 +652,17 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 ### Phase 2 — 事件层与后续事件（实现角色自定义观察，修复 P3/P5）
 
-| 任务 | 产出 |
-|---|---|
-| 2.1 | `dispatcher.py`：15 秒轮询、超时、重启恢复、交易时段/午休/截止时间/次数上限/作废规则 |
-| 2.2 | scheduler 时钟 job 改为写 `clock.*` 事件（运维类 job 保持原样） |
-| 2.3 | `regime_drift` 写 `market.regime_drift` 事件并绑定复审转盘，修复紧急复审断链 |
-| 2.4 | `morning_watch` 转盘：`pulse_rising` / `pulse_fading` / `followup.morning_watch`（1 分钟复查，最多 N 次，14:30 截止），先 shadow |
-| 2.5 | 首次 LLM 复审事件从 09:30 改为 10:00（修复 002285 类旧数据问题） |
-| 2.6 | 监控页：按事件展示转盘轨迹与后续事件链 |
+实施拆分（Phase 1 观察期不变更出场触发方式与旧路径时序）：
+
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 2.1 | `dispatcher.py`：15 秒轮询、超时、重启恢复、交易时段/午休/截止时间/次数上限/作废规则；scheduler 内 daemon 线程，只接管 `followup.*`/`market.*`/`account.*`/`position.*` | ✅ 已实现 |
+| 2.3 | `regime_drift` 写 `market.regime_drift` 事件 → 广播 `urgent_review` 转盘逐持仓记 REVIEW 影子决策，修复紧急复审断链（live 后由 Dispatcher 映射到复审入口） | ✅ 影子 |
+| 2.4 | `morning_watch` 转盘 + `mod.watch_followup` 登记 `followup.morning_watch`（默认 1 分钟、30 次、14:30 截止），脉冲检查后链式复查 | ✅ 影子 |
+| 2.6 | 只读 API `/api/wheel/events` + `/api/wheel/decisions`（轨迹另经 AgentWorkspace 事件流可见） | ✅ 已实现 |
+| 2.2 | scheduler 时钟 job 改为写 `clock.*` 事件 | ⏸ 待 Phase 1 切 live（会改变出场触发方式，污染对比基线） |
+| 2.5 | 首次 LLM 复审事件从 09:30 改为 10:00 | ⏸ 待 Phase 1 切 live（改变旧路径时序） |
+| — | `daily_shadow_report` 只统计 Phase 1 四个出场转盘（GATE_WHEELS），其余转盘单列 `other_wheels` | ✅ 已实现 |
 
 验收：后续事件不会越过截止时间、不会无限复查、持仓平仓后在途事件自动作废；`morning_watch` 影子 10 个交易日，人工复核其决策后再切 live。
 

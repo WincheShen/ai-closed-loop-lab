@@ -288,6 +288,13 @@ def run_wheel(
     result.follow_ups = [
         op.follow_up for op in result.trace if op.follow_up is not None
     ]
+    if result.follow_ups:
+        # 后续事件落库（shadow/live 都登记 — 时段/次数/作废约束由这里统一执行）
+        try:
+            from src.wheel.dispatcher import enqueue_follow_ups
+            enqueue_follow_ups(brain.store, event, result.follow_ups, ctx.now)
+        except Exception:  # noqa: BLE001
+            logger.warning("[Wheel] 后续事件登记失败 %s", subject, exc_info=True)
     return result
 
 

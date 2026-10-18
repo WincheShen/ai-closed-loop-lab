@@ -51,18 +51,45 @@ wheels:
     modify:  [mod.value_noise_filter, mod.min_hold, mod.stop_confirm, mod.reduce_daily_cap]
     output:  exit_proposal
 
+  # 隔夜客早盘盯盘（Phase 2.4）：09:35 脉冲检查后登记"1 分钟后再看"，
+  # 后续事件由 followup.morning_watch 触发同一转盘，直到卖出/截止/次数上限。
+  # 与 exit_confirm_ultra 同一套规则；影子模式只记录决策不执行。
+  morning_watch:
+    kind: decision
+    data:    [position, quote_realtime]
+    veto:    [floor.trading_day, floor.t_plus_1, floor.real_quote_required]
+    propose: [rule.narrow_stop, rule.pulse_take_profit]
+    resolve: priority
+    modify:  [mod.reduce_daily_cap, mod.watch_followup]
+    output:  exit_proposal
+
+  # 市场事件驱动的持仓紧急复审（Phase 2.3）：修复 emergency_review_requested
+  # 只写不读的断链。REVIEW 不是卖出动作，网关不执行；影子期只记录
+  # "该持仓会被复审"。live 后由 Dispatcher 把 REVIEW 映射到复审入口。
+  urgent_review:
+    kind: decision
+    data:    [position]
+    veto:    [floor.trading_day]
+    propose: [rule.urgent_review]
+    resolve: priority
+    output:  urgent_review
+
 personas:
   short_term_hot_rotation_v1:
     kind: short
     bindings:
       clock.intraday_5m:  { wheel: exit_confirm, mode: shadow }
       clock.intraday_30m: { wheel: llm_position_review, mode: shadow }
+      market.regime_drift: { wheel: urgent_review, mode: shadow }
 
   ultra_short_momentum_v1:
     kind: ultra
     bindings:
       clock.intraday_5m:  { wheel: exit_confirm_ultra, mode: shadow }
+      clock.0935:         { wheel: morning_watch, mode: shadow }
+      followup.morning_watch: { wheel: morning_watch, mode: shadow }
       clock.1430:         { wheel: overnight_force_close, mode: shadow }
+      market.regime_drift: { wheel: urgent_review, mode: shadow }
       # 无 clock.intraday_30m 绑定 — LLM 复审对隔夜客在结构上不存在
 
   duan_yongping_v1:
@@ -70,9 +97,11 @@ personas:
     bindings:
       clock.intraday_5m:  { wheel: exit_confirm, mode: shadow }
       clock.intraday_30m: { wheel: llm_position_review, mode: shadow }
+      market.regime_drift: { wheel: urgent_review, mode: shadow }
 
   warren_buffett_v1:
     kind: value
     bindings:
       clock.intraday_5m:  { wheel: exit_confirm, mode: shadow }
       clock.intraday_30m: { wheel: llm_position_review, mode: shadow }
+      market.regime_drift: { wheel: urgent_review, mode: shadow }

@@ -18,6 +18,14 @@ from src.wheel.protocol import Decision, WheelEvent
 
 logger = logging.getLogger(__name__)
 
+# Phase 1 出场转盘 — 对比门槛报告只统计这几个转盘。
+# Phase 2 起新转盘（morning_watch / urgent_review 等）的影子决策
+# 不混入出场对比，单列 other_wheels 观察。
+GATE_WHEELS = frozenset({
+    "exit_confirm", "exit_confirm_ultra",
+    "overnight_force_close", "llm_position_review",
+})
+
 DEFAULT_PERSONA = "short_term_hot_rotation_v1"
 
 
@@ -117,7 +125,13 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
     day = day or date.today().isoformat()
     store = brain.store
 
-    decisions = store.list_wheel_decisions(day=day, mode="shadow")
+    all_decisions = store.list_wheel_decisions(day=day, mode="shadow")
+    # 门槛统计只含 Phase 1 出场转盘；其余转盘的影子决策单独计数展示
+    decisions = [d for d in all_decisions if d["wheel"] in GATE_WHEELS]
+    other_wheels: dict[str, int] = {}
+    for d in all_decisions:
+        if d["wheel"] not in GATE_WHEELS:
+            other_wheels[d["wheel"]] = other_wheels.get(d["wheel"], 0) + 1
     wheel_by_pos: dict[str, dict] = {}
     for d in decisions:
         cur = wheel_by_pos.get(d["subject_key"])
@@ -226,6 +240,7 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
         "wheel_looser": len(looser),
         "gateway_rejected": len(gw_rejected),
         "uncovered": len(uncovered),
+        "other_wheels": other_wheels,
         "stricter_items": stricter,
         "looser_items": looser,
         "uncovered_items": uncovered,

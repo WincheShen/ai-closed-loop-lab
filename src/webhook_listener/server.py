@@ -1042,6 +1042,54 @@ async def recent_events(
         return []
 
 
+@app.get("/api/wheel/events")
+async def wheel_events(day: str | None = None, status: str | None = None, limit: int = 200):
+    """决策转盘事件流（wheel_events）：按事件查看触发/作废/后续链。"""
+    try:
+        brain = _get_central_brain()
+        rows = brain.store.list_wheel_events(day=day, status=status, limit=min(limit, 500))
+        out = []
+        for r in rows:
+            try:
+                subject = json.loads(r.get("subject_json") or "{}")
+                payload = json.loads(r.get("payload_json") or "{}")
+            except Exception:
+                subject, payload = {}, {}
+            out.append({
+                "event_id": r["event_id"], "type": r["type"],
+                "persona_id": r.get("persona_id"), "subject": subject,
+                "payload": payload, "source": r.get("source"),
+                "parent_event_id": r.get("parent_event_id"),
+                "attempt": r.get("attempt"), "max_attempts": r.get("max_attempts"),
+                "due_at": r.get("due_at"), "expires_at": r.get("expires_at"),
+                "status": r.get("status"), "error": r.get("error"),
+                "created_at": r.get("created_at"),
+            })
+        return out
+    except Exception as e:
+        logger.error("wheel_events error: %s", e)
+        return []
+
+
+@app.get("/api/wheel/decisions")
+async def wheel_decisions(day: str | None = None, limit: int = 300):
+    """决策转盘裁决记录（wheel_decisions）：含 decided_by / gateway 结果。"""
+    try:
+        brain = _get_central_brain()
+        conn = brain.store._conn()
+        sql = "SELECT * FROM wheel_decisions WHERE 1=1"
+        params: list = []
+        if day:
+            sql += " AND created_at LIKE ?"
+            params.append(f"{day}%")
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(min(limit, 1000))
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    except Exception as e:
+        logger.error("wheel_decisions error: %s", e)
+        return []
+
+
 @app.get("/api/workflow/runs")
 async def workflow_runs(date: str | None = None, limit: int = 100):
     """把今日事件按运行单元（job/session）聚合，供监控页时间线展示。

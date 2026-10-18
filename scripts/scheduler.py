@@ -783,12 +783,24 @@ def run_scheduler() -> None:
     heartbeat_stop, heartbeat_thread = start_heartbeat()
     logger.info("scheduler heartbeat — independent thread started")
 
+    # Phase 2.1 转盘事件分发器：daemon 线程轮询 wheel_events（followup.*/market.*），
+    # 时钟事件仍由 schedule 直接调用（Phase 1 观察期不变更出场触发方式）
+    import threading as _threading
+    from src.wheel.dispatcher import dispatcher_loop
+    wheel_stop = _threading.Event()
+    wheel_thread = _threading.Thread(
+        target=dispatcher_loop, args=(wheel_stop,), daemon=True, name="wheel-dispatcher",
+    )
+    wheel_thread.start()
+
     while not shutdown_requested:
         schedule.run_pending()
         time.sleep(30)
 
     heartbeat_stop.set()
     heartbeat_thread.join(timeout=5)
+    wheel_stop.set()
+    wheel_thread.join(timeout=5)
     logger.info("调度器已停止")
 
 

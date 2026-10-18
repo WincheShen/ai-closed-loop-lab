@@ -349,6 +349,28 @@ async def execute_morning_pulse(
         return _emit({"checked": 0, "actions": []})
 
     results = await run_hard_scan(persona_id=persona_id, force=True, brain=brain)
+
+    # Phase 2.4 早盘盯盘转盘（shadow）：对每个隔夜持仓评估一次，
+    # 持仓未平则由 mod.watch_followup 登记"1 分钟后再看"的后续事件。
+    # 重新取持仓 — run_hard_scan 可能已平掉部分
+    intraday = IntradayClient(allow_mock_fallback=False)
+    for pos in brain.store.list_open_positions(persona_id=persona_id):
+        price = 0.0
+        saw_mock = True
+        try:
+            snap = intraday.fetch_intraday_snapshot(
+                pos["symbol"], name=pos.get("name", ""), period="1", bar_limit=1,
+            )
+            saw_mock = bool(getattr(snap, "is_mock", False))
+            if snap.current_price and not saw_mock:
+                price = float(snap.current_price)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[MORNING-PULSE] %s 拉取行情异常: %s", pos.get("symbol"), e)
+        run_exit_shadow(
+            brain, pos, price=price, is_mock=saw_mock or price <= 0,
+            event_type="clock.0935", source="morning_pulse",
+        )
+
     actions = [r for r in results if r.get("action") in ("EXIT", "REDUCE")]
     return _emit({
         "checked": len(positions),

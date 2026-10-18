@@ -250,6 +250,25 @@ class RegimeDriftDetector:
                 "requested_at": datetime.now().isoformat(),
             },
         )
+        # Phase 2.3：同时写 market.regime_drift 转盘事件 — Dispatcher 广播到
+        # 各角色的 urgent_review 转盘，修复紧急复审只写不读的断链（影子期
+        # 只记录"该持仓会被复审"的决策，不触发真实 LLM 调用）
+        try:
+            now = datetime.now()
+            self.brain.store.insert_wheel_event({
+                "event_id": f"market.regime_drift|{now:%Y%m%d%H%M}",
+                "type": "market.regime_drift",
+                "persona_id": None,
+                "subject": {},
+                "payload": {
+                    "to_regime": new_regime,
+                    "reason": f"regime_drift_to_{new_regime}",
+                },
+                "source": "drift_detector",
+                "due_at": now.isoformat(),
+            })
+        except Exception:  # noqa: BLE001
+            logger.warning("market.regime_drift 转盘事件写入失败", exc_info=True)
 
 
 # Module-level singleton

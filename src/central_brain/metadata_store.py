@@ -1634,6 +1634,61 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         self._auto_commit()
         return cur.rowcount
 
+    def defer_wheel_event(self, event_id: str, due_at: datetime) -> None:
+        """顺延事件触发时间（午休顺延到 13:00、开盘前顺延到 09:30）。"""
+        conn = self._conn()
+        conn.execute(
+            "UPDATE wheel_events SET due_at = ? WHERE event_id = ? AND status = 'due'",
+            (due_at.isoformat(), event_id),
+        )
+        self._auto_commit()
+
+    def recover_running_wheel_events(self, older_than_seconds: int) -> int:
+        """进程重启恢复：running 超过阈值时间的事件回退为 due（转盘需幂等）。"""
+        conn = self._conn()
+        cutoff = (datetime.now() - timedelta(seconds=older_than_seconds)).isoformat()
+        cur = conn.execute(
+            """UPDATE wheel_events SET status = 'due', started_at = NULL
+            WHERE status = 'running' AND (started_at IS NULL OR started_at < ?)""",
+            (cutoff,),
+        )
+        self._auto_commit()
+        return cur.rowcount
+
+    def inflight_followup_exists(
+        self, event_type: str, position_id: str, exclude_event_id: str | None = None,
+    ) -> bool:
+        """同类后续事件对同一持仓最多 1 条在途（due 或 running 均算在途）。
+
+        exclude_event_id：派发中的父事件自身处于 running，不算重复。
+        """
+        conn = self._conn()
+        sql = """SELECT 1 FROM wheel_events
+            WHERE type = ? AND status IN ('due', 'running')
+              AND json_extract(subject_json, '$.position_id') = ?"""
+        params: list = [event_type, position_id]
+        if exclude_event_id:
+            sql += " AND event_id != ?"
+            params.append(exclude_event_id)
+        row = conn.execute(sql + " LIMIT 1", params).fetchone()
+        return row is not None
+
+    def list_wheel_events(
+        self, day: str | None = None, status: str | None = None, limit: int = 200,
+    ) -> list[dict]:
+        conn = self._conn()
+        sql = "SELECT * FROM wheel_events WHERE 1=1"
+        params: list = []
+        if day:
+            sql += " AND due_at LIKE ?"
+            params.append(f"{day}%")
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY due_at DESC LIMIT ?"
+        params.append(int(limit))
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
     def get_factor_state(
         self, persona_id: str, factor: str, subject_key: str,
     ) -> dict | None:
