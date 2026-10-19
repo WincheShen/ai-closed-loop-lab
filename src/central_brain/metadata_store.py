@@ -1721,6 +1721,33 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         )
         self._auto_commit()
 
+    def try_acquire_factor_lock(
+        self,
+        persona_id: str,
+        factor: str,
+        subject_key: str,
+        now: datetime,
+        ttl: timedelta,
+    ) -> bool:
+        """原子抢锁（单条 SQL）：锁不存在或已过期（locked_at <= now - ttl）时写入并返回 True。"""
+        conn = self._conn()
+        now_iso = now.isoformat()
+        expired_cutoff = (now - ttl).isoformat()
+        state_json = json.dumps({"locked_at": now_iso}, ensure_ascii=False)
+        cur = conn.execute(
+            """INSERT INTO wheel_factor_state
+            (persona_id, factor, subject_key, state_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(persona_id, factor, subject_key) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at
+            WHERE json_extract(wheel_factor_state.state_json, '$.locked_at') IS NULL
+               OR json_extract(wheel_factor_state.state_json, '$.locked_at') <= ?""",
+            (persona_id, factor, subject_key, state_json, now_iso, expired_cutoff),
+        )
+        self._auto_commit()
+        return cur.rowcount == 1
+
     def clear_factor_state(
         self, persona_id: str, factor: str, subject_key: str,
     ) -> None:

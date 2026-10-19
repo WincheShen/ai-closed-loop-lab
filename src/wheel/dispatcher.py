@@ -25,7 +25,8 @@ from src.wheel.protocol import FollowUp, WheelEvent
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 15
-EXEC_TIMEOUT_S = 60          # 单事件执行超时（本阶段无 LLM 转盘）
+EXEC_TIMEOUT_S = 60          # 单事件默认执行超时（§3.4）
+LLM_EXEC_TIMEOUT_S = 180     # 含 LLM 的转盘单事件执行超时（§3.4）
 RECOVER_AFTER_S = 300        # running 超过该时长视为僵尸，回退 due
 
 _MORNING = (time(9, 30), time(11, 30))
@@ -162,26 +163,55 @@ def _run_bound(cfg, binding, event, persona_pid, brain, now, subject=None) -> No
     run_binding(cfg, binding, ev, persona, brain, now=now)
 
 
+def _timeout_for_bindings(cfg, bindings: list[tuple[str, Any]]) -> int:
+    """含 LLM 步骤的绑定给 180s 超时，其余给 60s（§3.4）。"""
+    for _pid, binding in bindings:
+        names = binding.chain or ((binding.wheel,) if binding.wheel else ())
+        for wname in names:
+            wheel = cfg.wheels.get(wname)
+            if wheel is None:
+                continue
+            if any(s.split("(", 1)[0].strip() == "llm_review" for s in wheel.data):
+                return LLM_EXEC_TIMEOUT_S
+            if any(
+                s.split("(", 1)[0].strip().startswith("llm.")
+                for s in (*wheel.propose, *wheel.steps)
+            ):
+                return LLM_EXEC_TIMEOUT_S
+    return EXEC_TIMEOUT_S
+
+
 def _dispatch_binding(cfg, row: dict, brain, now) -> None:
-    """对一个 persona+binding 执行。urgent_review 输出逐持仓展开。
+    """对一个 persona+binding 执行。无持仓 subject 的持仓级转盘逐持仓展开。
 
     单个角色/持仓失败不影响其余：逐个隔离异常，全部跑完后若有失败再整体
     上抛（事件记 failed，错误信息带失败对象）。
     """
     store = brain.store
     failures: list[str] = []
+    row_event = _row_to_event(row)
+    has_pos_subject = bool((row_event.subject or {}).get("position_id"))
 
     def _safe(label: str, **kw) -> None:
         try:
-            _run_bound(cfg, binding, _row_to_event(row), binding_persona, brain, now, **kw)
+            _run_bound(cfg, binding, row_event, binding_persona, brain, now, **kw)
         except Exception as e:  # noqa: BLE001
             logger.error("[Dispatcher] %s 执行失败: %s", label, e, exc_info=True)
             failures.append(f"{label}: {e}"[:120])
 
     for binding_persona, binding in row["_bindings"]:
         wheel = cfg.wheels[binding.wheel] if binding.wheel else None
-        if wheel is not None and not binding.chain and wheel.output == "urgent_review":
-            # 市场事件 → 对每个在持持仓各跑一次（subject 展开）
+        needs_pos_expansion = (
+            wheel is not None
+            and not binding.chain
+            and not has_pos_subject
+            and (
+                wheel.output == "urgent_review"
+                or any(s.split("(", 1)[0].strip() == "position" for s in wheel.data)
+            )
+        )
+        if needs_pos_expansion:
+            # 市场/广播事件 → 对每个在持持仓各跑一次（支持 urgent_review 与 llm_position_review）
             try:
                 positions = store.list_positions(status="open", persona_id=binding_persona)
             except Exception as e:  # noqa: BLE001
@@ -268,13 +298,14 @@ def dispatch_once(brain, now: datetime | None = None) -> dict[str, int]:
 
         store.set_wheel_event_status(eid, "running")
         row["_bindings"] = bindings
+        timeout_s = _timeout_for_bindings(cfg, bindings)
         fut = _executor.submit(_dispatch_binding, cfg, row, brain, now)
         try:
-            fut.result(timeout=EXEC_TIMEOUT_S)
+            fut.result(timeout=timeout_s)
             store.set_wheel_event_status(eid, "done")
             stats["done"] += 1
         except TimeoutError:
-            store.set_wheel_event_status(eid, "failed", error=f"执行超时 {EXEC_TIMEOUT_S}s")
+            store.set_wheel_event_status(eid, "failed", error=f"执行超时 {timeout_s}s")
             stats["failed"] += 1
             _notify("转盘事件执行超时", f"{eid} type={event_type}")
         except Exception as e:  # noqa: BLE001

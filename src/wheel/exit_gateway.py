@@ -53,30 +53,40 @@ class ExitGateway:
         symbol = fresh.get("symbol", "")
         persona_id = fresh.get("persona_id") or persona_id
 
-        # 2. 持仓锁：已有出场在执行中
-        if self._locked(position_id, ctx.now):
+        # 2. 持仓锁：live 模式在此处原子抢锁（消除 Check-Then-Act 并发竞态）；
+        #    shadow 模式只检查是否被锁，不加锁
+        is_live = ctx.mode == "live"
+        if is_live:
+            if not self._acquire(position_id, ctx.now):
+                return self._skip(decision, "exit_in_progress")
+        elif self._locked(position_id, ctx.now):
             return self._skip(decision, "exit_in_progress")
+
+        def _reject(reason: str) -> dict:
+            if is_live:
+                self._release(position_id)
+            return self._skip(decision, reason)
 
         # 3. 同一窗口去重：已有相同或更强动作在执行/已执行
         if self._duplicate_in_window(position_id, decision, ctx.now, mode=ctx.mode):
-            return self._skip(decision, "duplicate_in_window")
+            return _reject("duplicate_in_window")
 
         # 4. 真实价校验
         if float(decision.price or 0) <= 0:
-            return self._skip(decision, "no_real_price")
+            return _reject("no_real_price")
 
         # 5. T+1 前置校验
         entry_date = fresh.get("entry_date") or ""
         if entry_date == ctx.now.date().isoformat():
-            return self._skip(decision, "t1_locked")
+            return _reject("t1_locked")
 
         # 6. REDUCE 每日限频（系统底线，不依赖 modify 配置）
         if decision.action == "REDUCE" and self.store.sold_today(
             persona_id, symbol, today=ctx.now.date(),
         ):
-            return self._skip(decision, "reduce_daily_cap")
+            return _reject("reduce_daily_cap")
 
-        if ctx.mode != "live":
+        if not is_live:
             logger.info(
                 "[ExitGateway:shadow] %s %s %s — 不执行 (%s)",
                 persona_id, decision.action, symbol, decision.reason,
@@ -86,8 +96,7 @@ class ExitGateway:
             self._mark_executed(decision_id)
             return {"accepted": True, "executed": False, "reason": "shadow"}
 
-        # 7. live：加锁 → 执行 → 取消后续事件
-        self._acquire(position_id, ctx.now)
+        # 7. live：锁已在步骤 2 原子获取 → 执行 → 取消后续事件 → 平仓后钩子
         try:
             result = self._execute(ctx, fresh, decision)
         except Exception as e:  # noqa: BLE001
@@ -108,6 +117,7 @@ class ExitGateway:
         if result.get("executed"):
             self._mark_executed(decision_id)
             self._cancel_follow_ups(position_id)
+            self._on_exit_executed(ctx, fresh, decision)
         return {"accepted": True, "executed": bool(result.get("executed")),
                 "reason": result.get("reason", ""), "result": result}
 
@@ -145,13 +155,14 @@ class ExitGateway:
             return False
         return now - at < LOCK_TTL
 
-    def _acquire(self, position_id: str, now: datetime) -> None:
+    def _acquire(self, position_id: str, now: datetime) -> bool:
         try:
-            self.store.set_factor_state(
-                "*", _LOCK_FACTOR, position_id, {"locked_at": now.isoformat()},
+            return self.store.try_acquire_factor_lock(
+                "*", _LOCK_FACTOR, position_id, now, LOCK_TTL,
             )
         except Exception:  # noqa: BLE001
             logger.warning("exit lock 获取失败 %s", position_id, exc_info=True)
+            return False
 
     def _release(self, position_id: str) -> None:
         try:
@@ -199,6 +210,35 @@ class ExitGateway:
                 logger.info("[ExitGateway] 取消 %s 的 %d 个在途后续事件", position_id, n)
         except Exception:  # noqa: BLE001
             logger.debug("取消后续事件失败 %s", position_id, exc_info=True)
+
+    def _on_exit_executed(self, ctx: Context, position: dict, decision: Decision) -> None:
+        """live 成交后的后续钩子（收口旧路径附带动作，避免切 live 后静默丢失）。"""
+        if decision.action != "EXIT":
+            return
+        persona_id = position.get("persona_id") or ctx.persona.persona_id
+        is_ultra = (
+            ctx.persona.kind == "ultra"
+            or persona_id == "ultra_short_momentum_v1"
+        )
+        # 隔夜动量盘中平仓（非 14:30 强平）且趋势健康 (pnl_pct >= -3.5%) → 自动回流自选池
+        if is_ultra and decision.wheel != "overnight_force_close":
+            try:
+                from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
+                from src.agents.reviewer.hard_rules import position_pnl_pct
+
+                price = float(decision.price or 0)
+                pnl_pct = position_pnl_pct(position, price)
+                if pnl_pct >= -3.5:
+                    symbol = position.get("symbol", "")
+                    ShortTermWatchlistManager(self.brain).add_rebound_watch(
+                        symbol=symbol,
+                        name=position.get("name", symbol),
+                        sector=position.get("sector", ""),
+                        last_price=price,
+                        reason=f"隔夜持仓平仓(PnL={pnl_pct:+.1f}%)，自动回流自选池跟踪二次机会",
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning("平仓回流自选池失败 %s", position.get("symbol"), exc_info=True)
 
     def _execute(self, ctx: Context, position: dict, decision: Decision) -> dict:
         """live 执行：复用统一卖出通道（Phase 6 再内聚到网关内）。

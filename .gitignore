@@ -151,7 +151,9 @@ cython_debug/
 .vscode/
 
 # Project specific
-data/
+/data/
+!src/wheel/data/
+!src/wheel/data/**
 *.sqlite
 logs/
 .pytest_cache/

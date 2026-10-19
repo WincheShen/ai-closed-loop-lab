@@ -43,10 +43,13 @@ class LlmPositionReviewFactor:
                 factor=self.name, verdict="skip",
                 reason=f"LLM 动作非法: {action}",
             )
+        # 盘中复审转盘只负责出场/持有裁决（EXIT / REDUCE / HOLD），开仓/加仓统一归入场转盘；
+        # 若 LLM 原始建议 ADD，归一化为 HOLD 并保留 llm_raw_action 供审计，避免悬空进入 ExitGateway
+        effective_action = "HOLD" if action == "ADD" else action
         return Opinion(
             factor=self.name,
             verdict="propose",
-            action=action,
+            action=effective_action,
             priority=self.priority,
             reason=review.get("llm_raw_reason") or review.get("reason", ""),
             evidence={
@@ -59,6 +62,7 @@ class LlmPositionReviewFactor:
                 "risk_flag": review.get("risk_flag", ""),
                 "review_id": review.get("review_id"),
                 "overridden": overridden,
+                "llm_raw_action": action,
             },
         )
 

@@ -13,20 +13,28 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from typing import Any, Literal, Protocol
 
-Action = Literal["BUY", "HOLD", "ADD", "REDUCE", "EXIT", "WATCH"]
+Action = Literal["BUY", "HOLD", "ADD", "REDUCE", "EXIT", "WATCH", "REVIEW"]
 Verdict = Literal["pass", "veto", "propose", "modify", "skip"]
 Stage = Literal["veto", "propose", "modify", "screen"]
 
-# 动作强度 — modify 只允许把动作调"弱"（数值变小），不允许调强。
-# EXIT 最强（全卖），其次 REDUCE/ADD/BUY，HOLD/WATCH 最弱。
+# 动作强度 — modify 只允许在同方向内把动作调"弱"（数值变小），不允许调强或跨买卖方向。
+# 卖出方向: EXIT(4) -> REDUCE(3) -> HOLD/WATCH(1)
+# 买入方向: BUY/ADD(2) -> HOLD/WATCH(1)
+# 复审标记: REVIEW(2) -> HOLD/WATCH(1)
 ACTION_STRENGTH: dict[str, int] = {
     "EXIT": 4,
     "REDUCE": 3,
     "ADD": 2,
     "BUY": 2,
+    "REVIEW": 2,
     "HOLD": 1,
     "WATCH": 1,
 }
+
+_SELL_DIRECTION = frozenset({"EXIT", "REDUCE", "HOLD", "WATCH"})
+_BUY_DIRECTION = frozenset({"BUY", "ADD", "HOLD", "WATCH"})
+_REVIEW_DIRECTION = frozenset({"REVIEW", "HOLD", "WATCH"})
+_NEUTRAL_DIRECTION = frozenset({"HOLD", "WATCH"})
 
 
 # Phase 1 出场转盘 — 观察门槛报告只统计这几个转盘；影子模式下同窗口去重
@@ -44,10 +52,20 @@ def wheel_cohort(wheel: str) -> frozenset[str]:
 
 
 def is_weaker(new_action: str | None, old_action: str | None) -> bool:
-    """modify 合法性检查：新动作不得强于旧动作。"""
-    return ACTION_STRENGTH.get(new_action or "HOLD", 1) <= ACTION_STRENGTH.get(
-        old_action or "HOLD", 1,
-    )
+    """modify 合法性检查：新动作必须在同方向内且不得强于旧动作（禁止 EXIT->ADD 等跨方向篡改）。"""
+    old_act = (old_action or "HOLD").upper()
+    new_act = (new_action or "HOLD").upper()
+    if old_act in ("EXIT", "REDUCE"):
+        allowed = _SELL_DIRECTION
+    elif old_act in ("BUY", "ADD"):
+        allowed = _BUY_DIRECTION
+    elif old_act == "REVIEW":
+        allowed = _REVIEW_DIRECTION
+    else:
+        allowed = _NEUTRAL_DIRECTION
+    if new_act not in allowed:
+        return False
+    return ACTION_STRENGTH.get(new_act, 1) <= ACTION_STRENGTH.get(old_act, 1)
 
 
 @dataclass(frozen=True)

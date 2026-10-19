@@ -123,14 +123,15 @@ def _eval(
 
 
 def _run_data_steps(wheel: WheelDef, ctx: Context, trace: list[Opinion]) -> None:
-    for name in wheel.data:
+    for name, args in _parse_steps(list(wheel.data), "data"):
         try:
             step = registry.data_step(name)
         except KeyError:
             trace.append(Opinion(factor=name, verdict="skip", reason="DataStep 未注册"))
             continue
+        merged = {**ctx.persona.params, **args}
         try:
-            produced = step.load(ctx, {}) or {}
+            produced = step.load(ctx, merged) or {}
         except Exception as e:  # noqa: BLE001
             logger.error("DataStep %s 执行异常: %s", name, e, exc_info=True)
             produced = {}

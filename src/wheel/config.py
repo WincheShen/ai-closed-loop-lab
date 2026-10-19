@@ -89,7 +89,22 @@ def _as_str_list(value: Any, where: str) -> list[str]:
     _require(isinstance(value, list), f"{where} 必须是列表，得到 {type(value).__name__}")
     for v in value:
         _require(isinstance(v, str), f"{where} 元素必须是字符串: {v!r}")
-    return list(value)
+    # 兼容 YAML 行内列表 [step(a=1, b=2)] 被逗号拆成多段的情况
+    merged: list[str] = []
+    buf: list[str] = []
+    for v in value:
+        if buf:
+            buf.append(v)
+            if ")" in v:
+                merged.append(", ".join(buf))
+                buf = []
+        elif "(" in v and not v.endswith(")"):
+            buf = [v]
+        else:
+            merged.append(v)
+    if buf:
+        merged.append(", ".join(buf))
+    return merged
 
 
 def _parse_steps(names: list[str], where: str) -> list[tuple[str, dict]]:
@@ -126,6 +141,15 @@ def _declared_params(factor_name: str) -> set[str]:
     return set(getattr(fac, "param_keys", ()) or ())
 
 
+def _declared_data_params(step_name: str) -> set[str]:
+    """DataStep 声明接受的参数名；未声明一律不接受。"""
+    try:
+        step = registry.data_step(step_name)
+    except KeyError:
+        return set()
+    return set(getattr(step, "param_keys", ()) or ())
+
+
 def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
     """加载并校验 wheels.yaml。所有引用必须在 registry 中已注册。"""
     yaml_path = Path(path) if path else _WHEELS_YAML
@@ -154,8 +178,12 @@ def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
         resolve = wdef.get("resolve", "priority")
         output = wdef.get("output", "")
 
-        for name in data_steps:
+        for name, _args in _parse_steps(data_steps, f"{where}.data"):
             _require(name in registry.data_step_names(), f"{where}.data 未注册: {name}")
+            _require(
+                set(_args) <= _declared_data_params(name),
+                f"{where}.data {name} 不接受参数: {sorted(set(_args) - _declared_data_params(name))}",
+            )
         for name in veto:
             _require(name in registry.factor_names(), f"{where}.veto 未注册: {name}")
             _require(registry.factor(name).stage == "veto", f"{where}.veto {name} stage 不是 veto")
@@ -219,10 +247,12 @@ def load_wheel_config(path: Path | str | None = None) -> WheelConfig:
                 _require(wheel in wheels, f"{bwhere}.wheel 未定义: {wheel}")
             for wname in chain:
                 _require(wname in wheels, f"{bwhere}.chain 引用未定义转盘: {wname}")
-            # binding.params 只允许填写所绑转盘各 Factor 声明过的参数名
+            # binding.params 只允许填写所绑转盘各 DataStep / Factor 声明过的参数名
             declared: set[str] = set()
             for wname in ((wheel,) if wheel else chain):
                 wdef = wheels[wname]
+                for dname, _dargs in _parse_steps(list(wdef.data), bwhere):
+                    declared |= _declared_data_params(dname)
                 for fname, _fargs in (
                     _parse_steps(list(wdef.veto) + list(wdef.propose)
                                  + list(wdef.modify) + list(wdef.steps), bwhere)

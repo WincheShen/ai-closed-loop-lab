@@ -256,7 +256,7 @@ class Context:
 class Opinion:
     factor: str
     verdict: Literal["pass", "veto", "propose", "modify", "skip"]
-    action: Literal["BUY", "HOLD", "ADD", "REDUCE", "EXIT", "WATCH"] | None = None
+    action: Literal["BUY", "HOLD", "ADD", "REDUCE", "EXIT", "WATCH", "REVIEW"] | None = None
     qty_pct: float | None = None
     priority: int = 100           # 越小越优先，仅 propose 使用
     reason: str = ""
@@ -273,10 +273,12 @@ class Opinion:
 ③ resolve priority：取 priority 最小的提议；同级时 EXIT > REDUCE > HOLD（卖方保守）
             LLM 类 Factor 固定 priority ≥ 500，只能在无规则提议时生效（advisory）
 ④ modify  依次修饰结论：止损确认、REDUCE 每日上限、仓位上限、价值股降噪……
-            modify 只能把动作调"弱"（EXIT→REDUCE/HOLD、减小数量），不能调"强"
+            modify 只允许在同方向内把动作调"弱"（卖出方向 EXIT→REDUCE→HOLD/WATCH，
+            买入方向 BUY/ADD→HOLD/WATCH，禁止 EXIT→ADD 等跨买卖方向篡改）
 ```
 
-不采用加权投票：权重会诱导针对回测调参，且无法说清是哪条依据导致结论。
+- 盘中复审转盘（`llm_position_review`）只管出场与持有（`EXIT / REDUCE / HOLD`）；开仓与加仓统一由入场转盘管理。若 LLM 原始输出 `ADD`，在 `llm.position_review` 中归一化为 `HOLD` 并保留 `llm_raw_action="ADD"` 备查，避免进入 `ExitGateway` 悬空。
+- 不采用加权投票：权重会诱导针对回测调参，且无法说清是哪条依据导致结论。
 
 **funnel 类转盘**
 
@@ -318,13 +320,21 @@ class WheelResult:
 
 所有卖出类决策（来自任何转盘）必须经过：
 
-1. **持仓锁**：同一 `position_id` 同时只允许一个出场决策执行；其余决策记录 `skipped: exit_in_progress`。
+1. **原子持仓锁**：`live` 模式通过 `MemoryStore.try_acquire_factor_lock` 单条 SQL（`INSERT ... ON CONFLICT DO UPDATE WHERE locked_at <= expired_cutoff`）原子抢锁，同一 `position_id` 同时只允许一个出场决策执行；其余并发决策记录 `rejected:exit_in_progress`。
 2. **同一事件窗口去重**：同一分钟内对同一持仓的多个出场决策合并为最强的一个（EXIT 优先）。
 3. **REDUCE 每持仓每交易日最多 1 次**（从 `_sold_today` 迁入）。
 4. **真实价校验**、T+1 前置校验（ExecutionEngine 仍做兜底）。
-5. 执行后更新 `positions`、取消该持仓所有在途后续事件。
+5. **成交后统一收口**：更新 `positions`、取消该持仓所有在途后续事件，并执行平仓后钩子 `_on_exit_executed`（如隔夜客盘中平仓且 `pnl_pct >= -3.5%` 时自动调用 `add_rebound_watch` 回流自选池）。
 
 `intraday_loop._execute_review_action` 在 Phase 1 完成后只保留为 ExitGateway 的薄包装，最终删除。
+
+### 6.3 EntryGateway（统一入场出口，Phase 3）
+
+与 `ExitGateway` 对称，解决单标的独立 `decision` 无法表达跨标的排序与组合风控的问题：
+
+1. **链式数据库接力**：`market_screen*`（funnel）筛选出的候选集写入 `wheel_candidates` 表（按 `(event_id, persona_id)` 索引，不污染 `watchlist`），随后 `entry_confirm*`（decision）逐候选标的独立评估单票条件与检测器提议。
+2. **跨标的排序与 Top-N 截断**：`EntryGateway` 汇总同一 `(event_id, persona_id)` 下所有 `BUY` 提议，按 `score / priority` 排序取前 N 名（如隔夜客尾盘狙击取第 1 名且在持仓数 `< 2`）。
+3. **组合级硬闸门**：统一校验 `data_quality` 硬闸（mock/degraded/unavailable 禁开仓）、账户日亏/连亏熔断、角色策略白名单、组合总仓位上限（`max_total_position_pct`）与单板块集中度上限（`max_sector_concentration_pct`）。
 
 ---
 
@@ -506,6 +516,19 @@ CREATE TABLE IF NOT EXISTS persona_proposals (
     reviewer TEXT, review_note TEXT,
     created_at TEXT NOT NULL, reviewed_at TEXT
 );
+
+-- Phase 3 入场 funnel -> decision 链式接力表（不污染 watchlist）
+CREATE TABLE IF NOT EXISTS wheel_candidates (
+    event_id TEXT NOT NULL,
+    wheel TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    rank INTEGER NOT NULL DEFAULT 0,
+    score REAL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (event_id, wheel, persona_id, symbol)
+);
 ```
 
 记忆按角色隔离的迁移（兼容旧数据）：
@@ -593,7 +616,7 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | LangGraph：risk_governor | `mod.position_cap` / `mod.sector_concentration` |
 | LangGraph：executioner（immediate 当场成交） | 改为写信号 + `clock.next_open` 绑定的 `order_fill_at_open` 转盘（修复 P6） |
 | `_check_pending_signals` | `pending_trigger` 转盘（绑定 `clock.intraday_5m`） |
-| `regime_drift._trigger_emergency_review` | 写 `market.regime_drift` 事件，绑定 `llm_position_review`（修复 P5） |
+| `regime_drift._trigger_emergency_review` | 写 `market.regime_drift` 事件（修复 P5）：影子期绑定 `urgent_review` 留痕，切 live 时绑定 `llm_position_review`（`LlmReviewStep` 按持仓调用 `PositionReviewAgent`，180s 超时）；隔夜客不绑定 |
 | `stale_position_check` | `rule.held_too_long`（propose） |
 | `ShortTermWatchlistManager.run_daily_maintenance` | `watchlist_maintain_ultra` 转盘 |
 | `trading_persona.yaml` 的哲学/风格/资金 | 角色档案 · 身份层 |
@@ -668,6 +691,7 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 - 影子模式同窗口去重按转盘组隔离（`protocol.wheel_cohort`：GATE_WHEELS 一组，其余各自一组）——新转盘的影子"会执行"不得把门槛转盘的"更松"掩盖成"网关拒绝"；live 去重只看 live 决策、不分转盘。
 - 行情暂时不可用（`floor.real_quote_required` 否决）时，观察类修饰（`observer=True`，只登记后续事件）照常运行，链条不因一次网络抖动断掉；次数上限/截止时间不变。
 - `output` 启动校验（`exit_proposal` / `urgent_review` / `candidates`）；广播逐持仓隔离异常。
+- 架构回审补齐（1–7）：`ExitGateway` live 原子抢锁（`try_acquire_factor_lock`）+ 隔夜客盘中平仓自动回流自选池（`_on_exit_executed`）；`is_weaker` 限制同方向调弱 + 盘中复审 `ADD` 归一化为 `HOLD`；移除隔夜客 `market.regime_drift` 绑定 + `LlmReviewStep` 支持无预载时按单持仓调用 `PositionReviewAgent` + Dispatcher 含 LLM 转盘 180s 超时；`DataStep` 参数解析校验与 `QuoteRealtimeStep` 按 `brain` 会话隔离缓存。
 
 验收：后续事件不会越过截止时间、不会无限复查、持仓平仓后在途事件自动作废；`morning_watch` 影子 10 个交易日，人工复核其决策后再切 live。
 
@@ -675,10 +699,10 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 | 任务 | 产出 |
 |---|---|
-| 3.1 | 隔夜客：`market_screen_ultra` + `entry_confirm_ultra`，替代 `execute_tail_hunt`（影子→切换） |
-| 3.2 | `order_fill_at_open` 转盘：daily_pipeline 的 immediate 信号改为次日 09:30 开盘价＋滑点成交，与回测一致 |
+| 3.1 | 隔夜客：`market_screen_ultra`（写 `wheel_candidates`）+ `entry_confirm_ultra` + `EntryGateway`（按 score 排序取 Top-1、持仓数 `< 2` 与资金校验），替代 `execute_tail_hunt`（影子→切换） |
+| 3.2 | `order_fill_at_open` 转盘：daily_pipeline 的 immediate 信号改为次日 `09:31–09:35` 开盘价＋滑点成交（与回测一致）；必须校验行情 `trade_date == today`，并内置 `veto.open_gap_guard`（高开超基准价 +3%、低开跌破 `stop_loss`、或开盘涨跌停封死时放弃成交） |
 | 3.3 | `pending_trigger` 转盘：从 hard_scan 中拆出条件单触发 |
-| 3.4 | 短线/价值：`market_screen`（funnel，复用 scanner 步骤）+ `entry_confirm`（detector + LLM 排序 + risk_governor 修饰）；LangGraph 节点函数作为 Factor/DataStep 复用，管线结构迁移完成后 `workflow.py` 仅保留兼容入口 |
+| 3.4 | 短线/价值：`market_screen`（funnel，写 `wheel_candidates`）+ `entry_confirm`（单票 detector/LLM 评估）+ `EntryGateway`（跨标的 Top-N 排序、组合总仓位 `max_total_position_pct`、板块集中度 `max_sector_concentration_pct`、`data_quality` 硬闸门）；管线结构迁移完成后 `workflow.py` 仅保留兼容入口 |
 | 3.5 | 执行器白名单、`daily_pipeline` 开关改为读 PersonaPolicy，删除硬编码 |
 | 3.6 | 角色档案加载：`PersonaProfile` 装配、as_of 截取、惰性加载记忆视图；`kind` 取代价值股子串判断 |
 | 3.7 | 记忆按角色隔离：`watchlist` / `trade_attributions` / `lessons` 增加 persona_id 并回填；`StockMemory`、`StrategyLedger` 按角色查询；新增 `shared.stock_flags` |

@@ -176,11 +176,13 @@ def test_dispatch_expired_and_deferred(tmp_path):
 
 
 def test_dispatch_market_event_broadcast(tmp_path):
-    """market.regime_drift 广播 → 每个绑定角色对每个在持持仓记 REVIEW 决策。"""
+    """market.regime_drift 广播 → 绑定角色对在持持仓记 REVIEW；隔夜客不绑 LLM 复审，不响应。"""
     brain = _MockBrain(tmp_path)
-    _open(brain)
+    _open(brain)  # POS-U: ultra_short_momentum_v1（不绑定 market.regime_drift）
     _open(brain, {**_ULTRA_POS, "position_id": "POS-S", "symbol": "000001",
                   "persona_id": "short_term_hot_rotation_v1"})
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-V", "symbol": "600519",
+                  "persona_id": "warren_buffett_v1"})
     brain.store.insert_wheel_event({
         "event_id": "md-1", "type": "market.regime_drift", "persona_id": None,
         "subject": {}, "payload": {"to_regime": "panic"},
@@ -192,8 +194,9 @@ def test_dispatch_market_event_broadcast(tmp_path):
         "SELECT subject_key, action, mode FROM wheel_decisions WHERE wheel='urgent_review'"
     ).fetchall()
     keys = {r["subject_key"] for r in rows}
-    # ultra 和 short_term 各自的持仓都被复审
-    assert {"POS-U", "POS-S"} <= keys
+    # short_term 与 buffett 持仓被复审，隔夜客 POS-U 不在其中
+    assert keys == {"POS-S", "POS-V"}
+    assert "POS-U" not in keys
     assert all(r["action"] == "REVIEW" and r["mode"] == "shadow" for r in rows)
 
 
@@ -363,12 +366,14 @@ def test_broadcast_isolates_per_position_failure(tmp_path, monkeypatch):
     """urgent_review 广播：单个持仓异常不影响其余持仓，事件记 failed。"""
     import src.wheel.dispatcher as disp
     brain = _MockBrain(tmp_path)
-    _open(brain)
-    _open(brain, {**_ULTRA_POS, "position_id": "POS-B", "symbol": "000002"})
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-A", "symbol": "000001",
+                  "persona_id": "short_term_hot_rotation_v1"})
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-B", "symbol": "000002",
+                  "persona_id": "short_term_hot_rotation_v1"})
     real = disp._run_bound
 
     def _flaky(cfg, binding, event, pid, brain_, now, subject=None):
-        if subject and subject.get("position_id") == "POS-U":
+        if subject and subject.get("position_id") == "POS-A":
             raise RuntimeError("boom")
         return real(cfg, binding, event, pid, brain_, now, subject=subject)
 
@@ -381,9 +386,9 @@ def test_broadcast_isolates_per_position_failure(tmp_path, monkeypatch):
     assert stats["failed"] == 1
     keys = {r["subject_key"] for r in brain.store._conn().execute(
         "SELECT subject_key FROM wheel_decisions WHERE wheel='urgent_review'")}
-    assert "POS-B" in keys and "POS-U" not in keys
+    assert "POS-B" in keys and "POS-A" not in keys
     row = brain.store.list_wheel_events()[0]
-    assert row["status"] == "failed" and "POS-U" in (row["error"] or "")
+    assert row["status"] == "failed" and "POS-A" in (row["error"] or "")
 
 
 def test_wheel_output_validated(tmp_path):
@@ -399,3 +404,225 @@ def test_wheel_output_validated(tmp_path):
     )
     with pytest.raises(WheelConfigError, match="output"):
         load_wheel_config(bad)
+
+
+# ── 架构回审 1–7 单元测试 ─────────────────────────────────────
+
+def test_exit_gateway_live_ultra_rebound_watch(tmp_path, monkeypatch):
+    """修复 1：隔夜客盘中转盘 live 平仓且 pnl >= -3.5% → 自动回流自选池；
+    亏损过深 (< -3.5%) 或 14:30 强平不回流。"""
+    from src.wheel.exit_gateway import ExitGateway
+    from src.wheel.protocol import Context, Decision, PersonaPolicy
+
+    brain = _MockBrain(tmp_path)
+    _open(brain, _ULTRA_POS)  # entry_price=200.0
+    gw = ExitGateway(brain)
+    monkeypatch.setattr(gw, "_execute", lambda *a, **k: {"executed": True, "reason": "ok"})
+
+    ctx = Context(
+        event=_parent(),
+        persona=PersonaPolicy(persona_id="ultra_short_momentum_v1", kind="ultra"),
+        now=_T,
+        brain=brain,
+        mode="live",
+    )
+    # 1) 14:30 overnight_force_close 平仓 → 不回流
+    d_force = Decision(
+        wheel="overnight_force_close", subject_key="POS-U",
+        action="EXIT", price=202.0, reason="force",
+    )
+    gw.submit(d_force, ctx, decision_id="D-FC")
+    assert brain.store.get_watchlist() == []
+
+    # 2) 盘中亏损 -4.0% (< -3.5%) → 不回流
+    d_deep_loss = Decision(
+        wheel="exit_confirm_ultra", subject_key="POS-U",
+        action="EXIT", price=192.0, reason="stop",
+    )
+    gw.submit(d_deep_loss, ctx, decision_id="D-LOSS")
+    assert brain.store.get_watchlist() == []
+
+    # 3) 盘中微跌 -1.0% (>= -3.5%) → 自动回流自选池 (source=rebound_watch)
+    def _exec_and_close(ctx_, pos_, dec_):
+        brain.store.close_position(pos_["position_id"], dec_.price, -600.0)
+        return {"executed": True, "reason": "ok"}
+
+    monkeypatch.setattr(gw, "_execute", _exec_and_close)
+    d_ok = Decision(
+        wheel="morning_watch", subject_key="POS-U",
+        action="EXIT", price=198.0, reason="stop",
+    )
+    res = gw.submit(d_ok, ctx, decision_id="D-OK")
+    assert res["executed"] is True
+    wl = brain.store.get_watchlist()
+    assert len(wl) == 1
+    assert wl[0]["symbol"] == "688008" and wl[0]["source"] == "rebound_watch"
+
+
+def test_exit_gateway_atomic_lock_and_release_on_reject(tmp_path):
+    """修复 2：原子抢锁在同一 TTL 窗口内互斥；前置校验拒绝时释放锁。"""
+    from src.wheel.exit_gateway import LOCK_TTL, ExitGateway
+    from src.wheel.protocol import Context, Decision, PersonaPolicy
+
+    brain = _MockBrain(tmp_path)
+    # 同一毫秒两次原子抢锁：第一次 True，第二次 False，TTL 过后恢复 True
+    assert brain.store.try_acquire_factor_lock("*", "exit_gateway.lock", "POS-U", _T, LOCK_TTL) is True
+    assert brain.store.try_acquire_factor_lock("*", "exit_gateway.lock", "POS-U", _T, LOCK_TTL) is False
+    assert brain.store.try_acquire_factor_lock(
+        "*", "exit_gateway.lock", "POS-U", _T + LOCK_TTL + timedelta(seconds=1), LOCK_TTL,
+    ) is True
+    brain.store.clear_factor_state("*", "exit_gateway.lock", "POS-U")
+
+    # live 模式下因 T+1 被拒后，持仓锁必须已释放
+    today_pos = {**_ULTRA_POS, "entry_date": _T.date().isoformat()}
+    _open(brain, today_pos)
+    gw = ExitGateway(brain)
+    ctx = Context(
+        event=_parent(),
+        persona=PersonaPolicy(persona_id="ultra_short_momentum_v1", kind="ultra"),
+        now=_T,
+        brain=brain,
+        mode="live",
+    )
+    d = Decision(wheel="exit_confirm_ultra", subject_key="POS-U", action="EXIT", price=194.0)
+    res = gw.submit(d, ctx)
+    assert res["reason"] == "t1_locked"
+    assert gw._locked("POS-U", _T) is False
+
+
+def test_is_weaker_direction_guard_and_llm_add_normalized(tmp_path):
+    """修复 3：is_weaker 禁止跨买卖方向篡改；盘中复审 LLM ADD 归一化为 HOLD。"""
+    from src.wheel.factors.llm_factors import LlmPositionReviewFactor
+    from src.wheel.protocol import Context, PersonaPolicy, is_weaker
+
+    # 卖出方向内调弱合法
+    assert is_weaker("REDUCE", "EXIT") is True
+    assert is_weaker("HOLD", "EXIT") is True
+    assert is_weaker("HOLD", "REDUCE") is True
+    # 跨方向（EXIT/REDUCE -> ADD/BUY 或反之）一律非法
+    assert is_weaker("ADD", "EXIT") is False
+    assert is_weaker("BUY", "REDUCE") is False
+    assert is_weaker("EXIT", "BUY") is False
+    assert is_weaker("REDUCE", "ADD") is False
+    # 买入方向内调弱合法
+    assert is_weaker("HOLD", "BUY") is True
+    assert is_weaker("WATCH", "ADD") is True
+
+    brain = _MockBrain(tmp_path)
+    ctx = Context(
+        event=_parent(),
+        persona=PersonaPolicy(persona_id="short_term_hot_rotation_v1", kind="short"),
+        now=_T,
+        brain=brain,
+        data={
+            "position": _ULTRA_POS,
+            "llm_review": {"action": "ADD", "llm_raw_action": "ADD", "reason": "回调加仓"},
+        },
+    )
+    op = LlmPositionReviewFactor().evaluate(ctx, {})
+    assert op.verdict == "propose"
+    assert op.action == "HOLD"
+    assert op.evidence["llm_raw_action"] == "ADD"
+
+
+def test_llm_review_step_self_invokes_and_timeout_180s(tmp_path, monkeypatch):
+    """修复 4：LlmReviewStep 在 live 无预载时调用 PositionReviewAgent；LLM 绑定超时为 180s。"""
+    from src.agents.reviewer.position_reviewer import PositionReviewAgent
+    from src.wheel.config import get_config
+    from src.wheel.data.steps import LlmReviewStep
+    from src.wheel.dispatcher import _timeout_for_bindings
+    from src.wheel.protocol import Context, PersonaPolicy
+
+    cfg = get_config(reload=True)
+    b_llm = cfg.binding_for("short_term_hot_rotation_v1", "clock.intraday_30m")
+    b_watch = cfg.binding_for("ultra_short_momentum_v1", "clock.0935")
+    assert _timeout_for_bindings(cfg, [("short_term_hot_rotation_v1", b_llm)]) == 180
+    assert _timeout_for_bindings(cfg, [("ultra_short_momentum_v1", b_watch)]) == 60
+
+    called = {}
+
+    def _fake_review(self, pos, force_review_reason=None):
+        called["pos_id"] = pos["position_id"]
+        called["reason"] = force_review_reason
+        return {"action": "REDUCE", "llm_raw_action": "REDUCE", "reason": "减仓"}
+
+    monkeypatch.setattr(PositionReviewAgent, "review_position", _fake_review)
+    brain = _MockBrain(tmp_path)
+    ev = WheelEvent(
+        event_id="ev-llm", type="market.regime_drift", due_at=_T,
+        persona_id="short_term_hot_rotation_v1",
+        subject={"position_id": "POS-S"},
+        payload={"reason": "regime_drift_to_panic"},
+    )
+    ctx = Context(
+        event=ev,
+        persona=PersonaPolicy(persona_id="short_term_hot_rotation_v1", kind="short"),
+        now=_T,
+        brain=brain,
+        data={"position": {**_ULTRA_POS, "position_id": "POS-S"}},
+        mode="live",
+    )
+    out = LlmReviewStep().load(ctx, {})
+    assert called == {"pos_id": "POS-S", "reason": "regime_drift_to_panic"}
+    assert out["llm_review"]["action"] == "REDUCE"
+
+
+def test_data_step_params_and_session_quote_cache_isolation(tmp_path, monkeypatch):
+    """修复 6：DataStep 参数解析与校验生效；QuoteRealtimeStep 缓存按 brain 会话隔离。"""
+    from src.stock_analyzer.data_source.intraday_client import IntradayClient
+    from src.wheel.config import WheelConfigError, load_wheel_config
+    from src.wheel.data.steps import QuoteRealtimeStep
+    from src.wheel.protocol import Context, PersonaPolicy
+
+    # 1) DataStep 非法参数在配置加载时报错
+    bad = tmp_path / "bad_data.yaml"
+    bad.write_text(
+        "wheels:\n  w1:\n    kind: decision\n"
+        "    data: [quote_realtime(bad_param=1)]\n"
+        "    propose: [rule.max_loss]\n"
+        "    output: exit_proposal\n"
+        "personas: {}\n",
+    )
+    with pytest.raises(WheelConfigError, match="bad_param"):
+        load_wheel_config(bad)
+
+    # 2) DataStep 合法内联参数可通过校验
+    good = tmp_path / "good_data.yaml"
+    good.write_text(
+        "wheels:\n  w1:\n    kind: decision\n"
+        '    data: ["position", "quote_realtime(period=5, bar_limit=3)"]\n'
+        "    propose: [rule.max_loss]\n"
+        "    output: exit_proposal\n"
+        "personas: {}\n",
+    )
+    assert "w1" in load_wheel_config(good).wheels
+
+    # 3) 两个不同 brain 实例在同一时间戳 _T 下互不污染行情缓存
+    prices = iter([201.0, 195.0])
+
+    class _Snap:
+        def __init__(self, p):
+            self.current_price = p
+            self.is_mock = False
+
+    monkeypatch.setattr(
+        IntradayClient, "fetch_intraday_snapshot",
+        lambda self, symbol, **kw: _Snap(next(prices)),
+    )
+    (tmp_path / "s1").mkdir(exist_ok=True)
+    b1 = _MockBrain(tmp_path / "s1")
+    (tmp_path / "s2").mkdir(exist_ok=True)
+    b2 = _MockBrain(tmp_path / "s2")
+    step = QuoteRealtimeStep()
+    ctx1 = Context(
+        event=_parent(), persona=PersonaPolicy(persona_id="u", kind="ultra"),
+        now=_T, brain=b1, data={"position": _ULTRA_POS},
+    )
+    ctx2 = Context(
+        event=_parent(), persona=PersonaPolicy(persona_id="u", kind="ultra"),
+        now=_T, brain=b2, data={"position": _ULTRA_POS},
+    )
+    assert step.load(ctx1, {})["quote"]["price"] == 201.0
+    assert step.load(ctx2, {})["quote"]["price"] == 195.0
+    # 同一 brain 会话内再次读取命中缓存（不再触发第 3 次拉取）
+    assert step.load(ctx1, {})["quote"]["price"] == 201.0
