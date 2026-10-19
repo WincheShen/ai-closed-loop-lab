@@ -18,7 +18,12 @@ from datetime import datetime
 from typing import Any
 
 from src.central_brain import get_central_brain
-from src.stock_analyzer.detectors.ultra_short_momentum import STRATEGY_ID, _ALLOWED_PREFIXES
+from src.stock_analyzer.detectors.ultra_short_momentum import (
+    STRATEGY_ID,
+    _ALLOWED_PREFIXES,
+    _CONT_RET5,
+    _CONT_RET20,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,21 +204,39 @@ class ShortTermWatchlistManager:
         logger.info("短线自选股池刷新: 补充入池 %d 只，当前在池 %d 只", added, len(current_pool) + added)
         return added
 
-    def _fetch_today_amplitude(self, client, symbol: str) -> float:
-        """拉最近日线计算当日真实振幅 (high-low)/前收；失败返回 0（跳过弹性闸门）。"""
+    def _fetch_kline_metrics(self, client, symbol: str) -> dict[str, float | None]:
+        """从行情库读取最近日线（昨日及之前数据已在库内），计算振幅与 5日/20日涨幅。"""
         try:
-            bars = client.fetch_kline(symbol, days=3)
+            bars = client.fetch_kline(symbol, days=25)
         except Exception:  # noqa: BLE001
-            return 0.0
-        if not bars:
-            return 0.0
+            return {"amplitude": 0.0, "ret5": None, "ret20": None}
+        if not bars or getattr(bars[-1], "is_mock", False):
+            return {"amplitude": 0.0, "ret5": None, "ret20": None}
         last = bars[-1]
         prev_close = bars[-2].close if len(bars) >= 2 and bars[-2].close > 0 else None
         if prev_close is None and last.close > 0 and last.change_pct > -99:
             prev_close = last.close / (1 + last.change_pct / 100)
-        if not prev_close or prev_close <= 0:
-            return 0.0
-        return max(0.0, (last.high - last.low) / prev_close)
+        amplitude = (
+            max(0.0, (last.high - last.low) / prev_close)
+            if prev_close and prev_close > 0
+            else 0.0
+        )
+        ret5 = (
+            (last.close / bars[-6].close - 1.0)
+            if len(bars) >= 6 and bars[-6].close > 0
+            else None
+        )
+        ret20 = (
+            (last.close / bars[-21].close - 1.0)
+            if len(bars) >= 21 and bars[-21].close > 0
+            else None
+        )
+        return {"amplitude": amplitude, "ret5": ret5, "ret20": ret20}
+
+    def _fetch_today_amplitude(self, client, symbol: str) -> float:
+        """拉最近日线计算当日真实振幅 (high-low)/前收；失败返回 0（跳过弹性闸门）。"""
+        metrics = self._fetch_kline_metrics(client, symbol)
+        return float(metrics.get("amplitude") or 0.0)
 
     def run_daily_maintenance(self, snapshot=None, client=None) -> dict[str, Any]:
         """盘后维护闭环：真实行情清洗存量 + 全市场快照补票入池。
@@ -246,11 +269,22 @@ class ShortTermWatchlistManager:
                 q = by_symbol.get(item["symbol"])
                 if not q or q.price <= 0:
                     continue
+                metrics = self._fetch_kline_metrics(client, item["symbol"])
+                q_high = float(getattr(q, "high", 0) or 0)
+                q_low = float(getattr(q, "low", 0) or 0)
+                q_prev = float(getattr(q, "prev_close", 0) or 0)
+                snap_amp = (
+                    max(0.0, (q_high - q_low) / q_prev)
+                    if q_high > 0 and q_low > 0 and q_prev > 0
+                    else 0.0
+                )
                 quotes_map[item["symbol"]] = {
                     "price": q.price,
                     "turnover": q.turnover,
                     "change_pct": q.change_pct,
-                    "amplitude": self._fetch_today_amplitude(client, item["symbol"]),
+                    "amplitude": float(metrics.get("amplitude") or 0.0) or snap_amp,
+                    "ret5": metrics.get("ret5"),
+                    "ret20": metrics.get("ret20"),
                 }
             movers = [
                 s for s in snapshot.stocks
@@ -268,6 +302,13 @@ class ShortTermWatchlistManager:
             ]
             movers.sort(key=lambda s: s.turnover, reverse=True)
             for s in movers[:FEED_TOP_N]:
+                metrics = self._fetch_kline_metrics(client, s.symbol)
+                ret5 = metrics.get("ret5")
+                ret20 = metrics.get("ret20")
+                # 若行情库已有完整历史日线，强制校验 5日/20日多日动量，拒绝阴跌大票入池
+                if ret20 is not None and ret5 is not None:
+                    if ret20 < _CONT_RET20 or (ret5 < _CONT_RET5 and ret20 < 0.08):
+                        continue
                 rate_txt = (
                     f"换手{s.turnover_rate:.1f}%"
                     if s.turnover_rate > 0 else "换手率缺失"
@@ -278,6 +319,7 @@ class ShortTermWatchlistManager:
                     "sector": s.industry or "",
                     "current_price": s.price,
                     "turnover": s.turnover,
+                    "amplitude": float(metrics.get("amplitude") or 0.0),
                     "change_pct": s.change_pct,
                     "thesis": (
                         f"盘后复盘入池: {rate_txt} "
@@ -335,17 +377,18 @@ class ShortTermWatchlistManager:
                 # 更新检查数据
                 store.update_watchlist_check(watch_id, price, change_pct)
 
-                # 破位踢出：单日暴跌超 -6%
-                if change_pct <= (MAX_SINGLE_DAY_DROP * 100):  # 百分比单位兼容
+                # 破位踢出：单日暴跌超 -6% (change_pct 单位统一为百分比，如 -6.0 表示 -6%)
+                if change_pct <= (MAX_SINGLE_DAY_DROP * 100):
                     remove_reason = f"单日大幅下挫 {change_pct:.2f}% (突破 -6% 止损线)，形态破位踢出"
-                elif change_pct <= MAX_SINGLE_DAY_DROP and abs(change_pct) < 1.0:
-                    remove_reason = f"单日大幅下挫 {change_pct:.2%}，形态破位踢出"
                 # 流动性枯竭踢出：成交额低于 1.5 亿
                 elif 0 < turnover < MIN_TURNOVER:
                     remove_reason = f"当日成交额仅 {turnover/1e8:.2f} 亿 (低于 1.5 亿流动性红线)，流动性枯竭踢出"
                 # 弹性枯竭踢出：真实振幅低于 3%
                 elif 0 < amplitude < MIN_AMPLITUDE:
                     remove_reason = f"日内振幅仅 {amplitude:.1%} (低于 3% 弹性红线)，丧失波动红利踢出"
+                # 中期动量丧失踢出：20 日涨幅转负
+                elif quote.get("ret20") is not None and float(quote["ret20"]) < 0.0:
+                    remove_reason = f"20日涨幅转负 ({float(quote['ret20']):.1%})，中期动量丧失踢出"
 
             else:
                 # 无外部行情，递增 days_watched

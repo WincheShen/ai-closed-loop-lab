@@ -145,6 +145,24 @@ class MarketInfoClient:
             },
         }
 
+    def fetch_quote(self, symbols: list[str] | str) -> dict[str, Any]:
+        """GET /api/market/snapshot?symbols=...，仅从行情库读取指定标的快照。"""
+        if isinstance(symbols, str):
+            sym_param = symbols.strip()
+        else:
+            sym_param = ",".join(s.strip() for s in symbols if s and s.strip())
+        raw_snapshot = self._get(f"/api/market/snapshot?symbols={sym_param}")
+        snapshot = SnapshotContract.model_validate(raw_snapshot)
+        return {
+            "stocks": snapshot.items,
+            "meta": {
+                "is_mock": snapshot.is_mock,
+                "source": snapshot.source,
+                "data_quality": snapshot.data_quality,
+                "fetched_at": snapshot.fetched_at,
+            },
+        }
+
     def fetch_kline(self, symbol: str, period: str = "daily") -> dict[str, Any]:
         """GET /api/market/kline/{symbol}?period=...，返回原始结构。"""
         raw = self._get(f"/api/market/kline/{symbol}?period={period}")

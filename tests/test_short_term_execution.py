@@ -326,10 +326,14 @@ async def test_execute_tail_hunt_success(tmp_path, monkeypatch):
     )
     conn.commit()
 
-    # 模拟盘中行情抓取
+    # 模拟盘中行情抓取（同时隔离真实日线网络请求）
     monkeypatch.setattr(
         "src.agents.reviewer.tail_hunt.IntradayClient.fetch_intraday_snapshot",
         lambda self, symbol, **kwargs: _make_snapshot(26.0, is_mock=False, turnover=5e8, change_pct=4.0),
+    )
+    monkeypatch.setattr(
+        "src.agents.reviewer.tail_hunt.AkshareClient.fetch_kline",
+        lambda self, symbol, days=25: [],
     )
 
     res = await execute_tail_hunt(brain, "ultra_short_momentum_v1")
@@ -411,3 +415,116 @@ async def test_execute_force_close_ultra_short(tmp_path, monkeypatch):
 
     open_pos = brain.store.list_open_positions(persona_id="ultra_short_momentum_v1")
     assert len(open_pos) == 0
+
+
+# ── 2026-10-19 002463 沪电股份假红盘/无动能回归测试 ─────────────
+
+def test_watchlist_audit_micro_drop_and_momentum_decay(tmp_path):
+    """回归：微跌 -0.66% 不得被当成 -66% 误踢；20日涨幅转负应被踢出。"""
+    brain = _MockBrain(tmp_path)
+    mgr = ShortTermWatchlistManager(brain)
+
+    mgr.add_candidate("688041", "海光信息", price=192.54)
+    mgr.add_candidate("002463", "沪电股份", price=113.38)
+
+    quotes = {
+        "688041": {
+            "price": 192.54,
+            "turnover": 39.5e8,
+            "amplitude": 0.055,
+            "change_pct": -0.66,  # 微跌 -0.66%，不应触发 -6% 破位踢出
+            "ret5": 0.08,
+            "ret20": 0.15,
+        },
+        "002463": {
+            "price": 113.38,
+            "turnover": 52.9e8,
+            "amplitude": 0.068,
+            "change_pct": -2.41,
+            "ret5": 0.023,
+            "ret20": -0.1255,     # 20日跌幅 -12.55%，中期动量丧失应踢出
+        },
+    }
+
+    res = mgr.audit_and_clean(quotes)
+    assert res["checked"] == 2
+    assert res["removed"] == 1
+    assert mgr.get_active_symbols() == ["688041"]
+
+
+@pytest.mark.asyncio
+async def test_execute_tail_hunt_rejects_weak_momentum_002463(tmp_path, monkeypatch):
+    """回归 2026-10-19 002463 沪电股份：
+    库内昨收 113.38、20日涨幅 -12.55%、14:35 现价 112.95（真实跌 -0.38%），
+    即便日内低开 112.20 拉回至振幅高位区 (close_pos=0.85)，也必须因绿盘+多日动能不足被拒绝。
+    """
+    from src.stock_analyzer.data_source.akshare_client import KlineBar
+
+    brain = _MockBrain(tmp_path)
+    wl_mgr = ShortTermWatchlistManager(brain)
+    wl_mgr.add_candidate("002463", "沪电股份", price=113.38)
+
+    conn = brain.store._conn()
+    conn.execute(
+        """INSERT INTO market_regime_snapshots
+        (snapshot_id, trade_date, regime, recommended_posture, max_total_position_pct, evidence_json, created_at)
+        VALUES ('SNAP-1019', ?, 'neutral', 'selective_attack', 0.40, ?, ?)""",
+        (date.today().isoformat(), json.dumps({"up_ratio": 0.438}), datetime.now().isoformat()),
+    )
+    conn.commit()
+
+    today_dt = datetime(2026, 10, 19, 14, 35)
+    # 模拟盘中快照（即使 prev_close 被旧逻辑误传为开盘价 112.20）
+    snap_002463 = IntradaySnapshot(
+        symbol="002463",
+        name="沪电股份",
+        current_price=112.95,
+        prev_close=112.20,
+        change_pct=0.67,
+        high=114.20,
+        low=106.06,
+        open=112.20,
+        volume=419729,
+        turnover=46.4e8,
+        bars=[
+            MinuteBar(
+                timestamp=datetime(2026, 10, 19, 10, 0),
+                open=112.20, high=113.32, low=106.06, close=108.47,
+                volume=200000, turnover=26.6e8,
+            ),
+            MinuteBar(
+                timestamp=today_dt,
+                open=113.96, high=114.20, low=112.95, close=112.95,
+                volume=219729, turnover=19.8e8,
+            ),
+        ],
+        is_mock=False,
+    )
+
+    # 构造行情库中的 22 根历史日线：20日前收盘 126.0，5日前收盘 110.0，昨日(10-16)收盘 113.38
+    hist_klines = []
+    base_d = date(2026, 10, 19)
+    for i in range(22, 0, -1):
+        d = base_d - timedelta(days=i)
+        c = 126.0 if i >= 20 else (110.0 if i == 5 else (113.38 if i == 1 else 115.0))
+        hist_klines.append(
+            KlineBar(
+                date=d, open=c, high=c * 1.02, low=c * 0.98, close=c,
+                volume=500000, turnover=50e8,
+            )
+        )
+
+    monkeypatch.setattr(
+        "src.agents.reviewer.tail_hunt.IntradayClient.fetch_intraday_snapshot",
+        lambda self, symbol, **kwargs: snap_002463,
+    )
+    monkeypatch.setattr(
+        "src.agents.reviewer.tail_hunt.AkshareClient.fetch_kline",
+        lambda self, symbol, days=25: hist_klines,
+    )
+
+    res = await execute_tail_hunt(brain, "ultra_short_momentum_v1")
+    assert res["executed"] is False
+    assert res["action"] == "SKIP"
+    assert len(brain.store.list_open_positions(persona_id="ultra_short_momentum_v1")) == 0
+

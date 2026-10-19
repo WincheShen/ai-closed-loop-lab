@@ -283,3 +283,54 @@ def test_circuit_breaker_in_client(monkeypatch):
     # 第 4 次直接被 circuit breaker 拒绝，不再等超时
     with pytest.raises(ConnectionError, match="circuit breaker OPEN"):
         client._get("/api/health")
+
+
+def test_intraday_client_reads_from_market_info_db(monkeypatch):
+    """IntradayClient 在配置 MARKET_INFO_URL 时直接从行情平台数据库读取快照与真实昨收。"""
+    from src.stock_analyzer.data_source.intraday_client import IntradayClient
+
+    monkeypatch.setenv("MARKET_INFO_URL", "http://localhost:8005")
+    intraday = IntradayClient(allow_mock_fallback=False)
+
+    quote_resp = {
+        "source": "sina",
+        "data_quality": "full",
+        "fetched_at": "2026-10-19T06:35:43+00:00",
+        "is_mock": False,
+        "items": [
+            {
+                "symbol": "002463",
+                "name": "沪电股份",
+                "price": 113.18,
+                "change_pct": -0.18,
+                "volume": 418336.0,
+                "amount": 4627009855.0,
+                "open": 112.20,
+                "high": 114.18,
+                "low": 106.11,
+                "prev_close": 113.38,
+                "turnover_rate": 2.45,
+            }
+        ],
+    }
+
+    def fake_get(url: str, *args, **kwargs):
+        if "/api/market/snapshot?symbols=002463" in url:
+            return FakeResp(quote_resp)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(intraday._market_info_client._session, "get", fake_get)
+
+    snap = intraday.fetch_intraday_snapshot("002463", name="沪电股份")
+    assert intraday._last_source == "market_info"
+    assert snap.is_mock is False
+    assert snap.current_price == 113.18
+    assert snap.prev_close == 113.38
+    assert snap.change_pct == -0.18
+    assert snap.high == 114.18
+    assert snap.low == 106.11
+    assert snap.open == 112.20
+    assert snap.turnover == 4627009855.0
+    assert len(snap.bars) == 2
+    assert sum(b.turnover for b in snap.bars) == 4627009855.0
+

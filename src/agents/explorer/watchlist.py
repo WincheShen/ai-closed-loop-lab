@@ -117,7 +117,10 @@ class WatchlistManager:
             {"checked": N, "triggered": N, "removed": N}
         """
         store = self.brain.store
-        items = store.get_watchlist(status="watching")
+        items = [
+            it for it in store.get_watchlist(status="watching")
+            if it.get("strategy_id") != "ultra_short_momentum"
+        ]
         if not items:
             self.logger.info("Watchlist 为空，跳过检查")
             return {"checked": 0, "triggered": 0, "removed": 0}

@@ -38,6 +38,10 @@ class StockQuote:
     volume: float                  # 成交量（手）
     turnover: float                # 成交额（元）
     turnover_rate: float = 0.0     # 换手率 %
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    prev_close: float = 0.0
     pe_ttm: Optional[float] = None
     pb: Optional[float] = None
     market_cap_yi: Optional[float] = None  # 总市值（亿元）
@@ -883,13 +887,31 @@ class AkshareClient:
         for item in raw.get("stocks", []):
             try:
                 sym = str(item.get("symbol", "")).zfill(6)
+                price = float(item.get("price", 0) or 0)
+                change_pct = float(item.get("change_pct", 0) or 0)
+                prev_close = float(item.get("prev_close", 0) or 0)
+                if prev_close <= 0 and price > 0:
+                    prev_close = (
+                        round(price / (1.0 + change_pct / 100.0), 2)
+                        if abs(change_pct) > 1e-6 and (1.0 + change_pct / 100.0) > 0
+                        else price
+                    )
+                open_p = float(item.get("open", 0) or 0) or prev_close
+                high_p = float(item.get("high", 0) or 0) or price
+                low_p = float(item.get("low", 0) or 0) or price
+                turnover_rate = float(item.get("turnover_rate", 0) or 0)
                 stocks.append(StockQuote(
                     symbol=sym,
                     name=str(item.get("name", "")),
-                    price=float(item.get("price", 0) or 0),
-                    change_pct=float(item.get("change_pct", 0) or 0),
+                    price=price,
+                    change_pct=change_pct,
                     volume=float(item.get("volume", 0) or 0),
                     turnover=float(item.get("amount", item.get("turnover", 0)) or 0),
+                    turnover_rate=turnover_rate,
+                    open=open_p,
+                    high=high_p,
+                    low=low_p,
+                    prev_close=prev_close,
                 ))
             except Exception:  # noqa: BLE001
                 continue
@@ -938,19 +960,28 @@ class AkshareClient:
                     round((close / prev_close - 1) * 100, 2)
                     if prev_close > 0 else 0.0
                 )
+                vol = float(item.get("volume", 0) or 0)
+                raw_to = float(item.get("amount", item.get("turnover", 0)) or 0)
+                src_str = str(meta.get("source", "market_info"))
+                if raw_to > 0:
+                    turnover_val = raw_to
+                elif "sina" in src_str.lower():
+                    turnover_val = round(vol * close, 2)
+                else:
+                    turnover_val = round(vol * close * 100.0, 2)
                 bars.append(KlineBar(
                     date=d,
                     open=float(item.get("open", 0) or 0),
                     high=float(item.get("high", 0) or 0),
                     low=float(item.get("low", 0) or 0),
                     close=close,
-                    volume=float(item.get("volume", 0) or 0),
-                    turnover=0.0,
-                    turnover_rate=0.0,
+                    volume=vol,
+                    turnover=turnover_val,
+                    turnover_rate=float(item.get("turnover_rate", 0) or 0),
                     change_pct=change_pct,
                     is_mock=bool(meta.get("is_mock", False)),
                     data_quality=str(meta.get("data_quality", "unknown")),
-                    source=str(meta.get("source", "market_info")),
+                    source=src_str,
                 ))
                 prev_close = close
             except Exception:  # noqa: BLE001

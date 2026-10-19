@@ -22,18 +22,25 @@ from datetime import date, datetime
 from typing import Any
 
 from src.agents.executioner.executor import ExecutionEngine
-from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
+from src.agents.explorer.short_term_watchlist import MAX_WATCH_DAYS, ShortTermWatchlistManager
 from src.agents.reviewer.intraday_loop import _execute_review_action
 from src.central_brain import get_central_brain
 from src.infra.notify import notify_ops
+from src.stock_analyzer.data_source.akshare_client import AkshareClient
 from src.stock_analyzer.data_source.intraday_client import IntradayClient
 from src.wheel.shadow import run_exit_shadow, wheel_exit_mode
 from src.stock_analyzer.detectors.ultra_short_momentum import (
     STRATEGY_ID,
     _CONT_CLOSE_POS,
+    _CONT_RET5,
+    _CONT_RET20,
+    _CONT_VOL_FLOOR,
     _MIN_AMPLITUDE,
     _MIN_TURNOVER,
     _MIN_UP_RATIO,
+    _PB_DD_MAX,
+    _PB_DD_MIN,
+    _PB_RET20,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,18 +180,31 @@ async def execute_tail_hunt(
         logger.info("[TAIL-HUNT] 当前已有 %d 只持仓 (上限 2 只)，跳过开新仓", len(open_positions))
         return _done({"executed": False, "reason": "持仓已达上限", "action": "SKIP"})
 
-    # 4. 扫描自选股池，拉取 14:30 盘中真实快照
+    # 4. 扫描自选股池，从行情库读取盘中快照与已落库的历史日线
     intraday = IntradayClient(allow_mock_fallback=False)
+    kline_client = AkshareClient(allow_mock_fallback=False)
     candidates_scored = []
 
     for item in watchlist_items:
         symbol = item["symbol"]
         name = item.get("name", symbol)
+        days_watched = int(item.get("days_watched", 0) or 0)
         eval_rec: dict[str, Any] = {"symbol": symbol, "name": name}
 
         def _skip(reason: str) -> None:
             eval_rec["skip"] = reason
             evaluated.append(eval_rec)
+
+        if days_watched >= MAX_WATCH_DAYS:
+            try:
+                brain.store.remove_from_watchlist(
+                    item["watch_id"],
+                    reason=f"入池 {days_watched} 天超过 {MAX_WATCH_DAYS} 天未触发入场，时间止损踢出",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            _skip(f"入池已满 {days_watched} 天超期未触发")
+            continue
 
         try:
             snapshot = intraday.fetch_intraday_snapshot(symbol, name=name, period="30", bar_limit=8)
@@ -211,42 +231,133 @@ async def execute_tail_hunt(
             _skip("无当日K线")
             continue
 
-        high = max(b.high for b in today_bars)
-        low = min(b.low for b in today_bars)
-        day_range = high - low
+        # 从行情库读取历史日线（昨日及之前的数据已在库中，无需重复计算）
+        hist_bars = []
+        try:
+            daily_bars = kline_client.fetch_kline(symbol, days=25)
+            if daily_bars and not getattr(daily_bars[-1], "is_mock", False):
+                hist_bars = [b for b in daily_bars if b.date < latest_date and b.close > 0]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[TAIL-HUNT] 读取 %s 历史日线异常: %s", symbol, e)
+
+        # 优先使用行情库中已落库的上一交易日收盘价作为 prev_close，杜绝用今日开盘价误算涨跌幅
+        prev_close = (
+            hist_bars[-1].close
+            if hist_bars and hist_bars[-1].close > 0
+            else snapshot.prev_close
+        )
+        high = max(
+            [b.high for b in today_bars]
+            + ([snapshot.high] if (snapshot.high or 0) > 0 else [])
+        )
+        low_candidates = [b.low for b in today_bars if b.low > 0]
+        if (snapshot.low or 0) > 0:
+            low_candidates.append(snapshot.low)
+        low = min(low_candidates) if low_candidates else current_price
+        day_range = max(high - low, 0.0)
         close_pos = (current_price - low) / day_range if day_range > 0 else 0.5
-        amplitude = day_range / snapshot.prev_close if snapshot.prev_close > 0 else 0.0
-        turnover = sum(b.turnover for b in today_bars) if any(b.turnover > 0 for b in today_bars) else snapshot.turnover
-        change_pct = snapshot.change_pct
+        amplitude = day_range / prev_close if prev_close > 0 else 0.0
+        turnover = (
+            sum(b.turnover for b in today_bars)
+            if any(b.turnover > 0 for b in today_bars)
+            else snapshot.turnover
+        )
+        change_pct = (
+            (current_price / prev_close - 1.0) * 100.0
+            if prev_close > 0 and hist_bars
+            else snapshot.change_pct
+        )
+
+        ret5: float | None = None
+        ret20: float | None = None
+        drawdown: float | None = None
+        avg_to_20: float = 0.0
+        if len(hist_bars) >= 20:
+            ret5 = current_price / hist_bars[-5].close - 1.0 if hist_bars[-5].close > 0 else 0.0
+            ret20 = current_price / hist_bars[-20].close - 1.0 if hist_bars[-20].close > 0 else 0.0
+            high10 = max(max(b.high for b in hist_bars[-9:]), high)
+            drawdown = (high10 - current_price) / high10 if high10 > 0 else 0.0
+            avg_to_20 = sum(b.turnover for b in hist_bars[-20:]) / 20.0
+
         eval_rec.update({
             "price": current_price,
+            "prev_close": round(prev_close, 2) if prev_close else 0.0,
             "change_pct": round(change_pct, 2),
             "close_pos": round(close_pos, 2),
             "amplitude": round(amplitude, 4),
             "turnover": turnover,
         })
+        if ret5 is not None and ret20 is not None:
+            eval_rec.update({
+                "ret5_pct": round(ret5 * 100.0, 2),
+                "ret20_pct": round(ret20 * 100.0, 2),
+                "drawdown_pct": round((drawdown or 0.0) * 100.0, 2),
+            })
 
         # 流动性与振幅硬过滤
         if turnover < _MIN_TURNOVER or amplitude < _MIN_AMPLITUDE:
             _skip(f"流动性/振幅不足 (turnover={turnover/1e8:.2f}亿, amplitude={amplitude:.1%})")
             continue
 
-        # 匹配形态 A (强势延续) 或 形态 B (强势企稳)
+        # 匹配形态 A (强势延续) 或 形态 B (强势企稳)，并对齐回测的多日动量门槛
         matched_setup = None
+        has_hist = ret5 is not None and ret20 is not None and drawdown is not None
 
-        # 形态 A：收红 + 位于振幅前 35% 高位区
-        if change_pct >= 0.0 and close_pos >= _CONT_CLOSE_POS:
+        # 形态 A：真红盘 + 日内阳线/平盘 + 位于振幅前 40% 高位区 + 5日/20日趋势向上 + 量能不萎缩
+        if (
+            change_pct >= 0.0
+            and current_price >= (snapshot.open or 0.0)
+            and close_pos >= _CONT_CLOSE_POS
+            and (
+                not has_hist
+                or (
+                    ret5 >= _CONT_RET5
+                    and ret20 >= _CONT_RET20
+                    and (avg_to_20 <= 0 or turnover >= avg_to_20 * _CONT_VOL_FLOOR)
+                )
+            )
+        ):
             matched_setup = "momentum_continuation"
-        # 形态 B：回踩企稳且跌幅不深（跌幅 > -7% 且收出下影线）
-        elif change_pct >= -7.0 and (current_price >= snapshot.open or (min(snapshot.open, current_price) - low) / max(day_range, 0.01) >= 0.4):
+        # 形态 B：20日强势股（ret20>=8%）自10日高点回撤4%~15%，且当日回踩企稳
+        elif (
+            change_pct >= -7.0
+            and (
+                current_price >= snapshot.open
+                or (min(snapshot.open, current_price) - low) / max(day_range, 0.01) >= 0.4
+            )
+            and (
+                not has_hist
+                or (
+                    ret20 >= _PB_RET20
+                    and _PB_DD_MIN <= drawdown <= _PB_DD_MAX
+                )
+            )
+        ):
             matched_setup = "strong_pullback"
 
         if not matched_setup:
-            _skip("未匹配尾盘形态 (非强势延续/强势企稳)")
+            if has_hist and (ret20 < _CONT_RET20 or (ret5 < _CONT_RET5 and ret20 < _PB_RET20)):
+                _skip(
+                    f"多日动能不足 (ret5={ret5:.1%}, ret20={ret20:.1%}, "
+                    f"change_pct={change_pct:+.2f}%)"
+                )
+            else:
+                _skip("未匹配尾盘形态 (非强势延续/强势企稳)")
             continue
 
         if matched_setup:
-            score = (close_pos * 40.0) + (min(turnover / 1e8, 20.0) * 2.0) + (change_pct * 2.0)
+            setup_bonus = 10.0 if matched_setup == "momentum_continuation" else 0.0
+            mom_bonus = (
+                min(max((ret5 or 0.0) * 100.0, 0.0), 30.0) * 0.8
+                + min(max((ret20 or 0.0) * 100.0, 0.0), 50.0) * 0.4
+            )
+            score = (
+                setup_bonus
+                + (close_pos * 25.0)
+                + (min(turnover / 1e8, 20.0) * 1.0)
+                + (change_pct * 4.0)
+                + mom_bonus
+            )
             eval_rec.update({"setup": matched_setup, "score": round(score, 2)})
             evaluated.append(eval_rec)
             candidates_scored.append({

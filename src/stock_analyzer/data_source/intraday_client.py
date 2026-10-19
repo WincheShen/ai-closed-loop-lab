@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
+
+from .market_info_client import MarketInfoClient
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +82,86 @@ class IntradayClient:
     def __init__(self, allow_mock_fallback: bool = True) -> None:
         self.allow_mock_fallback = allow_mock_fallback
         self._last_source = "none"
+        market_info_url = os.getenv("MARKET_INFO_URL", "")
+        self._market_info_client = MarketInfoClient(market_info_url, timeout=15)
         try:
             import akshare  # noqa: F401
             self._ak_available = True
         except ImportError:
             logger.warning("akshare 未安装，盘中行情将使用 mock 数据")
             self._ak_available = False
+
+    def _fetch_from_market_info(self, symbol: str, name: str = "") -> IntradaySnapshot | None:
+        """从 market-information-platform 数据库读取该标的的最新盘中快照。"""
+        if not self._market_info_client.is_configured():
+            return None
+        raw = self._market_info_client.fetch_quote([symbol])
+        meta = raw.get("meta", {})
+        stocks = raw.get("stocks", [])
+        if not stocks:
+            return None
+        item = stocks[0]
+        price = float(item.get("price", 0) or 0)
+        if price <= 0:
+            return None
+        change_pct = float(item.get("change_pct", 0) or 0)
+        prev_close = float(item.get("prev_close", 0) or 0)
+        if prev_close <= 0:
+            prev_close = (
+                round(price / (1.0 + change_pct / 100.0), 2)
+                if abs(change_pct) > 1e-6 and (1.0 + change_pct / 100.0) > 0
+                else price
+            )
+        open_p = float(item.get("open", 0) or 0) or prev_close
+        high_p = max(float(item.get("high", 0) or 0), price, open_p)
+        raw_low = float(item.get("low", 0) or 0)
+        low_p = min(raw_low, price, open_p) if raw_low > 0 else min(price, open_p)
+        volume = float(item.get("volume", 0) or 0)
+        turnover = float(item.get("amount", item.get("turnover", 0)) or 0)
+        is_mock = bool(meta.get("is_mock", False))
+
+        now_dt = datetime.now()
+        open_dt = now_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+        if open_dt >= now_dt:
+            open_dt = now_dt - timedelta(minutes=30)
+
+        bars = [
+            MinuteBar(
+                timestamp=open_dt,
+                open=open_p,
+                high=high_p,
+                low=low_p,
+                close=open_p,
+                volume=0.0,
+                turnover=0.0,
+                change_pct=round((open_p / prev_close - 1.0) * 100.0, 2) if prev_close > 0 else 0.0,
+            ),
+            MinuteBar(
+                timestamp=now_dt,
+                open=open_p,
+                high=high_p,
+                low=low_p,
+                close=price,
+                volume=volume,
+                turnover=turnover,
+                change_pct=change_pct,
+            ),
+        ]
+        self._last_source = "market_info"
+        return IntradaySnapshot(
+            symbol=symbol,
+            name=str(item.get("name") or name or symbol),
+            current_price=price,
+            prev_close=round(prev_close, 2),
+            change_pct=round(change_pct, 2),
+            high=high_p,
+            low=low_p,
+            open=open_p,
+            volume=volume,
+            turnover=turnover,
+            bars=bars,
+            is_mock=is_mock,
+        )
 
     def fetch_minute_bars(
         self,
@@ -157,10 +234,19 @@ class IntradayClient:
         """获取一只股票的完整盘中快照（聚合分钟K线和统计信息）。
 
         高可用保障：
-        1. 优先拉取分钟K线 (AKShare / 新浪API)；
-        2. 结合新浪实时行情 (hq.sinajs.cn) 获取当日全量盘中统计（最高/最低/成交额/均价）；
+        0. 优先从 market-information-platform 数据库读取已采集快照；
+        1. 降级拉取分钟K线 (AKShare / 新浪API)；
+        2. 结合新浪实时行情 (hq.sinajs.cn) 获取当日全量盘中统计（最高/最低/成交额/昨收）；
         3. 若分钟K线偶发失败，由秒级实时行情兜底合成快照，防止盘中风控与脉冲策略因网络波动漏触发。
         """
+        if self._market_info_client.is_configured():
+            try:
+                mi_snap = self._fetch_from_market_info(symbol, name=name)
+                if mi_snap is not None and (not mi_snap.is_mock or self.allow_mock_fallback):
+                    return mi_snap
+            except Exception as e:  # noqa: BLE001
+                logger.warning("market-info-platform 盘中快照读取失败 %s: %s，回退分钟线", symbol, e)
+
         try:
             bars = self.fetch_minute_bars(symbol, period, bar_limit)
         except Exception as e:
@@ -208,19 +294,36 @@ class IntradayClient:
             )
 
         latest = bars[-1]
-        first = bars[0]
-        prev_close = first.open / (1 + first.change_pct / 100) if first.change_pct else first.open
+        latest_date = latest.timestamp.date()
+        prev_day_bars = [b for b in bars if b.timestamp.date() < latest_date]
+        today_bars = [b for b in bars if b.timestamp.date() == latest_date] or bars
+        first = today_bars[0]
+
+        if prev_day_bars and prev_day_bars[-1].close > 0:
+            prev_close = prev_day_bars[-1].close
+        elif first.change_pct:
+            prev_close = first.close / (1 + first.change_pct / 100)
+        else:
+            prev_close = first.open
+
+        high_p = max(b.high for b in today_bars)
+        low_p = min(b.low for b in today_bars)
+        open_p = first.open
+        vol_total = sum(b.volume for b in today_bars)
+        to_total = sum(b.turnover for b in today_bars)
+        change_pct = round((latest.close / prev_close - 1) * 100, 2) if prev_close else 0.0
+
         return IntradaySnapshot(
             symbol=symbol,
             name=name,
             current_price=latest.close,
             prev_close=round(prev_close, 2),
-            change_pct=round((latest.close / prev_close - 1) * 100, 2) if prev_close else 0,
-            high=max(b.high for b in bars),
-            low=min(b.low for b in bars),
-            open=first.open,
-            volume=sum(b.volume for b in bars),
-            turnover=sum(b.turnover for b in bars),
+            change_pct=change_pct,
+            high=high_p,
+            low=low_p,
+            open=open_p,
+            volume=vol_total,
+            turnover=to_total,
             bars=bars,
             is_mock=self._last_source == "mock",
         )
