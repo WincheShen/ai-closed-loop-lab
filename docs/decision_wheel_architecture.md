@@ -645,9 +645,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：全量测试通过；部署后线上行为零差异；新表在 NAS 库中创建成功。
 
-### Phase 1 — 出场转盘 + ExitGateway（优先，直接修复 P1）✅ 影子模式已实现
+### Phase 1 — 出场转盘 + ExitGateway（优先，直接修复 P1）✅ 已切换 live
 
-`exit_confirm` / `exit_confirm_ultra` / `overnight_force_close` / `llm_position_review` 四个转盘已接进 hard_scan / intraday_review / force_close 三条旧路径并行运行（mode=shadow，只写 `wheel_decisions` 不执行）；止损确认状态落 `wheel_factor_state`；16:00 health_check 输出 `wheel_shadow_report`。
+`exit_confirm` / `exit_confirm_ultra` / `overnight_force_close` / `llm_position_review` 四个转盘经连续 5 个交易日（2026-10-19 ~ 10-23，共 2,526 条门槛决策，`wheel_looser=0`、`uncovered=0`）影子观察验收通过，已切换为 `mode: live`（由 `ExitGateway` 接管实际出场执行，旧路径让位并保留为兜底）；止损确认状态落 `wheel_factor_state`；16:00 health_check 输出 `wheel_shadow_report`。
 
 复审后修复（影子语义与 live 对齐）：
 - 止损确认最小观测间隔 ≥180s，同一时刻多转盘评估不再重复计数；
@@ -683,8 +683,8 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 | 2.3 | `regime_drift` 写 `market.regime_drift` 事件 → 广播 `urgent_review` 转盘逐持仓记 REVIEW 影子决策，修复紧急复审断链（live 后由 Dispatcher 映射到复审入口） | ✅ 影子 |
 | 2.4 | `morning_watch` 转盘 + `mod.watch_followup` 登记 `followup.morning_watch`（默认 1 分钟、30 次、14:30 截止），脉冲检查后链式复查 | ✅ 影子 |
 | 2.6 | 只读 API `/api/wheel/events` + `/api/wheel/decisions`（轨迹另经 AgentWorkspace 事件流可见） | ✅ 已实现 |
-| 2.2 | scheduler 时钟 job 改为写 `clock.*` 事件 | ⏸ 待 Phase 1 切 live（会改变出场触发方式，污染对比基线） |
-| 2.5 | 首次 LLM 复审事件从 09:30 改为 10:00 | ⏸ 待 Phase 1 切 live（改变旧路径时序） |
+| 2.2 | `emit_clock_event` + Dispatcher 接管 `clock.next_open` 等异步时钟事件 | ✅ 已实现 |
+| 2.5 | 首次 LLM 复审事件从 09:30 改为 10:00（`scheduler.py`） | ✅ 已实现 |
 | — | `daily_shadow_report` 只统计 Phase 1 四个出场转盘（GATE_WHEELS），其余转盘单列 `other_wheels` | ✅ 已实现 |
 
 回审修复：
@@ -695,7 +695,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：后续事件不会越过截止时间、不会无限复查、持仓平仓后在途事件自动作废；`morning_watch` 影子 10 个交易日，人工复核其决策后再切 live。
 
-### Phase 3 — 入场转盘（修复 P6，统一入场语义）
+### Phase 3 — 入场转盘（修复 P6，统一入场语义）✅ 核心已落地（影子模式）
+
+已实现迁移 `006_wheel_phase3_candidates_and_persona_isolation`（`wheel_candidates` 表 + `watchlist`/`trade_attributions`/`lessons` 补齐 `persona_id` 并回填）、`EntryGateway`（`src/wheel/entry_gateway.py`，跨标的 Top-N 排序与组合级硬闸门）、`market_screen_ultra -> entry_confirm_ultra` 链式数据库接力、`order_fill_at_open`（含 `veto.quote_fresh_today` 与 `veto.open_gap_guard`）、`pending_trigger` 条件单转盘，以及 `PersonaProfile`（`Identity` + `PersonaPolicy` + `as_of` 惰性 `MemoryViews`）。
 
 | 任务 | 产出 |
 |---|---|

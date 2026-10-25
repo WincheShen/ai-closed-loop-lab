@@ -137,7 +137,193 @@ class LlmReviewStep:
         return {"llm_review": {"action": "HOLD", "reason": "无 LLM 复审输入"}}
 
 
+class WatchlistUltraStep:
+    """data.watchlist_ultra — 读取隔夜客短线自选池与最新大盘天气快照（Phase 3.1）。"""
+
+    name = "watchlist_ultra"
+    provides = ("candidates", "regime_snapshot")
+    param_keys: tuple[str, ...] = ()
+
+    def load(self, ctx: Context, params: dict) -> dict:
+        if "candidates" in ctx.data:
+            return {
+                "candidates": list(ctx.data.get("candidates") or []),
+                "regime_snapshot": dict(ctx.data.get("regime_snapshot") or {}),
+            }
+        if ctx.brain is None:
+            return {"candidates": [], "regime_snapshot": {}}
+        try:
+            from src.agents.explorer.short_term_watchlist import ShortTermWatchlistManager
+            items = ShortTermWatchlistManager(ctx.brain).get_active_pool()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("data.watchlist_ultra 读取自选池失败: %s", e)
+            items = []
+        regime: dict[str, Any] = {}
+        try:
+            regime = ctx.brain.store.latest_market_regime() or {}
+        except Exception:  # noqa: BLE001
+            pass
+        return {"candidates": items, "regime_snapshot": regime}
+
+
+class CandidateIntradayStep:
+    """data.candidate_intraday — 拉取单只候选标的 30m 盘中快照与 25 日历史日线特征（Phase 3.1）。"""
+
+    name = "candidate_intraday"
+    provides = ("candidate", "quote", "intraday_metrics")
+    param_keys: tuple[str, ...] = ("period", "bar_limit", "kline_days")
+
+    def load(self, ctx: Context, params: dict) -> dict:
+        cand = dict(ctx.data.get("candidate") or (ctx.event.subject or {}))
+        symbol = str(cand.get("symbol") or (ctx.event.subject or {}).get("symbol") or "").strip()
+        if not symbol:
+            return {}
+        cand.setdefault("symbol", symbol)
+        name = str(cand.get("name") or symbol)
+
+        if "intraday_metrics" in ctx.data and "quote" in ctx.data:
+            return {
+                "candidate": cand,
+                "quote": ctx.data["quote"],
+                "intraday_metrics": ctx.data["intraday_metrics"],
+            }
+
+        period = str(params.get("period", "30"))
+        bar_limit = int(params.get("bar_limit", 8))
+        kline_days = int(params.get("kline_days", 25))
+
+        quote: dict[str, Any] = {"price": 0.0, "is_mock": True, "symbol": symbol}
+        metrics: dict[str, Any] = {"valid": False, "reason": "未拉取行情"}
+
+        try:
+            from src.stock_analyzer.data_source.akshare_client import AkshareClient
+            from src.stock_analyzer.data_source.intraday_client import IntradayClient
+
+            intraday = IntradayClient(allow_mock_fallback=False)
+            snapshot = intraday.fetch_intraday_snapshot(
+                symbol, name=name, period=period, bar_limit=bar_limit,
+            )
+            current_price = float(snapshot.current_price or 0.0)
+            is_mock = bool(getattr(snapshot, "is_mock", False))
+            bars = list(snapshot.bars or [])
+            quote = {
+                "price": current_price,
+                "is_mock": is_mock,
+                "symbol": symbol,
+                "snapshot": snapshot,
+            }
+            if is_mock or not bars or current_price <= 0:
+                metrics = {"valid": False, "reason": "mock/无数据/价格异常"}
+                return {"candidate": cand, "quote": quote, "intraday_metrics": metrics}
+            if len(bars) < 2:
+                metrics = {"valid": False, "reason": "K线数量不足"}
+                return {"candidate": cand, "quote": quote, "intraday_metrics": metrics}
+
+            latest_date = bars[-1].timestamp.date()
+            today_bars = [b for b in bars if b.timestamp.date() == latest_date]
+            if not today_bars:
+                metrics = {"valid": False, "reason": "无当日K线"}
+                return {"candidate": cand, "quote": quote, "intraday_metrics": metrics}
+
+            hist_bars = []
+            try:
+                kline_client = AkshareClient(allow_mock_fallback=False)
+                daily_bars = kline_client.fetch_kline(symbol, days=kline_days)
+                if daily_bars and not getattr(daily_bars[-1], "is_mock", False):
+                    hist_bars = [b for b in daily_bars if b.date < latest_date and b.close > 0]
+            except Exception as e:  # noqa: BLE001
+                logger.debug("data.candidate_intraday 读取 %s 历史日线异常: %s", symbol, e)
+
+            prev_close = (
+                hist_bars[-1].close
+                if hist_bars and hist_bars[-1].close > 0
+                else float(snapshot.prev_close or 0.0)
+            )
+            high = max(
+                [b.high for b in today_bars]
+                + ([snapshot.high] if (snapshot.high or 0) > 0 else [])
+            )
+            low_candidates = [b.low for b in today_bars if b.low > 0]
+            if (snapshot.low or 0) > 0:
+                low_candidates.append(snapshot.low)
+            low = min(low_candidates) if low_candidates else current_price
+            day_range = max(high - low, 0.0)
+            close_pos = (current_price - low) / day_range if day_range > 0 else 0.5
+            amplitude = day_range / prev_close if prev_close > 0 else 0.0
+            turnover = (
+                sum(b.turnover for b in today_bars)
+                if any(b.turnover > 0 for b in today_bars)
+                else float(snapshot.turnover or 0.0)
+            )
+            change_pct = (
+                (current_price / prev_close - 1.0) * 100.0
+                if prev_close > 0 and hist_bars
+                else float(snapshot.change_pct or 0.0)
+            )
+
+            ret5: float | None = None
+            ret20: float | None = None
+            drawdown: float | None = None
+            avg_to_20: float = 0.0
+            if len(hist_bars) >= 20:
+                ret5 = current_price / hist_bars[-5].close - 1.0 if hist_bars[-5].close > 0 else 0.0
+                ret20 = current_price / hist_bars[-20].close - 1.0 if hist_bars[-20].close > 0 else 0.0
+                high10 = max(max(b.high for b in hist_bars[-9:]), high)
+                drawdown = (high10 - current_price) / high10 if high10 > 0 else 0.0
+                avg_to_20 = sum(b.turnover for b in hist_bars[-20:]) / 20.0
+
+            metrics = {
+                "valid": True,
+                "price": current_price,
+                "open": float(snapshot.open or 0.0),
+                "high": high,
+                "low": low,
+                "prev_close": prev_close,
+                "day_range": day_range,
+                "close_pos": close_pos,
+                "amplitude": amplitude,
+                "turnover": turnover,
+                "change_pct": change_pct,
+                "ret5": ret5,
+                "ret20": ret20,
+                "drawdown": drawdown,
+                "avg_to_20": avg_to_20,
+                "trade_date": latest_date.isoformat(),
+            }
+        except Exception as e:  # noqa: BLE001
+            metrics = {"valid": False, "reason": f"盘中快照拉取失败: {e}"}
+
+        return {"candidate": cand, "quote": quote, "intraday_metrics": metrics}
+
+
+class PendingSignalStep:
+    """data.pending_signal — 按 subject.signal_id 读取待执行/待触发信号（Phase 3.2 / 3.3）。"""
+
+    name = "pending_signal"
+    provides = ("signal",)
+    param_keys: tuple[str, ...] = ()
+
+    def load(self, ctx: Context, params: dict) -> dict:
+        if "signal" in ctx.data and ctx.data["signal"]:
+            return {"signal": ctx.data["signal"]}
+        sig_id = (ctx.event.subject or {}).get("signal_id")
+        if not sig_id or ctx.brain is None:
+            return {}
+        try:
+            conn = ctx.brain.store._conn()
+            row = conn.execute(
+                "SELECT * FROM trade_signals WHERE signal_id = ?", (sig_id,)
+            ).fetchone()
+            return {"signal": dict(row)} if row else {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("data.pending_signal 读取 %s 失败: %s", sig_id, e)
+            return {}
+
+
 def register(reg) -> None:
     reg.register_data_step(PositionStep())
     reg.register_data_step(QuoteRealtimeStep())
     reg.register_data_step(LlmReviewStep())
+    reg.register_data_step(WatchlistUltraStep())
+    reg.register_data_step(CandidateIntradayStep())
+    reg.register_data_step(PendingSignalStep())

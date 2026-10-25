@@ -704,10 +704,12 @@ def setup_schedule() -> None:
         notify_ops("wheels.yaml 校验失败，scheduler 拒绝启动", str(e))
         raise
 
-    # 盘中每 30 分钟持仓复审 (9:30 - 14:30)
+    # 盘中每 30 分钟持仓复审 (10:00 - 14:00)
+    # Phase 2.5：首次 LLM 盘中复审从 09:30 推迟到 10:00（避开早盘前 30 分钟高波动噪音，
+    # 09:30-10:00 由每 5 分钟 hard_scan / exit_confirm 及隔夜客 morning_watch 盯防）
     for hour in range(9, 15):
         for minute in (0, 30):
-            if hour == 9 and minute == 0:
+            if hour == 9:
                 continue
             if hour >= 12 and hour < 13:
                 continue

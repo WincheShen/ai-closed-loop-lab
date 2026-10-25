@@ -69,6 +69,7 @@ async def run_hard_scan(
         wheel_decision = run_exit_shadow(
             brain, pos, price=price, is_mock=is_mock,
             event_type="clock.intraday_5m", source="hard_scan",
+            extra={"force": True} if force else None,
         )
         # live 模式转盘已接管出场 — 但必须真正产出决策才让位；
         # 转盘异常/无决策（None）时旧路径兜底，出场侧 fail-safe
@@ -77,6 +78,34 @@ async def run_hard_scan(
             "clock.intraday_5m",
         ) == "live":
             if wheel_decision is not None:
+                pnl_pct = position_pnl_pct(pos, price) if price > 0 else 0.0
+                if wheel_decision.action in ("EXIT", "REDUCE"):
+                    exits.append({
+                        "symbol": symbol,
+                        "position_id": pos["position_id"],
+                        "action": wheel_decision.action,
+                        "current_price": price,
+                        "pnl_pct": round(pnl_pct, 2),
+                        "reason": wheel_decision.reason,
+                        "risk_flag": wheel_decision.risk_flag,
+                        "executed": True,
+                        "executed_via": "wheel",
+                    })
+                elif (
+                    wheel_decision.action == "HOLD"
+                    and wheel_decision.decided_by == "mod.stop_confirm"
+                ):
+                    exits.append({
+                        "symbol": symbol,
+                        "position_id": pos["position_id"],
+                        "action": "HOLD",
+                        "current_price": price,
+                        "pnl_pct": round(pnl_pct, 2),
+                        "reason": wheel_decision.reason,
+                        "risk_flag": "stop_breach_pending",
+                        "executed": False,
+                        "executed_via": "wheel",
+                    })
                 continue
             logger.error("[HARD] %s 转盘 live 未产出决策，旧路径兜底", symbol)
             notify_ops(

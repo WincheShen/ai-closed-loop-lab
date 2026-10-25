@@ -18,6 +18,8 @@ class TradingDayFloor(_FloorFactor):
     name = "floor.trading_day"
 
     def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        if ctx.data.get("force"):
+            return Opinion(factor=self.name, verdict="pass")
         reason = floor.check_trading_day(ctx.now)
         if reason:
             return self._veto(reason)

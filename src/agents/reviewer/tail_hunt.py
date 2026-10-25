@@ -140,6 +140,30 @@ async def execute_tail_hunt(
             logger.debug("tail_hunt_complete 事件写入失败", exc_info=True)
         return result
 
+    # Phase 3.1：隔夜客尾盘狙击转盘链（market_screen_ultra -> entry_confirm_ultra -> EntryGateway）
+    try:
+        from src.wheel.config import get_config
+        from src.wheel.persona import persona_policy
+        from src.wheel.protocol import WheelEvent
+        from src.wheel.runner import run_binding
+
+        cfg = get_config()
+        binding = cfg.binding_for(persona_id, "clock.1435")
+        if binding and binding.mode != "off":
+            now_dt = datetime.now()
+            ev = WheelEvent(
+                event_id=f"wev-clock.1435-{now_dt:%Y%m%d-%H%M%S}-{persona_id}",
+                type="clock.1435",
+                due_at=now_dt,
+                persona_id=persona_id,
+                subject={},
+                source="tail_hunt",
+            )
+            pol = persona_policy(cfg, persona_id, binding)
+            run_binding(cfg, binding, ev, pol, brain, now=now_dt)
+    except Exception:  # noqa: BLE001
+        logger.debug("clock.1435 尾盘转盘链执行异常", exc_info=True)
+
     # 1. 冷静期与大盘天气前置硬闸门
     is_cold, cold_reason = check_cold_period(brain, persona_id=persona_id)
     if is_cold:
@@ -547,6 +571,7 @@ async def execute_force_close_ultra_short(
             wheel_decision = run_exit_shadow(
                 brain, pos, price=current_price, is_mock=saw_mock or current_price <= 0,
                 event_type="clock.1430", source="force_close",
+                extra={"force": True},
             )
             live_wheel = wheel_exit_mode(
                 pos.get("persona_id") or persona_id, "clock.1430",
@@ -570,6 +595,17 @@ async def execute_force_close_ultra_short(
             if live_wheel:
                 # 只有转盘真正产出决策才让位；异常/无决策（None）时旧路径兜底
                 if wheel_decision is not None:
+                    after_pos = brain.store.get_position(pos["position_id"])
+                    was_closed = bool(after_pos and after_pos.get("status") == "closed")
+                    if was_closed:
+                        closed_count += 1
+                    closed_items.append({
+                        "symbol": symbol,
+                        "name": name,
+                        "price": current_price,
+                        "executed": was_closed,
+                        "executed_via": "wheel",
+                    })
                     continue
                 logger.error("[FORCE-CLOSE] %s 转盘 live 未产出决策，旧路径兜底", symbol)
                 notify_ops(

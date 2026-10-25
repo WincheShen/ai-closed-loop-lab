@@ -249,6 +249,18 @@ async def test_hard_scan_needs_second_breach(tmp_path, monkeypatch):
     def status():
         return brain.store.get_position("POS-HS-1")["status"]
 
+    import src.wheel.shadow as shadow_mod
+    step = {"i": 0}
+
+    class _StepTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            t = datetime(2026, 10, 12, 10, 0) + timedelta(minutes=5 * step["i"])
+            step["i"] += 1
+            return t
+
+    monkeypatch.setattr(shadow_mod, "datetime", _StepTime)
+
     r1 = await hard_scan.run_hard_scan("short_term_hot_rotation_v1", force=True, brain=brain)
     assert r1[0]["risk_flag"] == "stop_breach_pending" and status() == "open"
     await hard_scan.run_hard_scan("short_term_hot_rotation_v1", force=True, brain=brain)  # 收复

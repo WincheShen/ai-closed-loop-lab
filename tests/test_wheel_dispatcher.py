@@ -283,9 +283,11 @@ def test_shadow_dedup_isolated_from_gate_wheels(tmp_path):
     _open(brain)
     p = brain.store.get_position("POS-U")
     run_exit_shadow(brain, p, price=194.0, is_mock=False, event_type="followup.morning_watch",
-                    source="dispatcher", now=_T.replace(minute=39, second=30))
+                    source="dispatcher", now=_T.replace(minute=39, second=30),
+                    mode_override="shadow")
     run_exit_shadow(brain, p, price=194.0, is_mock=False, event_type="clock.intraday_5m",
-                    source="hard_scan", now=_T.replace(minute=40))
+                    source="hard_scan", now=_T.replace(minute=40),
+                    mode_override="shadow")
     rows = _decisions(brain)
     assert [r["wheel"] for r in rows] == ["morning_watch", "exit_confirm_ultra"]
     assert rows[1]["action"] == "EXIT" and rows[1]["gateway"] == "accepted"
@@ -301,7 +303,8 @@ def test_shadow_dedup_still_works_within_gate_cohort(tmp_path):
     p = brain.store.get_position("POS-U")
     for sec in (0, 20):
         run_exit_shadow(brain, p, price=194.0, is_mock=False, event_type="clock.intraday_5m",
-                        source="hard_scan", now=_T.replace(minute=40, second=sec))
+                        source="hard_scan", now=_T.replace(minute=40, second=sec),
+                        mode_override="shadow")
     rows = _decisions(brain)
     assert rows[0]["gateway"] == "accepted"
     assert rows[1]["gateway"] == "rejected:duplicate_in_window"
@@ -626,3 +629,215 @@ def test_data_step_params_and_session_quote_cache_isolation(tmp_path, monkeypatc
     assert step.load(ctx2, {})["quote"]["price"] == 195.0
     # 同一 brain 会话内再次读取命中缓存（不再触发第 3 次拉取）
     assert step.load(ctx1, {})["quote"]["price"] == 201.0
+
+
+def test_phase1_exit_bindings_are_live():
+    """Phase 1.8：四个出场转盘绑定均已切换为 live，Phase 3 入场转盘已注册。"""
+    from src.wheel.config import get_config
+
+    cfg = get_config(reload=True)
+    for pid in ("short_term_hot_rotation_v1", "duan_yongping_v1", "warren_buffett_v1"):
+        assert cfg.binding_for(pid, "clock.intraday_5m").mode == "live"
+        assert cfg.binding_for(pid, "clock.intraday_30m").mode == "live"
+        assert cfg.binding_for(pid, "clock.next_open").wheel == "order_fill_at_open"
+        assert cfg.binding_for(pid, "clock.pending_5m").wheel == "pending_trigger"
+    assert cfg.binding_for("ultra_short_momentum_v1", "clock.intraday_5m").mode == "live"
+    assert cfg.binding_for("ultra_short_momentum_v1", "clock.1430").mode == "live"
+    assert cfg.binding_for("ultra_short_momentum_v1", "clock.1435").chain == (
+        "market_screen_ultra", "entry_confirm_ultra",
+    )
+
+
+def test_phase3_funnel_to_decision_chain_relays_via_wheel_candidates_and_entry_gateway(
+    tmp_path, monkeypatch,
+):
+    """Phase 3.1：market_screen_ultra 写 wheel_candidates → entry_confirm_ultra 逐票评估 →
+    EntryGateway 按 score 排序取 Top-1（第 2 名标记 rejected:ranked_out_of_top_n）。"""
+    from src.wheel.config import get_config
+    from src.wheel.data.steps import CandidateIntradayStep
+    from src.wheel.persona import persona_policy
+    from src.wheel.runner import run_binding
+
+    brain = _MockBrain(tmp_path)
+    cfg = get_config(reload=True)
+    binding = cfg.binding_for("ultra_short_momentum_v1", "clock.1435")
+    pol = persona_policy(cfg, "ultra_short_momentum_v1", binding)
+    ev = WheelEvent(
+        event_id="ev-1435", type="clock.1435", due_at=_T.replace(hour=14, minute=35),
+        persona_id="ultra_short_momentum_v1", subject={}, source="test",
+    )
+
+    candidates_in = [
+        {"symbol": "300001", "name": "候选A", "days_watched": 1, "watch_id": "W-1"},
+        {"symbol": "300002", "name": "候选B", "days_watched": 1, "watch_id": "W-2"},
+        {"symbol": "300003", "name": "超期C", "days_watched": 6, "watch_id": "W-3"},
+    ]
+
+    metrics_by_sym = {
+        "300001": {
+            "valid": True, "price": 20.0, "open": 19.5, "high": 20.1, "low": 19.0,
+            "prev_close": 19.2, "day_range": 1.1, "close_pos": 0.90,
+            "amplitude": 0.055, "turnover": 5e8, "change_pct": 4.17,
+            "ret5": 0.08, "ret20": 0.15, "drawdown": 0.01, "avg_to_20": 4e8,
+            "trade_date": _T.date().isoformat(),
+        },
+        "300002": {
+            "valid": True, "price": 30.0, "open": 29.0, "high": 30.1, "low": 28.5,
+            "prev_close": 28.0, "day_range": 1.6, "close_pos": 0.95,
+            "amplitude": 0.06, "turnover": 8e8, "change_pct": 7.14,
+            "ret5": 0.12, "ret20": 0.25, "drawdown": 0.01, "avg_to_20": 5e8,
+            "trade_date": _T.date().isoformat(),
+        },
+    }
+
+    def _mock_cand_load(self, ctx, params):
+        cand = dict(ctx.data.get("candidate") or {})
+        sym = cand["symbol"]
+        m = metrics_by_sym[sym]
+        return {
+            "candidate": cand,
+            "quote": {"price": m["price"], "is_mock": False, "symbol": sym},
+            "intraday_metrics": m,
+        }
+
+    monkeypatch.setattr(CandidateIntradayStep, "load", _mock_cand_load)
+
+    run_binding(
+        cfg, binding, ev, pol, brain,
+        preloaded={"candidates": candidates_in, "regime_snapshot": {"regime": "neutral", "up_ratio": 0.6}},
+        now=_T.replace(hour=14, minute=35),
+    )
+
+    # 1. wheel_candidates 表：超期 300003 被剔除，保留 300001 与 300002
+    saved_cands = brain.store.list_wheel_candidates("ev-1435", "ultra_short_momentum_v1")
+    assert [c["symbol"] for c in saved_cands] == ["300001", "300002"]
+
+    # 2. EntryGateway 排序裁决：300002 得分更高 → accepted，300001 → rejected:ranked_out_of_top_n
+    rows = {
+        r["subject_key"]: dict(r)
+        for r in brain.store._conn().execute(
+            "SELECT subject_key, action, gateway, executed FROM wheel_decisions WHERE event_id='ev-1435'"
+        ).fetchall()
+    }
+    assert rows["300002"]["action"] == "BUY" and rows["300002"]["gateway"] == "accepted"
+    assert rows["300001"]["action"] == "BUY" and rows["300001"]["gateway"] == "rejected:ranked_out_of_top_n"
+
+
+def test_phase3_order_fill_at_open_gap_guard(tmp_path):
+    """Phase 3.2：order_fill_at_open 校验今日行情、高开 >3%、低开破止损、涨跌停封死。"""
+    from src.wheel.config import get_config
+    from src.wheel.persona import persona_policy
+    from src.wheel.runner import run_wheel
+
+    brain = _MockBrain(tmp_path)
+    cfg = get_config(reload=True)
+    wheel = cfg.wheels["order_fill_at_open"]
+    pol = persona_policy(
+        cfg, "short_term_hot_rotation_v1",
+        cfg.binding_for("short_term_hot_rotation_v1", "clock.next_open"),
+    )
+    sig = {
+        "signal_id": "SIG-OPEN-1",
+        "symbol": "002134",
+        "name": "天津普林",
+        "entry_price": 24.0,
+        "stop_loss": 22.08,
+        "target_price": 26.4,
+        "position_pct": 0.04,
+        "strategy": "主力吸筹",
+        "strategy_id": "institutional_accumulation",
+    }
+
+    def _eval_open(idx: int, quote: dict):
+        ev = WheelEvent(
+            event_id=f"ev-open-{idx}", type="clock.next_open",
+            due_at=_T.replace(hour=9, minute=32),
+            persona_id="short_term_hot_rotation_v1",
+            subject={"signal_id": "SIG-OPEN-1", "symbol": "002134"},
+            source="test",
+        )
+        res = run_wheel(
+            wheel, ev, pol, brain, mode="shadow",
+            preloaded={"signal": sig, "quote": quote},
+            now=_T.replace(hour=9, minute=32),
+        )
+        return res.decisions[0]
+
+    # 1) 昨日残留行情 → veto.quote_fresh_today
+    d_stale = _eval_open(1, {"price": 24.0, "is_mock": False, "trade_date": "2026-10-09"})
+    assert d_stale.action == "HOLD" and d_stale.decided_by == "veto.quote_fresh_today"
+
+    # 2) 高开 +5% (> +3%) → veto.open_gap_guard
+    d_high = _eval_open(2, {"price": 25.20, "is_mock": False, "trade_date": "2026-10-12"})
+    assert d_high.action == "HOLD" and d_high.decided_by == "veto.open_gap_guard"
+
+    # 3) 大幅低开跌破止损 22.08 → veto.open_gap_guard
+    d_low = _eval_open(3, {"price": 21.90, "is_mock": False, "trade_date": "2026-10-12"})
+    assert d_low.action == "HOLD" and d_low.decided_by == "veto.open_gap_guard"
+
+    # 4) 正常开盘 +1% (24.24) → BUY 提议通过
+    d_ok = _eval_open(4, {"price": 24.24, "is_mock": False, "trade_date": "2026-10-12"})
+    assert d_ok.action == "BUY" and d_ok.decided_by == "rule.fill_at_open"
+
+
+def test_phase3_pending_trigger_and_persona_profile(tmp_path):
+    """Phase 3.3 & 3.6：pending_trigger 条件单触发 + PersonaProfile as_of 记忆视图。"""
+    from src.wheel.config import get_config
+    from src.wheel.persona import assemble_persona_profile, persona_policy
+    from src.wheel.runner import run_wheel
+
+    brain = _MockBrain(tmp_path)
+    cfg = get_config(reload=True)
+    wheel = cfg.wheels["pending_trigger"]
+    pol = persona_policy(
+        cfg, "short_term_hot_rotation_v1",
+        cfg.binding_for("short_term_hot_rotation_v1", "clock.pending_5m"),
+    )
+    sig = {
+        "signal_id": "SIG-PB-1",
+        "symbol": "301591",
+        "entry_condition": "pullback",
+        "entry_price": 44.50,
+        "stop_loss": 40.94,
+        "target_price": 50.0,
+        "position_pct": 0.04,
+        "persona_id": "short_term_hot_rotation_v1",
+    }
+    ev = WheelEvent(
+        event_id="ev-pb-1", type="clock.pending_5m", due_at=_T,
+        persona_id="short_term_hot_rotation_v1",
+        subject={"signal_id": "SIG-PB-1", "symbol": "301591"},
+        source="test",
+    )
+    res = run_wheel(
+        wheel, ev, pol, brain, mode="shadow",
+        preloaded={"signal": sig, "quote": {"price": 44.49, "is_mock": False, "symbol": "301591"}},
+        now=_T,
+    )
+    assert res.decisions[0].action == "BUY"
+
+    # PersonaProfile 装配与 as_of 截取校验
+    _open(brain, {
+        **_ULTRA_POS, "position_id": "POS-PAST", "persona_id": "duan_yongping_v1",
+        "entry_date": "2026-10-01",
+    })
+    brain.store._conn().execute(
+        "UPDATE positions SET created_at='2026-10-01T10:00:00' WHERE position_id='POS-PAST'"
+    )
+    _open(brain, {
+        **_ULTRA_POS, "position_id": "POS-FUTURE", "symbol": "600519",
+        "persona_id": "duan_yongping_v1", "entry_date": "2026-10-20",
+    })
+    brain.store._conn().execute(
+        "UPDATE positions SET created_at='2026-10-20T10:00:00' WHERE position_id='POS-FUTURE'"
+    )
+    brain.store._conn().commit()
+
+    profile = assemble_persona_profile(
+        cfg, "duan_yongping_v1", None, brain, as_of=datetime(2026, 10, 12, 15, 0),
+    )
+    assert profile.policy.kind == "value"
+    hist_ids = [p["position_id"] for p in profile.memory.trade_history(days=60)]
+    assert "POS-PAST" in hist_ids
+    assert "POS-FUTURE" not in hist_ids
+

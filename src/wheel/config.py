@@ -73,9 +73,9 @@ class WheelConfig:
         )
 
 
-# 转盘输出去向：exit_proposal → ExitGateway；urgent_review → Dispatcher 逐持仓展开；
-# candidates → 入场漏斗（Phase 3）。拼错会静默跳过网关，必须启动时拒绝
-_VALID_OUTPUTS = frozenset({"exit_proposal", "urgent_review", "candidates"})
+# 转盘输出去向：exit_proposal → ExitGateway；entry_proposal → EntryGateway；
+# urgent_review → Dispatcher 逐持仓展开；candidates → 入场漏斗（Phase 3）。拼错会静默跳过网关，必须启动时拒绝
+_VALID_OUTPUTS = frozenset({"exit_proposal", "entry_proposal", "urgent_review", "candidates"})
 
 
 def _require(cond: bool, msg: str) -> None:

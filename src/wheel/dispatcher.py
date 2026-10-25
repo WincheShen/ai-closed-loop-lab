@@ -31,9 +31,38 @@ RECOVER_AFTER_S = 300        # running 超过该时长视为僵尸，回退 due
 
 _MORNING = (time(9, 30), time(11, 30))
 _AFTERNOON = (time(13, 0), time(15, 0))
-_HANDLED_PREFIXES = ("followup.", "market.", "account.", "position.")
+_HANDLED_PREFIXES = ("followup.", "market.", "account.", "position.", "clock.next_open")
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wheel-dispatch")
+
+
+def emit_clock_event(
+    store,
+    event_type: str,
+    now: datetime | None = None,
+    *,
+    persona_id: str | None = None,
+    subject: dict | None = None,
+    payload: dict | None = None,
+    source: str = "scheduler",
+    status: str = "due",
+) -> str:
+    """将 clock.* 时钟事件写入 wheel_events（Phase 2.2，按分钟+对象幂等）。"""
+    now = now or datetime.now()
+    subj = dict(subject or {})
+    subj_key = subj.get("position_id") or subj.get("signal_id") or subj.get("symbol") or "*"
+    event_id = f"{event_type}|{persona_id or '*'}|{subj_key}|{now:%Y%m%d%H%M}"
+    store.insert_wheel_event({
+        "event_id": event_id,
+        "type": event_type,
+        "persona_id": persona_id,
+        "subject": subj,
+        "payload": dict(payload or {}),
+        "source": source,
+        "due_at": now.isoformat(),
+        "status": status,
+    })
+    return event_id
 
 
 def _in_session(t: time) -> bool:
@@ -148,11 +177,12 @@ def _position_open(store, subject: dict) -> bool:
 
 
 def _run_bound(cfg, binding, event, persona_pid, brain, now, subject=None) -> None:
+    from dataclasses import replace as dc_replace
     from src.wheel.persona import persona_policy
     from src.wheel.runner import run_binding
 
     ev = event if subject is None else WheelEvent(
-        event_id=f"{event.event_id}:{subject.get('position_id')}",
+        event_id=f"{event.event_id}:{subject.get('position_id') or subject.get('signal_id') or subject.get('symbol')}",
         type=event.type, due_at=event.due_at, persona_id=persona_pid,
         subject=subject, payload=event.payload, source=event.source,
         parent_event_id=event.event_id,
@@ -160,7 +190,21 @@ def _run_bound(cfg, binding, event, persona_pid, brain, now, subject=None) -> No
         expires_at=event.expires_at,
     )
     persona = persona_policy(cfg, persona_pid, binding)
-    run_binding(cfg, binding, ev, persona, brain, now=now)
+    results = run_binding(cfg, binding, ev, persona, brain, now=now)
+
+    # Phase 2.3：live 模式下 urgent_review 产出 REVIEW 时，映射到 llm_position_review 实际复审入口
+    if (
+        binding.mode == "live"
+        and binding.wheel
+        and cfg.wheels[binding.wheel].output == "urgent_review"
+        and "llm_position_review" in cfg.wheels
+    ):
+        for r in results:
+            if any(d.action == "REVIEW" for d in r.decisions):
+                review_binding = dc_replace(binding, wheel="llm_position_review", chain=())
+                review_ev = dc_replace(ev, event_id=f"{ev.event_id}:llm_review")
+                run_binding(cfg, review_binding, review_ev, persona, brain, now=now)
+                break
 
 
 def _timeout_for_bindings(cfg, bindings: list[tuple[str, Any]]) -> int:

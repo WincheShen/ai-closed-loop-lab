@@ -62,12 +62,14 @@ def run_exit_shadow(
     source: str,
     extra: dict[str, Any] | None = None,
     now: datetime | None = None,
+    mode_override: str | None = None,
 ) -> Decision | None:
-    """对一个持仓跑出场转盘（shadow/live 取决于绑定 mode）。
+    """对一个持仓跑出场转盘（shadow/live 取决于绑定 mode，或由 mode_override 覆盖）。
 
     返回最终 Decision；绑定缺失/关闭或任何异常 → None（不影响旧路径）。
     """
     try:
+        from dataclasses import replace as dc_replace
         from src.wheel.config import get_config
         from src.wheel.persona import persona_policy
         from src.wheel.runner import run_binding
@@ -78,6 +80,8 @@ def run_exit_shadow(
         binding = cfg.binding_for(persona_id, event_type)
         if not binding or binding.mode == "off":
             return None
+        if mode_override in ("shadow", "live"):
+            binding = dc_replace(binding, mode=mode_override)
 
         event = _make_event(event_type, persona_id, position, source, now)
         persona = persona_policy(cfg, persona_id, binding)
@@ -121,6 +125,10 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
     store = brain.store
 
     all_decisions = store.list_wheel_decisions(day=day, mode="shadow")
+    live_decisions = store.list_wheel_decisions(day=day, mode="live")
+    live_pids = {
+        d["subject_key"] for d in live_decisions if d["wheel"] in GATE_WHEELS
+    }
     # 门槛统计只含 Phase 1 出场转盘；其余转盘的影子决策单独计数展示
     decisions = [d for d in all_decisions if d["wheel"] in GATE_WHEELS]
     other_wheels: dict[str, int] = {}
@@ -218,9 +226,9 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
             looser.append(item)
 
     # 覆盖缺口：旧路径卖了、但转盘当天没评估过该持仓 — 单独列出，
-    # 不计入更严/更松，但必须逐条解释后才能切 live
+    # 不计入更严/更松，但必须逐条解释后才能切 live（live 模式下已由转盘自身执行的除外）
     for pid, leg in legacy.items():
-        if pid in wheel_by_pos or leg.get("action") not in _SELL_ACTIONS:
+        if pid in wheel_by_pos or pid in live_pids or leg.get("action") not in _SELL_ACTIONS:
             continue
         uncovered.append({
             "position_id": pid,
@@ -230,6 +238,7 @@ def daily_shadow_report(brain, day: str | None = None) -> dict:
     report = {
         "day": day,
         "wheel_decisions": len(decisions),
+        "live_decisions": len(live_decisions),
         "agree": len(agree),
         "wheel_stricter": len(stricter),
         "wheel_looser": len(looser),

@@ -805,12 +805,14 @@ def test_gateway_records_outcome_and_shadow_dedup(tmp_path):
     d1 = run_exit_shadow(
         brain, _002487_POS, price=43.0, is_mock=False,
         event_type="clock.intraday_5m", source="t", now=t0,
+        mode_override="shadow",
     )
     assert d1.action == "EXIT"
     # 同一分钟内第二个卖出决策 → 网关去重拒绝
     run_exit_shadow(
         brain, _002487_POS, price=43.0, is_mock=False,
         event_type="clock.intraday_5m", source="t", now=t0 + timedelta(seconds=30),
+        mode_override="shadow",
     )
     conn = brain.store._conn()
     rows = conn.execute(

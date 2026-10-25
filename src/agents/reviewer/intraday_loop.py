@@ -218,6 +218,52 @@ async def _check_pending_signals(
         if current_price <= 0:
             continue
 
+        # Phase 3.3：pending_trigger 条件单转盘并行评估（shadow 留痕 / live 接管）
+        try:
+            from src.wheel.config import get_config
+            from src.wheel.persona import persona_policy
+            from src.wheel.protocol import WheelEvent
+            from src.wheel.runner import run_binding
+
+            sig_persona = sig.get("persona_id") or "short_term_hot_rotation_v1"
+            cfg = get_config()
+            binding = cfg.binding_for(sig_persona, "clock.pending_5m")
+            if binding and binding.mode != "off":
+                now_dt = datetime.now()
+                ev = WheelEvent(
+                    event_id=f"wev-clock.pending_5m-{now_dt:%Y%m%d-%H%M%S}-{sig['signal_id']}",
+                    type="clock.pending_5m",
+                    due_at=now_dt,
+                    persona_id=sig_persona,
+                    subject={"signal_id": sig["signal_id"], "symbol": symbol},
+                    source="pending_signals",
+                )
+                pol = persona_policy(cfg, sig_persona, binding)
+                w_results = run_binding(
+                    cfg, binding, ev, pol, brain,
+                    preloaded={
+                        "signal": sig,
+                        "quote": {"price": float(current_price), "is_mock": False, "symbol": symbol},
+                    },
+                    now=now_dt,
+                )
+                if binding.mode == "live" and any(r.decisions for r in w_results):
+                    for r in w_results:
+                        for d in r.decisions:
+                            if d.action == "BUY":
+                                triggered_results.append({
+                                    "symbol": symbol,
+                                    "action": "BUY",
+                                    "reason": d.reason,
+                                    "trade_price": current_price,
+                                    "signal_id": sig["signal_id"],
+                                    "entry_condition": condition,
+                                    "executed_via": "wheel",
+                                })
+                    continue
+        except Exception:  # noqa: BLE001
+            logger.debug("pending_trigger 转盘评估异常 %s", symbol, exc_info=True)
+
         # 价格合理性校验 — 防止数据源返回异常价格导致误触发
         if entry_price > 0:
             price_deviation = abs(current_price - entry_price) / entry_price

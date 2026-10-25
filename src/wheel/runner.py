@@ -270,6 +270,7 @@ def run_wheel(
     mode: str = "shadow",
     preloaded: dict[str, Any] | None = None,
     now: datetime | None = None,
+    defer_entry_gateway: bool = False,
 ) -> WheelResult:
     """运行一个转盘：构建 Context → 执行 → 持久化决策与轨迹。"""
     ctx = Context(
@@ -284,6 +285,18 @@ def run_wheel(
     )
 
     subject = _subject_key(ctx)
+    if wheel.kind == "funnel" and wheel.output == "candidates" and brain is not None:
+        try:
+            brain.store.save_wheel_candidates(
+                event.event_id,
+                wheel.name,
+                ctx.persona.persona_id,
+                result.candidates,
+                now=ctx.now,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("wheel_candidates 落库失败 %s", wheel.name, exc_info=True)
+
     result.decisions = [
         replace(d, decision_id=_record_decision(
             brain, event, d, subject, mode, ctx.persona.persona_id, now=ctx.now,
@@ -297,6 +310,19 @@ def run_wheel(
         d = result.decisions[0]
         gw = ExitGateway(brain).submit(d, ctx, decision_id=d.decision_id)
         if d.action in ("EXIT", "REDUCE") and d.decision_id:
+            reason = str(gw.get("reason", ""))
+            outcome = (
+                "executed" if gw.get("executed")
+                else f"error:{reason}" if reason in ("execute_error", "execute_timeout")
+                else "accepted" if gw.get("accepted")
+                else f"rejected:{reason}"
+            )
+            _record_gateway(brain, d.decision_id, outcome)
+    elif wheel.output == "entry_proposal" and result.decisions and not defer_entry_gateway:
+        from src.wheel.entry_gateway import EntryGateway
+        d = result.decisions[0]
+        gw = EntryGateway(brain).submit(d, ctx, decision_id=d.decision_id)
+        if d.action in ("BUY", "ADD") and d.decision_id:
             reason = str(gw.get("reason", ""))
             outcome = (
                 "executed" if gw.get("executed")
@@ -401,15 +427,72 @@ def run_binding(
     preloaded: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> list[WheelResult]:
-    """按绑定执行：wheel 或 chain（同事件内多个转盘依次跑，仍经数据库接力）。"""
+    """按绑定执行：wheel 或 chain（同事件内多个转盘依次跑，经数据库 wheel_candidates 接力）。"""
     names = binding.chain or (binding.wheel,)
-    results = []
+    results: list[WheelResult] = []
+    last_funnel_name: str | None = None
+    now_dt = now or datetime.now()
+
     for wname in names:
         wheel = cfg.wheels[wname]
+        if wheel.kind == "funnel":
+            res = run_wheel(
+                wheel, event, persona, brain,
+                mode=binding.mode, preloaded=preloaded, now=now_dt,
+            )
+            results.append(res)
+            last_funnel_name = wheel.name
+            continue
+
+        # decision 转盘：若前序是 funnel，从数据库 wheel_candidates 读取候选并逐个评估，
+        # 最后统一送入 EntryGateway 做跨标的 Top-N 排序与组合级风控裁决（§6.3）
+        if last_funnel_name is not None and brain is not None:
+            candidates = brain.store.list_wheel_candidates(
+                event.event_id, persona.persona_id, wheel=last_funnel_name,
+            )
+            batch_decisions: list[Decision] = []
+            for cand in candidates:
+                sym = str(cand.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                cand_ev = replace(
+                    event,
+                    subject={**(event.subject or {}), "symbol": sym},
+                )
+                merged_preload = dict(preloaded or {})
+                merged_preload["candidate"] = cand
+                res = run_wheel(
+                    wheel, cand_ev, persona, brain,
+                    mode=binding.mode, preloaded=merged_preload, now=now_dt,
+                    defer_entry_gateway=(wheel.output == "entry_proposal"),
+                )
+                results.append(res)
+                batch_decisions.extend(res.decisions)
+
+            if wheel.output == "entry_proposal" and batch_decisions:
+                from src.wheel.entry_gateway import EntryGateway
+                batch_ctx = Context(
+                    event=event, persona=persona, now=now_dt,
+                    brain=brain, data=dict(preloaded or {}), mode=binding.mode,
+                )
+                outcomes = EntryGateway(brain).submit_batch(batch_decisions, batch_ctx)
+                for d in batch_decisions:
+                    if d.action in ("BUY", "ADD") and d.decision_id:
+                        gw = outcomes.get(d.decision_id) or outcomes.get(d.subject_key) or {}
+                        reason = str(gw.get("reason", ""))
+                        outcome = (
+                            "executed" if gw.get("executed")
+                            else f"error:{reason}" if reason in ("execute_error", "execute_timeout")
+                            else "accepted" if gw.get("accepted")
+                            else f"rejected:{reason}"
+                        )
+                        _record_gateway(brain, d.decision_id, outcome)
+            continue
+
         results.append(
             run_wheel(
                 wheel, event, persona, brain,
-                mode=binding.mode, preloaded=preloaded, now=now,
+                mode=binding.mode, preloaded=preloaded, now=now_dt,
             ),
         )
     return results

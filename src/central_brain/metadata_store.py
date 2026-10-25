@@ -491,6 +491,26 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             "ALTER TABLE wheel_decisions ADD COLUMN decided_by TEXT",
             "ALTER TABLE wheel_decisions ADD COLUMN gateway TEXT",
         ]),
+        ("006_wheel_phase3_candidates_and_persona_isolation", [
+            """CREATE TABLE IF NOT EXISTS wheel_candidates (
+                event_id TEXT NOT NULL,
+                wheel TEXT NOT NULL,
+                persona_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                rank INTEGER NOT NULL DEFAULT 0,
+                score REAL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (event_id, wheel, persona_id, symbol)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_wheel_candidates_event ON wheel_candidates(event_id, persona_id, rank)",
+            "ALTER TABLE watchlist ADD COLUMN persona_id TEXT",
+            "ALTER TABLE trade_attributions ADD COLUMN persona_id TEXT",
+            "ALTER TABLE lessons ADD COLUMN persona_id TEXT",
+            "UPDATE watchlist SET persona_id = 'ultra_short_momentum_v1' WHERE persona_id IS NULL AND strategy_id = 'ultra_short_momentum'",
+            "UPDATE trade_attributions SET persona_id = (SELECT p.persona_id FROM positions p WHERE p.position_id = trade_attributions.position_id) WHERE persona_id IS NULL",
+            "UPDATE lessons SET persona_id = (SELECT ta.persona_id FROM trade_attributions ta WHERE ta.attribution_id = lessons.attribution_id) WHERE persona_id IS NULL",
+        ]),
         # --- 未来迁移追加到这里 ---
     ]
 
@@ -1904,6 +1924,85 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         sql += " ORDER BY created_at DESC LIMIT 1"
         row = conn.execute(sql, params).fetchone()
         return dict(row) if row else None
+
+    def save_wheel_candidates(
+        self,
+        event_id: str,
+        wheel: str,
+        persona_id: str,
+        candidates: list[dict],
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """持久化 funnel 转盘筛出的候选集（Phase 3 链式数据库接力，按 (event_id, wheel, persona_id, symbol) 幂等）。"""
+        conn = self._conn()
+        ts = (now or datetime.now()).isoformat()
+        count = 0
+        for idx, cand in enumerate(candidates):
+            symbol = str(cand.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            rank = int(cand.get("rank", idx + 1))
+            score = cand.get("score")
+            score_val = float(score) if score is not None else None
+            conn.execute(
+                """INSERT OR REPLACE INTO wheel_candidates
+                (event_id, wheel, persona_id, symbol, rank, score, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    wheel,
+                    persona_id,
+                    symbol,
+                    rank,
+                    score_val,
+                    json.dumps(cand, ensure_ascii=False, default=str),
+                    ts,
+                ),
+            )
+            count += 1
+        self._auto_commit()
+        return count
+
+    def list_wheel_candidates(
+        self,
+        event_id: str,
+        persona_id: str,
+        wheel: str | None = None,
+    ) -> list[dict]:
+        """按 rank 升序读取同一事件下 funnel 转盘落库的候选集。"""
+        conn = self._conn()
+        if wheel:
+            rows = conn.execute(
+                """SELECT * FROM wheel_candidates
+                WHERE event_id = ? AND persona_id = ? AND wheel = ?
+                ORDER BY rank ASC, score DESC, symbol ASC""",
+                (event_id, persona_id, wheel),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM wheel_candidates
+                WHERE event_id = ? AND persona_id = ?
+                ORDER BY rank ASC, score DESC, symbol ASC""",
+                (event_id, persona_id),
+            ).fetchall()
+        result: list[dict] = []
+        for r in rows:
+            item = dict(r)
+            try:
+                payload = json.loads(item.get("payload_json") or "{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            if isinstance(payload, dict):
+                merged = dict(payload)
+                merged.setdefault("symbol", item["symbol"])
+                merged["rank"] = item["rank"]
+                if item.get("score") is not None:
+                    merged["score"] = item["score"]
+                result.append(merged)
+            else:
+                result.append(item)
+        return result
 
 
 # 别名以保持向后兼容

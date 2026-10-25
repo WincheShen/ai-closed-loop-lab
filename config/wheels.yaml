@@ -74,33 +74,77 @@ wheels:
     resolve: priority
     output:  urgent_review
 
+  # ── Phase 3：入场侧转盘 ────────────────────────────────────
+  # 3.1 隔夜客 14:35 尾盘狙击漏斗（写 wheel_candidates）+ 单票确认（送 EntryGateway）
+  market_screen_ultra:
+    kind: funnel
+    data:    [watchlist_ultra]
+    steps:   [screen.cold_and_weather_gate, screen.watchlist_ttl]
+    output:  candidates
+
+  entry_confirm_ultra:
+    kind: decision
+    data:    [candidate_intraday]
+    veto:    [floor.trading_day, veto.cold_period, floor.real_quote_required]
+    propose: [detector.ultra_tail_momentum]
+    resolve: priority
+    modify:  []
+    output:  entry_proposal
+
+  # 3.2 次日开盘价成交（09:31–09:35）：校验今日行情 + 跳空保护（高开>3%/破止损/涨跌停放弃）
+  order_fill_at_open:
+    kind: decision
+    data:    [pending_signal, quote_realtime]
+    veto:    [floor.trading_day, veto.quote_fresh_today, veto.open_gap_guard]
+    propose: [rule.fill_at_open]
+    resolve: priority
+    modify:  [mod.portfolio_position_cap]
+    output:  entry_proposal
+
+  # 3.3 盘中条件单触发（breakout / pullback）
+  pending_trigger:
+    kind: decision
+    data:    [pending_signal, quote_realtime]
+    veto:    [floor.trading_day, floor.real_quote_required, veto.signal_price_anomaly, veto.stock_cooldown_and_suspend]
+    propose: [rule.pending_condition_met]
+    resolve: priority
+    modify:  [mod.portfolio_position_cap]
+    output:  entry_proposal
+
 personas:
   short_term_hot_rotation_v1:
     kind: short
     bindings:
-      clock.intraday_5m:  { wheel: exit_confirm, mode: shadow }
-      clock.intraday_30m: { wheel: llm_position_review, mode: shadow }
+      clock.intraday_5m:  { wheel: exit_confirm, mode: live }
+      clock.intraday_30m: { wheel: llm_position_review, mode: live }
       market.regime_drift: { wheel: urgent_review, mode: shadow }
+      clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
+      clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
 
   ultra_short_momentum_v1:
     kind: ultra
     bindings:
-      clock.intraday_5m:  { wheel: exit_confirm_ultra, mode: shadow }
+      clock.intraday_5m:  { wheel: exit_confirm_ultra, mode: live }
       clock.0935:         { wheel: morning_watch, mode: shadow }
       followup.morning_watch: { wheel: morning_watch, mode: shadow }
-      clock.1430:         { wheel: overnight_force_close, mode: shadow }
+      clock.1430:         { wheel: overnight_force_close, mode: live }
+      clock.1435:         { chain: [market_screen_ultra, entry_confirm_ultra], mode: shadow }
       # 无 clock.intraday_30m 与 market.regime_drift 绑定 — LLM 复审对隔夜客在结构上不存在
 
   duan_yongping_v1:
     kind: value
     bindings:
-      clock.intraday_5m:  { wheel: exit_confirm, mode: shadow }
-      clock.intraday_30m: { wheel: llm_position_review, mode: shadow }
+      clock.intraday_5m:  { wheel: exit_confirm, mode: live }
+      clock.intraday_30m: { wheel: llm_position_review, mode: live }
       market.regime_drift: { wheel: urgent_review, mode: shadow }
+      clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
+      clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
 
   warren_buffett_v1:
     kind: value
     bindings:
-      clock.intraday_5m:  { wheel: exit_confirm, mode: shadow }
-      clock.intraday_30m: { wheel: llm_position_review, mode: shadow }
+      clock.intraday_5m:  { wheel: exit_confirm, mode: live }
+      clock.intraday_30m: { wheel: llm_position_review, mode: live }
       market.regime_drift: { wheel: urgent_review, mode: shadow }
+      clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
+      clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
