@@ -465,7 +465,16 @@ class ExplorerScanner:
             fc = FundamentalClient()
             fc.enrich_quotes(pool_stocks)
             enriched = sum(1 for s in pool_stocks if s.roe is not None)
-            self.logger.info("基本面填充完成: %d/%d 有 ROE 数据", enriched, len(pool_stocks))
+            has_val = sum(1 for s in pool_stocks if s.pe_ttm is not None and s.pb is not None)
+            self.logger.info(
+                "基本面填充完成: %d/%d 有 ROE 数据, %d/%d 有 PE/PB 估值数据",
+                enriched, len(pool_stocks), has_val, len(pool_stocks),
+            )
+            if has_val > 0:
+                try:
+                    vp._save_to_cache(pool_stocks)
+                except Exception:
+                    pass
         except Exception:
             self.logger.warning("基本面数据填充失败 (不影响主流程)", exc_info=True)
 

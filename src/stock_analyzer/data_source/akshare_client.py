@@ -900,14 +900,23 @@ class AkshareClient:
                 high_p = float(item.get("high", 0) or 0) or price
                 low_p = float(item.get("low", 0) or 0) or price
                 turnover_rate = float(item.get("turnover_rate", 0) or 0)
+                turnover_val = float(item.get("amount", item.get("turnover", 0)) or 0)
+                pe_ttm = _safe_float(item.get("pe_ttm", item.get("pe")))
+                pb = _safe_float(item.get("pb"))
+                market_cap_yi = _safe_float(item.get("market_cap_yi"))
+                if market_cap_yi is None and turnover_val > 0 and turnover_rate > 0:
+                    market_cap_yi = round((turnover_val / (turnover_rate / 100.0)) / 1e8, 2)
                 stocks.append(StockQuote(
                     symbol=sym,
                     name=str(item.get("name", "")),
                     price=price,
                     change_pct=change_pct,
                     volume=float(item.get("volume", 0) or 0),
-                    turnover=float(item.get("amount", item.get("turnover", 0)) or 0),
+                    turnover=turnover_val,
                     turnover_rate=turnover_rate,
+                    pe_ttm=pe_ttm,
+                    pb=pb,
+                    market_cap_yi=market_cap_yi,
                     open=open_p,
                     high=high_p,
                     low=low_p,

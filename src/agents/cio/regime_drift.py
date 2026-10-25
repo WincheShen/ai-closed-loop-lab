@@ -205,6 +205,7 @@ class RegimeDriftDetector:
         # 向恶化方向的重度漂移: 触发紧急复审
         worse_direction = (
             (from_regime in ("bull", "rebound", "neutral") and to_regime in ("bear", "panic"))
+            or (from_regime == "bear" and to_regime == "panic")
         )
         if severity >= 2 and worse_direction:
             self._trigger_emergency_review(to_regime)

@@ -528,3 +528,166 @@ async def test_execute_tail_hunt_rejects_weak_momentum_002463(tmp_path, monkeypa
     assert res["action"] == "SKIP"
     assert len(brain.store.list_open_positions(persona_id="ultra_short_momentum_v1")) == 0
 
+
+def test_check_cold_period_ignores_small_pct_loss_over_1000_yuan(tmp_path):
+    """复刻 2026-10-20 002463 场景：亏损 -1.97% (> -2.5%) 但金额 -1115 元，不应触发止损冷静期。"""
+    brain = _MockBrain(tmp_path)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    brain.store.open_position(
+        position_id="POS-002463",
+        symbol="002463",
+        entry_price=112.95,
+        qty=500,
+        entry_date=yesterday,
+        persona_id="ultra_short_momentum_v1",
+    )
+    brain.store.close_position("POS-002463", close_price=110.72, realized_pnl=-1115.0)
+
+    is_cold, _ = check_cold_period(brain, "ultra_short_momentum_v1")
+    assert is_cold is False
+
+
+def test_risk_decision_syncs_signal_status_and_blocks_pending(tmp_path):
+    """回归：RiskGovernor 拒绝或降仓时同步更新 trade_signals，防止被拒条件单穿透到 _check_pending_signals。"""
+    brain = _MockBrain(tmp_path)
+    now_iso = datetime.now().isoformat()
+
+    brain.store.save_trade_signal("sess-1", {
+        "signal_id": "SIG-REJECT-1",
+        "symbol": "600887",
+        "action": "buy",
+        "entry_price": 27.0,
+        "target_price": 41.6,
+        "stop_loss": 22.2,
+        "position_pct": 0.12,
+        "strategy": "价值投资",
+        "rationale": "test",
+        "timestamp": now_iso,
+        "entry_condition": "pullback",
+        "current_price": 27.76,
+        "persona_id": "duan_yongping_v1",
+    })
+    brain.store.save_trade_signal("sess-1", {
+        "signal_id": "SIG-REDUCE-1",
+        "symbol": "301591",
+        "action": "buy",
+        "entry_price": 44.5,
+        "target_price": 50.0,
+        "stop_loss": 40.94,
+        "position_pct": 0.08,
+        "strategy": "主力吸筹",
+        "rationale": "test",
+        "timestamp": now_iso,
+        "entry_condition": "pullback",
+        "current_price": 45.68,
+        "persona_id": "short_term_hot_rotation_v1",
+    })
+
+    brain.store.save_risk_decision("sess-1", {
+        "signal_id": "SIG-REJECT-1",
+        "symbol": "600887",
+        "decision": "reject",
+        "original_position_pct": 0.12,
+        "approved_position_pct": 0.0,
+        "reason": "总仓位已达 40% 上限",
+        "risk_flags": ["total_position_exceeded"],
+        "persona_id": "duan_yongping_v1",
+    })
+    brain.store.save_risk_decision("sess-1", {
+        "signal_id": "SIG-REDUCE-1",
+        "symbol": "301591",
+        "decision": "reduce",
+        "original_position_pct": 0.08,
+        "approved_position_pct": 0.04,
+        "reason": "仓位减半",
+        "risk_flags": ["weak_regime_haircut"],
+        "persona_id": "short_term_hot_rotation_v1",
+    })
+
+    pending = brain.store.list_pending_signals()
+    pending_ids = [s["signal_id"] for s in pending]
+    assert "SIG-REJECT-1" not in pending_ids
+    assert "SIG-REDUCE-1" in pending_ids
+    reduced_sig = next(s for s in pending if s["signal_id"] == "SIG-REDUCE-1")
+    assert reduced_sig["position_pct"] == pytest.approx(0.04)
+    assert reduced_sig["approved_position_pct"] == pytest.approx(0.04)
+    assert reduced_sig["risk_decision"] == "reduce"
+
+
+def test_fundamental_client_enriches_pe_pb_fcf_and_mcap(tmp_path, monkeypatch):
+    """验证 FundamentalClient 能从财务指标推算并补齐 PE(TTM)、PB、FCF 收益率与市值。"""
+    import pandas as pd
+    import src.stock_analyzer.data_source.fundamental_client as fc_mod
+    from src.stock_analyzer.data_source.akshare_client import StockQuote
+
+    monkeypatch.setattr(fc_mod, "_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(fc_mod, "_CACHE_DB", tmp_path / "fundamentals.db")
+
+    df = pd.DataFrame([
+        {
+            "日期": date(2025, 6, 30),
+            "摊薄每股收益(元)": 37.40,
+            "每股净资产_调整前(元)": 198.33,
+            "每股经营性现金流(元)": 10.44,
+            "加权净资产收益率(%)": 17.89,
+            "资产负债率(%)": 14.75,
+            "总资产(元)": 2.92e11,
+        },
+        {
+            "日期": date(2025, 12, 31),
+            "摊薄每股收益(元)": 68.12,
+            "每股净资产_调整前(元)": 202.80,
+            "每股经营性现金流(元)": 49.13,
+            "加权净资产收益率(%)": 32.53,
+            "资产负债率(%)": 16.42,
+            "总资产(元)": 3.04e11,
+        },
+        {
+            "日期": date(2026, 6, 30),
+            "摊薄每股收益(元)": 36.82,
+            "每股净资产_调整前(元)": 209.66,
+            "每股经营性现金流(元)": 56.55,
+            "加权净资产收益率(%)": 16.75,
+            "资产负债率(%)": 15.19,
+            "总资产(元)": 3.09e11,
+        },
+    ])
+
+    client = fc_mod.FundamentalClient()
+    eps_ttm = client._compute_ttm_per_share(df, ("摊薄每股收益(元)",))
+    ocf_ttm = client._compute_ttm_per_share(df, ("每股经营性现金流(元)",))
+    # TTM = 2025年报 + 2026中报 - 2025中报
+    assert eps_ttm == pytest.approx(68.12 + 36.82 - 37.40, rel=1e-3)
+    assert ocf_ttm == pytest.approx(49.13 + 56.55 - 10.44, rel=1e-3)
+
+    monkeypatch.setattr(
+        fc_mod.FundamentalClient,
+        "_fetch_batch",
+        lambda self, symbols: {
+            "600519": fc_mod.FundamentalMetrics(
+                symbol="600519",
+                roe=32.53,
+                debt_to_equity=0.1642,
+                dividend_yield=30.0,
+                report_date="2025-12-31",
+                eps_ttm=eps_ttm,
+                bps=209.66,
+                ocf_per_share=ocf_ttm,
+                total_shares=1.25e9,
+            )
+        },
+    )
+
+    q = StockQuote(
+        symbol="600519", name="贵州茅台", price=1500.0, change_pct=0.5,
+        volume=10000, turnover=1.5e9,
+    )
+    client.enrich_quotes([q])
+    assert q.roe == pytest.approx(32.53)
+    assert q.pe_ttm == pytest.approx(1500.0 / eps_ttm, abs=0.05)
+    assert q.pb == pytest.approx(1500.0 / 209.66, abs=0.05)
+    assert q.fcf_yield == pytest.approx(ocf_ttm / 1500.0 * 100, abs=0.05)
+    assert q.dividend_yield == pytest.approx(2.0, abs=0.05)
+    assert q.market_cap_yi == pytest.approx(18750.0, abs=1.0)
+
+

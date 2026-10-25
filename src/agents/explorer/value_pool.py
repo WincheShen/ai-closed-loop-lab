@@ -44,11 +44,17 @@ class ValueStockPool:
                 roe REAL,
                 debt_to_equity REAL,
                 dividend_yield REAL,
+                fcf_yield REAL,
                 market_cap_yi REAL,
                 refresh_date TEXT NOT NULL,
                 PRIMARY KEY (symbol, refresh_date)
             )
         """)
+        existing_cols = {
+            r[1] for r in conn.execute("PRAGMA table_info(value_pool)").fetchall()
+        }
+        if "fcf_yield" not in existing_cols:
+            conn.execute("ALTER TABLE value_pool ADD COLUMN fcf_yield REAL")
         conn.commit()
         conn.close()
 
@@ -72,7 +78,7 @@ class ValueStockPool:
         conn = sqlite3.connect(str(_POOL_DB))
         rows = conn.execute(
             "SELECT symbol, name, industry, pe_ttm, pb, roe, debt_to_equity, "
-            "dividend_yield, market_cap_yi FROM value_pool "
+            "dividend_yield, market_cap_yi, fcf_yield FROM value_pool "
             "WHERE refresh_date >= ? ORDER BY roe DESC",
             (cutoff,),
         ).fetchall()
@@ -87,7 +93,7 @@ class ValueStockPool:
                 volume=0, turnover=0, industry=r[2] or "",
                 pe_ttm=r[3], pb=r[4], roe=r[5],
                 debt_to_equity=r[6], dividend_yield=r[7],
-                market_cap_yi=r[8],
+                market_cap_yi=r[8], fcf_yield=r[9],
             )
             for r in rows
         ]
@@ -102,10 +108,10 @@ class ValueStockPool:
             conn.execute(
                 "INSERT OR REPLACE INTO value_pool "
                 "(symbol, name, industry, pe_ttm, pb, roe, debt_to_equity, "
-                "dividend_yield, market_cap_yi, refresh_date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "dividend_yield, fcf_yield, market_cap_yi, refresh_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (s.symbol, s.name, s.industry, s.pe_ttm, s.pb,
-                 s.roe, s.debt_to_equity, s.dividend_yield,
+                 s.roe, s.debt_to_equity, s.dividend_yield, s.fcf_yield,
                  s.market_cap_yi, today_str),
             )
         conn.commit()

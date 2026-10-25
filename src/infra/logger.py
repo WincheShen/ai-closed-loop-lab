@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,33 @@ from src.infra.config import cfg
 
 _CONSOLE = Console(stderr=True)
 _logging_initialized = False
+
+
+class _DailyFileHandler(logging.FileHandler):
+    """按自然日自动切换 YYYY-MM-DD.log 的 FileHandler。
+
+    跨过 00:00 后首条日志自动切换到新日期文件并关闭旧文件句柄，
+    避免 09:30–15:35 盘中日志继续写进前一天文件及多天句柄叠加重复写入。
+    """
+
+    def __init__(self, log_dir: Path, date_str: str, encoding: str = "utf-8") -> None:
+        self._log_dir = log_dir
+        self._current_date = date_str
+        file_path = log_dir / f"{date_str}.log"
+        super().__init__(file_path, encoding=encoding)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self._current_date:
+            try:
+                self.close()
+                self._current_date = today
+                new_path = self._log_dir / f"{today}.log"
+                self.baseFilename = str(new_path.resolve())
+                self.stream = self._open()
+            except Exception:  # noqa: BLE001
+                pass
+        super().emit(record)
 
 
 def setup_logging(
@@ -67,9 +94,24 @@ def setup_logging(
         log_dir = Path(cfg().get("data_dir", "data")) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     suffix = f"_{session_id}" if session_id else ""
     file_path = log_dir / f"{today}{suffix}.log"
+    resolved = str(file_path.resolve())
+
+    # 清理跨天残留的旧日级 FileHandler，防止一条日志同时写入多个历史日期文件
+    if not session_id:
+        for h in root.handlers[:]:
+            if (
+                isinstance(h, logging.FileHandler)
+                and not getattr(h, "_session_scoped", False)
+                and getattr(h, "baseFilename", None) != resolved
+            ):
+                root.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     # 避免同一文件路径重复添加 handler
     existing_files = {
@@ -77,9 +119,12 @@ def setup_logging(
         for h in root.handlers
         if isinstance(h, logging.FileHandler) and hasattr(h, "baseFilename")
     }
-    resolved = str(file_path.resolve())
     if resolved not in existing_files:
-        file_handler = logging.FileHandler(file_path, encoding="utf-8")
+        if session_id:
+            file_handler: logging.FileHandler = logging.FileHandler(file_path, encoding="utf-8")
+            file_handler._session_scoped = True  # type: ignore[attr-defined]
+        else:
+            file_handler = _DailyFileHandler(log_dir, today, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_fmt = logging.Formatter(
             fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"

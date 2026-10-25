@@ -1132,6 +1132,8 @@ def _merge_triggered_watchlist(
     result: list[StockCandidate] = []
 
     for item in triggered:
+        if item.get("strategy_id") == "ultra_short_momentum":
+            continue
         symbol = item.get("symbol", "")
         if not symbol or symbol in existing_symbols:
             continue

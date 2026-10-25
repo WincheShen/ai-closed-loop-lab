@@ -46,6 +46,9 @@ def _save_signals_to_watchlist(signals: list[dict], state: TradingState) -> None
         existing = set(store.get_watchlist_symbols())
         added = 0
         for sig in signals:
+            sig_id = sig.get("signal_id")
+            if sig_id:
+                store.update_signal_status(sig_id, "defend_watching")
             symbol = sig.get("symbol", "")
             if not symbol or symbol in existing:
                 continue

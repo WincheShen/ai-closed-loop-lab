@@ -698,7 +698,7 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         return dict(row) if row else None
 
     def save_risk_decision(self, session_id: str, decision: dict) -> None:
-        """保存单条 RiskGovernor 裁决。"""
+        """保存单条 RiskGovernor 裁决，并同步更新 trade_signals 状态与仓位比例。"""
         conn = self._conn()
         conn.execute(
             """INSERT INTO risk_decisions
@@ -721,6 +721,29 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
                 decision.get("persona_id"),  # P1: 人格标识
             ),
         )
+        if decision.get("decision") == "reject":
+            conn.execute(
+                """UPDATE trade_signals
+                SET status = CASE WHEN status IN ('pending', 'active') THEN 'rejected_risk' ELSE status END,
+                    risk_decision = 'reject',
+                    approved_position_pct = 0.0
+                WHERE signal_id = ?""",
+                (decision["signal_id"],),
+            )
+        else:
+            conn.execute(
+                """UPDATE trade_signals
+                SET risk_decision = ?,
+                    approved_position_pct = ?,
+                    position_pct = COALESCE(?, position_pct)
+                WHERE signal_id = ?""",
+                (
+                    decision.get("decision"),
+                    decision.get("approved_position_pct"),
+                    decision.get("approved_position_pct"),
+                    decision["signal_id"],
+                ),
+            )
         self._auto_commit()
 
     def list_active_signals(self, session_id: str | None = None) -> list[dict]:
@@ -737,11 +760,15 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         return [dict(r) for r in rows]
 
     def list_pending_signals(self) -> list[dict]:
-        """获取所有待触发的条件单 (status=pending, 未过期)。"""
+        """获取所有待触发的条件单 (status=pending, 未被风控拒绝且未过期)。"""
         conn = self._conn()
         rows = conn.execute(
             """SELECT * FROM trade_signals
             WHERE status = 'pending'
+              AND COALESCE(risk_decision, '') != 'reject'
+              AND signal_id NOT IN (
+                  SELECT signal_id FROM risk_decisions WHERE decision = 'reject'
+              )
               AND (timestamp IS NULL OR datetime(timestamp, '+5 days') >= datetime('now'))
             ORDER BY timestamp""",
         ).fetchall()

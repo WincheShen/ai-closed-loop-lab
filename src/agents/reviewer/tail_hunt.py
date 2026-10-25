@@ -76,9 +76,8 @@ def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
                 entry_p = float(latest.get("entry_price") or 0)
                 close_p = float(latest.get("close_price") or 0)
                 pnl_pct = (close_p / entry_p - 1) * 100 if entry_p > 0 else 0
-                realized_pnl = float(latest.get("realized_pnl") or 0)
 
-                if days_since_closed <= 1 and (pnl_pct <= -2.5 or realized_pnl < -1000):
+                if days_since_closed <= 1 and pnl_pct <= -2.5:
                     reason = (
                         f"上一笔交易 {latest.get('symbol')} 于 {closed_at_str[:10]} 触发止损 "
                         f"(PnL={pnl_pct:.2f}%)，进入 1 个交易日强制冷静期，全天保持 100% 现金"
@@ -91,7 +90,7 @@ def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
     try:
         conn = store._conn()
         row = conn.execute(
-            "SELECT * FROM market_regime_snapshots ORDER BY trade_date DESC LIMIT 1"
+            "SELECT * FROM market_regime_snapshots ORDER BY trade_date DESC, created_at DESC LIMIT 1"
         ).fetchone()
         if row:
             regime = row["regime"]
