@@ -32,34 +32,25 @@ class StockMemory:
     def __init__(self) -> None:
         self.brain = get_central_brain()
 
-    def get_history(self, symbol: str) -> dict[str, Any] | None:
-        """查询某只股票的完整交易记忆。
-
-        Returns:
-            {
-                "symbol": str,
-                "name": str,
-                "trade_count": int,
-                "win_rate": float,
-                "avg_pnl_pct": float,
-                "avg_holding_days": float,
-                "last_traded": str,          # ISO date
-                "last_outcome": str,         # win/loss/breakeven
-                "strategies_used": {          # 按策略拆分
-                    "热点板块前排回踩": {"wins": 2, "losses": 0, "total": 2},
-                    ...
-                },
-                "lessons": [str, ...],       # 最近3条
-                "consecutive_losses": int,   # 当前连续止损次数
-                "cooldown_until": date|None, # 冷却截止日
-            }
-        """
+    def get_history(
+        self, symbol: str, persona_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """查询某只股票的完整交易记忆（Phase 3.7 支持按 persona_id 角色隔离）。"""
         conn = self.brain.store._conn()
-        rows = conn.execute(
-            "SELECT * FROM trade_attributions WHERE symbol = ? "
-            "ORDER BY created_at DESC",
-            (symbol,),
-        ).fetchall()
+        if persona_id:
+            rows = conn.execute(
+                """SELECT ta.* FROM trade_attributions ta
+                LEFT JOIN positions p ON p.position_id = ta.position_id
+                WHERE ta.symbol = ? AND (ta.persona_id = ? OR p.persona_id = ?)
+                ORDER BY ta.created_at DESC""",
+                (symbol, persona_id, persona_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM trade_attributions WHERE symbol = ? "
+                "ORDER BY created_at DESC",
+                (symbol,),
+            ).fetchall()
 
         if not rows:
             return None
@@ -102,11 +93,21 @@ class StockMemory:
                 pass
 
         # 获取相关 lessons
-        lesson_rows = conn.execute(
-            "SELECT lesson_text FROM lessons WHERE symbol = ? "
-            "ORDER BY created_at DESC LIMIT 3",
-            (symbol,),
-        ).fetchall()
+        if persona_id:
+            lesson_rows = conn.execute(
+                """SELECT l.lesson_text FROM lessons l
+                LEFT JOIN trade_attributions ta ON ta.attribution_id = l.attribution_id
+                LEFT JOIN positions p ON p.position_id = ta.position_id
+                WHERE l.symbol = ? AND (l.persona_id = ? OR ta.persona_id = ? OR p.persona_id = ?)
+                ORDER BY l.created_at DESC LIMIT 3""",
+                (symbol, persona_id, persona_id, persona_id),
+            ).fetchall()
+        else:
+            lesson_rows = conn.execute(
+                "SELECT lesson_text FROM lessons WHERE symbol = ? "
+                "ORDER BY created_at DESC LIMIT 3",
+                (symbol,),
+            ).fetchall()
         lessons = [r["lesson_text"] for r in lesson_rows if r["lesson_text"]]
 
         return {
@@ -124,16 +125,16 @@ class StockMemory:
             "cooldown_until": cooldown_until,
         }
 
-    def is_in_cooldown(self, symbol: str) -> bool:
-        """判断某只股票是否在冷却期内。"""
-        history = self.get_history(symbol)
+    def is_in_cooldown(self, symbol: str, persona_id: str | None = None) -> bool:
+        """判断某只股票是否在冷却期内（支持按 persona_id 角色隔离）。"""
+        history = self.get_history(symbol, persona_id=persona_id)
         if not history or not history.get("cooldown_until"):
             return False
         return datetime.now().date() <= history["cooldown_until"]
 
-    def get_cooldown_reason(self, symbol: str) -> str | None:
+    def get_cooldown_reason(self, symbol: str, persona_id: str | None = None) -> str | None:
         """返回冷却原因描述，None 表示不在冷却期。"""
-        history = self.get_history(symbol)
+        history = self.get_history(symbol, persona_id=persona_id)
         if not history or not history.get("cooldown_until"):
             return None
         if datetime.now().date() > history["cooldown_until"]:
@@ -143,9 +144,9 @@ class StockMemory:
             f"冷却至 {history['cooldown_until']}"
         )
 
-    def generate_prompt_block(self, symbol: str) -> str:
+    def generate_prompt_block(self, symbol: str, persona_id: str | None = None) -> str:
         """为 Strategist 生成个股历史记忆的 prompt 片段。"""
-        history = self.get_history(symbol)
+        history = self.get_history(symbol, persona_id=persona_id)
         if not history or history["trade_count"] == 0:
             return ""
 

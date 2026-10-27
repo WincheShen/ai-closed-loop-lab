@@ -29,18 +29,25 @@ class ExperienceAPI:
 
     # ── 查询接口 ──────────────────────────────────────────────────────
 
-    def get_stock_history(self, symbol: str) -> dict[str, Any] | None:
-        """查询个股交易记忆。"""
-        return self.stock_memory.get_history(symbol)
+    def get_stock_history(
+        self, symbol: str, persona_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """查询个股交易记忆（支持按 persona_id 角色隔离）。"""
+        return self.stock_memory.get_history(symbol, persona_id=persona_id)
 
     def get_strategy_stats(
-        self, strategy_id: str, regime: str | None = None,
+        self,
+        strategy_id: str,
+        regime: str | None = None,
+        persona_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """查询策略胜率统计。"""
-        return self.strategy_ledger.get_stats(strategy_id, regime=regime)
+        """查询策略胜率统计（支持按 persona_id 角色隔离）。"""
+        return self.strategy_ledger.get_stats(
+            strategy_id, regime=regime, persona_id=persona_id,
+        )
 
     def get_all_strategy_stats(
-        self, regime: str | None = None,
+        self, regime: str | None = None, persona_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """查询所有策略统计。"""
         return self.strategy_ledger.get_all_stats(regime=regime)
@@ -49,9 +56,11 @@ class ExperienceAPI:
         """获取策略×regime 胜率矩阵。"""
         return self.strategy_ledger.get_regime_matrix()
 
-    def is_stock_in_cooldown(self, symbol: str) -> bool:
-        """判断个股是否在冷却期。"""
-        return self.stock_memory.is_in_cooldown(symbol)
+    def is_stock_in_cooldown(
+        self, symbol: str, persona_id: str | None = None,
+    ) -> bool:
+        """判断个股是否在冷却期（支持按 persona_id 角色隔离）。"""
+        return self.stock_memory.is_in_cooldown(symbol, persona_id=persona_id)
 
     # ── Prompt 生成接口 ───────────────────────────────────────────────
 
@@ -59,21 +68,28 @@ class ExperienceAPI:
         """生成策略表现 prompt 片段（给 Strategist 用）。"""
         return self.strategy_ledger.generate_prompt_block(regime=regime)
 
-    def stock_prompt_block(self, symbol: str) -> str:
+    def stock_prompt_block(
+        self, symbol: str, persona_id: str | None = None,
+    ) -> str:
         """生成个股记忆 prompt 片段（给 Strategist 用）。"""
-        return self.stock_memory.generate_prompt_block(symbol)
+        return self.stock_memory.generate_prompt_block(symbol, persona_id=persona_id)
 
     # ── 规则引擎接口 ─────────────────────────────────────────────────
 
     def get_rule_weight_multiplier(
-        self, strategy_id: str, regime: str | None = None,
+        self,
+        strategy_id: str,
+        regime: str | None = None,
+        persona_id: str | None = None,
     ) -> float:
         """获取规则权重乘数（给 Explorer 规则引擎用）。
 
         Returns:
             0.3~1.8 的乘数，1.0 表示无调整。
         """
-        stats = self.strategy_ledger.get_stats(strategy_id, regime=regime)
+        stats = self.strategy_ledger.get_stats(
+            strategy_id, regime=regime, persona_id=persona_id,
+        )
         if not stats:
             return 1.0
         return stats["weight_multiplier"]

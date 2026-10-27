@@ -302,21 +302,23 @@ async def _check_pending_signals(
             exp = get_experience()
             persona_id = sig.get("persona_id")
 
-            # 检查个股冷却期
-            if exp.is_stock_in_cooldown(symbol):
+            # 检查个股冷却期（按角色隔离）
+            if exp.is_stock_in_cooldown(symbol, persona_id=persona_id):
                 logger.info(
                     "[CANCEL] %s 条件单触发但个股在冷却期，取消执行", symbol,
                 )
                 brain.store.update_signal_status(sig["signal_id"], "cancelled_cooldown")
                 continue
 
-            # 检查策略在当前 regime 下是否被暂停
+            # 检查策略在当前 regime 下是否被暂停（按角色隔离）
             strategy_id = sig.get("strategy_id", "")
             if strategy_id:
                 latest_regime = brain.store.latest_market_regime()
                 current_regime = latest_regime.get("regime", "") if latest_regime else ""
                 if current_regime:
-                    stats = exp.get_strategy_stats(strategy_id, regime=current_regime)
+                    stats = exp.get_strategy_stats(
+                        strategy_id, regime=current_regime, persona_id=persona_id,
+                    )
                     if stats and stats.get("recommendation") == "SUSPEND":
                         logger.info(
                             "[CANCEL] %s 条件单触发但策略 %s 在 %s 环境下已暂停 (胜率%.0f%%)，取消执行",

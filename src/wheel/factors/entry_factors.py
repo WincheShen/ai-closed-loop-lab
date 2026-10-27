@@ -427,16 +427,19 @@ class StockCooldownAndSuspendVetoFactor:
         sig = ctx.data.get("signal") or {}
         symbol = str(sig.get("symbol") or "")
         strategy_id = str(sig.get("strategy_id") or "")
+        persona_id = str(sig.get("persona_id") or ctx.persona.persona_id or "") or None
         try:
             from src.experience_layer import get_experience
             exp = get_experience()
-            if symbol and exp.is_stock_in_cooldown(symbol):
+            if symbol and exp.is_stock_in_cooldown(symbol, persona_id=persona_id):
                 return Opinion(factor=self.name, verdict="veto", reason=f"{symbol} 处于个股冷却期")
             if strategy_id and ctx.brain is not None:
                 latest_regime = ctx.brain.store.latest_market_regime() or {}
                 cur_regime = latest_regime.get("regime", "")
                 if cur_regime:
-                    stats = exp.get_strategy_stats(strategy_id, regime=cur_regime)
+                    stats = exp.get_strategy_stats(
+                        strategy_id, regime=cur_regime, persona_id=persona_id,
+                    )
                     if stats and stats.get("recommendation") == "SUSPEND":
                         return Opinion(
                             factor=self.name,
@@ -537,6 +540,205 @@ class PortfolioPositionCapModifier:
         return Opinion(factor=self.name, verdict="pass")
 
 
+# ----------------------------------------------------------------------
+# Phase 4: 账户级风险事件与熔断 Factor
+# ----------------------------------------------------------------------
+
+class AccountDailyLossVetoFactor:
+    """veto.account_daily_loss — 当日已实现亏损超角色上限（max_daily_loss_pct）时禁止新开仓（Phase 4.2）。"""
+
+    name = "veto.account_daily_loss"
+    stage = "veto"
+    requires = ("account_risk",)
+    param_keys: tuple[str, ...] = ("max_daily_loss_pct",)
+
+    def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        risk = ctx.data.get("account_risk") or {}
+        if risk.get("daily_loss_breached"):
+            return Opinion(
+                factor=self.name,
+                verdict="veto",
+                reason=(
+                    f"当日已实现亏损 {float(risk.get('daily_pnl') or 0):.2f} 超过限制 "
+                    f"{float(risk.get('daily_limit') or 0):.2f} ({float(risk.get('max_daily_loss_pct') or 0):.1%})，禁止新开仓"
+                ),
+            )
+        return Opinion(factor=self.name, verdict="pass")
+
+
+class ConsecutiveLossThrottleModifier:
+    """mod.consecutive_loss_throttle — 连续亏损达角色上限（consecutive_loss_limit）时拦截买入（Phase 4.3）。"""
+
+    name = "mod.consecutive_loss_throttle"
+    stage = "modify"
+    requires = ("account_risk",)
+    param_keys: tuple[str, ...] = ("consecutive_loss_limit",)
+
+    def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        resolved = ctx.resolved
+        if not resolved or resolved.action not in ("BUY", "ADD"):
+            return Opinion(factor=self.name, verdict="pass")
+        risk = ctx.data.get("account_risk") or {}
+        limit = int(params.get("consecutive_loss_limit", risk.get("consecutive_loss_limit", 5)))
+        losses = int(risk.get("consecutive_losses", 0))
+        if losses >= limit:
+            return Opinion(
+                factor=self.name,
+                verdict="modify",
+                action="HOLD",
+                reason=f"最近 {risk.get('window_days', 14)} 天内连续亏损 {losses} 笔 (限制 {limit})，触发连亏熔断停止买入",
+            )
+        return Opinion(factor=self.name, verdict="pass")
+
+
+# ----------------------------------------------------------------------
+# Phase 3.4 & 3.8: 日度选股漏斗 / LLM 信号提议 / 记忆类转盘 Factor
+# ----------------------------------------------------------------------
+
+class RegimePostureScreenFactor:
+    """screen.regime_posture_gate — data_quality 异常或 posture=exit 时清空候选池（Phase 3.4）。"""
+
+    name = "screen.regime_posture_gate"
+    stage = "screen"
+    requires = ("candidates",)
+    param_keys: tuple[str, ...] = ()
+
+    def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        from src.infra.data_quality import blocks_new_entries
+
+        candidates = list(ctx.data.get("candidates") or [])
+        regime = ctx.data.get("regime_snapshot") or {}
+        if blocks_new_entries(regime):
+            return Opinion(
+                factor=self.name,
+                verdict="pass",
+                reason=f"data_quality={regime.get('data_quality')} 禁止新开仓",
+                evidence={"kept": [], "eliminated": len(candidates)},
+            )
+        posture = str(regime.get("recommended_posture") or "")
+        if posture == "exit":
+            return Opinion(
+                factor=self.name,
+                verdict="pass",
+                reason=f"MarketBrain posture=exit (regime={regime.get('regime')})，禁止新开仓",
+                evidence={"kept": [], "eliminated": len(candidates)},
+            )
+        return Opinion(
+            factor=self.name,
+            verdict="pass",
+            reason=f"市场环境允许选股，保留 {len(candidates)} 只候选",
+            evidence={"kept": candidates},
+        )
+
+
+class SharedFlagsAndBlacklistScreenFactor:
+    """screen.shared_flags_and_blacklist — 过滤跨角色风险标记（shared_stock_flags）与角色黑名单（Phase 3.7）。"""
+
+    name = "screen.shared_flags_and_blacklist"
+    stage = "screen"
+    requires = ("candidates",)
+    param_keys: tuple[str, ...] = ()
+
+    def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        candidates = list(ctx.data.get("candidates") or [])
+        kept: list[dict] = []
+        blocked: list[str] = []
+        blacklist_syms: set[str] = set()
+        if ctx.brain is not None:
+            try:
+                from src.experience_layer.dynamic_blacklist import DynamicBlacklist
+                bl = DynamicBlacklist(persona_id=ctx.persona.persona_id or None)
+                blacklist_syms = set(bl.get_blacklisted_symbols())
+            except Exception:  # noqa: BLE001
+                pass
+
+        for item in candidates:
+            sym = str(item.get("symbol") or "")
+            if not sym:
+                continue
+            if sym in blacklist_syms:
+                blocked.append(f"{sym}:blacklist")
+                continue
+            if ctx.brain is not None:
+                try:
+                    flags = ctx.brain.store.get_shared_stock_flags(sym)
+                    if flags:
+                        blocked.append(f"{sym}:{flags[0].get('flag_type', 'flagged')}")
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+            kept.append(item)
+
+        return Opinion(
+            factor=self.name,
+            verdict="pass",
+            reason=f"黑名单与共享风险过滤保留 {len(kept)} 只，拦截 {len(blocked)} 只",
+            evidence={"kept": kept, "blocked": blocked},
+        )
+
+
+class LlmSignalProposeFactor:
+    """llm.signal_propose — 将 Strategist 产出的 BUY 信号映射为 priority=500 的入场提议（Phase 3.4）。"""
+
+    name = "llm.signal_propose"
+    stage = "propose"
+    requires = ("candidate", "quote")
+    param_keys: tuple[str, ...] = ()
+
+    def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        sig = ctx.data.get("strategist_signal")
+        if not sig or str(sig.get("action") or "").upper() != "BUY":
+            return Opinion(factor=self.name, verdict="pass", reason="Strategist 未产出买入信号")
+        cand = ctx.data.get("candidate") or {}
+        quote = ctx.data.get("quote") or {}
+        symbol = str(sig.get("symbol") or cand.get("symbol") or "")
+        price = float(sig.get("entry_price") or quote.get("price") or 0.0)
+        qty_pct = float(sig.get("approved_position_pct") or sig.get("position_pct") or 0.05)
+        score = float(sig.get("confidence") or cand.get("qlib_score") or 0.5) * 100.0
+        return Opinion(
+            factor=self.name,
+            verdict="propose",
+            action="BUY",
+            qty_pct=qty_pct,
+            priority=500,
+            reason=str(sig.get("rationale") or "Strategist 提议买入"),
+            evidence={
+                "signal_id": sig.get("signal_id"),
+                "symbol": symbol,
+                "name": sig.get("name") or cand.get("name") or symbol,
+                "sector": sig.get("sector") or cand.get("sector") or "",
+                "price": price,
+                "score": round(score, 2),
+                "stop_loss": sig.get("stop_loss"),
+                "target_price": sig.get("target_price"),
+                "position_pct": qty_pct,
+                "strategy": sig.get("strategy", ""),
+                "strategy_id": sig.get("strategy_id", ""),
+                "entry_condition": sig.get("entry_condition", "immediate"),
+            },
+        )
+
+
+class MemoryUpdateRuleFactor:
+    """rule.memory_update — 记忆类转盘通用记录步骤（Phase 3.8 / 4b，产出 WATCH 记录轨迹）。"""
+
+    name = "rule.memory_update"
+    stage = "propose"
+    requires: tuple[str, ...] = ()
+    param_keys: tuple[str, ...] = ("task",)
+
+    def evaluate(self, ctx: Context, params: dict) -> Opinion:
+        task = str(params.get("task") or ctx.event.type or "memory_update")
+        return Opinion(
+            factor=self.name,
+            verdict="propose",
+            action="WATCH",
+            priority=100,
+            reason=f"记忆类转盘执行: {task}",
+            evidence={"task": task, "payload": dict(ctx.event.payload or {})},
+        )
+
+
 def register(reg) -> None:
     reg.register_factor(ColdAndWeatherScreenFactor())
     reg.register_factor(WatchlistTtlScreenFactor())
@@ -549,3 +751,9 @@ def register(reg) -> None:
     reg.register_factor(StockCooldownAndSuspendVetoFactor())
     reg.register_factor(PendingConditionMetRuleFactor())
     reg.register_factor(PortfolioPositionCapModifier())
+    reg.register_factor(AccountDailyLossVetoFactor())
+    reg.register_factor(ConsecutiveLossThrottleModifier())
+    reg.register_factor(RegimePostureScreenFactor())
+    reg.register_factor(SharedFlagsAndBlacklistScreenFactor())
+    reg.register_factor(LlmSignalProposeFactor())
+    reg.register_factor(MemoryUpdateRuleFactor())

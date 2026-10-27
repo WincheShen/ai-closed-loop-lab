@@ -111,6 +111,22 @@ class MemoryViews:
         self._cache[key] = filtered
         return filtered
 
+    def shared_stock_flags(self, symbol: str) -> list[dict]:
+        """跨角色共享的客观事实标记（如退市风险、财务造假、重大违规，§7.4）。"""
+        key = f"shared_flags:{symbol}"
+        if key in self._cache:
+            return self._cache[key]
+        if self._brain is None:
+            return []
+        as_of_iso = self.as_of.isoformat()
+        try:
+            rows = self._brain.store.get_shared_stock_flags(symbol)
+            res = [r for r in rows if (r.get("created_at") or "") <= as_of_iso]
+        except Exception:  # noqa: BLE001
+            res = []
+        self._cache[key] = res
+        return res
+
 
 @dataclass(frozen=True)
 class PersonaProfile:
@@ -154,12 +170,167 @@ def persona_policy(
     """装配当前绑定下的角色策略快照（只读）。"""
     pid = persona_id or ""
     pc = cfg.personas.get(pid)
+    kind = pc.kind if pc else fallback_kind
+    bparams = dict(binding.params) if binding else {}
+    meta = _persona_meta(pid, kind)
     return PersonaPolicy(
         persona_id=pid,
-        kind=(pc.kind if pc else fallback_kind),
-        params=dict(binding.params) if binding else {},
+        kind=kind,
+        params=bparams,
+        allowed_strategies=meta["allowed_strategies"],
         llm_review=_llm_review_allowed(pid),
+        daily_pipeline=meta["daily_pipeline"],
+        max_daily_loss_pct=float(bparams.get("max_daily_loss_pct", meta["max_daily_loss_pct"])),
+        consecutive_loss_limit=int(bparams.get("consecutive_loss_limit", meta["consecutive_loss_limit"])),
     )
+
+
+def _persona_meta(persona_id: str, kind: str) -> dict[str, Any]:
+    """从 trading_persona.yaml 提取角色风控阈值与允许策略白名单（Phase 3.5 / Phase 4）。"""
+    allowed: tuple[str, ...] = ("ultra_short_momentum",) if kind == "ultra" else ()
+    daily_pipeline = kind != "ultra"
+    max_daily_loss_pct = 0.02 if kind == "ultra" else (0.05 if kind == "value" else 0.03)
+    consecutive_loss_limit = 2 if kind == "ultra" else 5
+    try:
+        from src.agents.cio.trading_persona import list_personas, load_persona_by_id
+        for raw in list_personas():
+            if raw.get("id") == persona_id:
+                daily_pipeline = bool(raw.get("daily_pipeline", daily_pipeline))
+                break
+        p = load_persona_by_id(persona_id)
+        if p is not None and p.id == persona_id:
+            max_daily_loss_pct = float(p.max_daily_loss_pct)
+            consecutive_loss_limit = int(p.consecutive_loss_limit)
+            if kind == "ultra" and p.strategy_regime_compatibility:
+                allowed = tuple(p.strategy_regime_compatibility.keys())
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "allowed_strategies": allowed,
+        "daily_pipeline": daily_pipeline,
+        "max_daily_loss_pct": max_daily_loss_pct,
+        "consecutive_loss_limit": consecutive_loss_limit,
+    }
+
+
+def compute_account_risk_metrics(
+    brain: Any,
+    persona_id: str,
+    *,
+    now: datetime | None = None,
+    window_days: int = 14,
+    max_daily_loss_pct: float | None = None,
+    consecutive_loss_limit: int | None = None,
+    emit_events: bool = False,
+) -> dict[str, Any]:
+    """统一计算账户当日盈亏与连续亏损笔数（Phase 4，ExecutionEngine 与 account_monitor 共用）。"""
+    now_dt = now or datetime.now()
+    today = now_dt.strftime("%Y-%m-%d")
+    window_start = (now_dt - timedelta(days=window_days)).isoformat()
+
+    if max_daily_loss_pct is None or consecutive_loss_limit is None:
+        try:
+            from src.wheel.config import get_config
+            pol = persona_policy(get_config(), persona_id, None)
+            if max_daily_loss_pct is None:
+                max_daily_loss_pct = pol.max_daily_loss_pct
+            if consecutive_loss_limit is None:
+                consecutive_loss_limit = pol.consecutive_loss_limit
+        except Exception:  # noqa: BLE001
+            max_daily_loss_pct = max_daily_loss_pct or 0.03
+            consecutive_loss_limit = consecutive_loss_limit or 5
+
+    max_daily_loss_pct = abs(float(max_daily_loss_pct))
+    consecutive_loss_limit = int(consecutive_loss_limit)
+
+    closed_positions: list[dict] = []
+    open_positions: list[dict] = []
+    account = None
+    if brain is not None:
+        try:
+            closed_positions = brain.store.list_positions(persona_id=persona_id, status="closed")
+            open_positions = brain.store.list_open_positions(persona_id=persona_id)
+            account = brain.store.get_account_by_persona(persona_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    closed_today = [
+        p for p in closed_positions
+        if (p.get("closed_at") or "").startswith(today)
+    ]
+    daily_pnl = sum(float(p.get("realized_pnl") or 0.0) for p in closed_today)
+
+    capital = 300000.0
+    if account:
+        capital = float(account.get("available_cash") or 0.0) + sum(
+            float(p.get("entry_price") or 0.0) * int(p.get("current_qty") or 0)
+            for p in open_positions
+        )
+        if capital <= 0:
+            capital = float(account.get("capital") or 300000.0)
+
+    daily_limit_amount = -capital * max_daily_loss_pct
+    daily_loss_breached = daily_pnl < daily_limit_amount
+
+    recent_in_window = [
+        p for p in closed_positions
+        if (p.get("closed_at") or "") >= window_start
+    ]
+    recent = sorted(recent_in_window, key=lambda p: p.get("closed_at") or "", reverse=True)
+    consecutive_losses = 0
+    for p in recent[:consecutive_loss_limit + 2]:
+        if float(p.get("realized_pnl") or 0.0) < 0:
+            consecutive_losses += 1
+        else:
+            break
+
+    consecutive_loss_breached = consecutive_losses >= consecutive_loss_limit
+
+    if emit_events and brain is not None:
+        try:
+            if daily_loss_breached:
+                brain.store.insert_wheel_event({
+                    "event_id": f"account.daily_loss_breach|{persona_id}|{today}",
+                    "type": "account.daily_loss_breach",
+                    "persona_id": persona_id,
+                    "subject": {"account": persona_id},
+                    "payload": {
+                        "daily_pnl": round(daily_pnl, 2),
+                        "daily_limit": round(daily_limit_amount, 2),
+                        "max_daily_loss_pct": max_daily_loss_pct,
+                    },
+                    "source": "account_monitor",
+                    "due_at": now_dt.isoformat(),
+                })
+            if consecutive_loss_breached:
+                brain.store.insert_wheel_event({
+                    "event_id": f"account.consecutive_losses|{persona_id}|{today}|{consecutive_losses}",
+                    "type": "account.consecutive_losses",
+                    "persona_id": persona_id,
+                    "subject": {"account": persona_id},
+                    "payload": {
+                        "consecutive_losses": consecutive_losses,
+                        "consecutive_loss_limit": consecutive_loss_limit,
+                        "window_days": window_days,
+                    },
+                    "source": "account_monitor",
+                    "due_at": now_dt.isoformat(),
+                })
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "persona_id": persona_id,
+        "capital": round(capital, 2),
+        "daily_pnl": round(daily_pnl, 2),
+        "daily_limit": round(daily_limit_amount, 2),
+        "max_daily_loss_pct": max_daily_loss_pct,
+        "daily_loss_breached": daily_loss_breached,
+        "consecutive_losses": consecutive_losses,
+        "consecutive_loss_limit": consecutive_loss_limit,
+        "consecutive_loss_breached": consecutive_loss_breached,
+        "window_days": window_days,
+    }
 
 
 def assemble_persona_profile(

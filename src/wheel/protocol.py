@@ -139,6 +139,9 @@ class PersonaPolicy:
     params: dict = field(default_factory=dict)   # 当前绑定携带的转盘参数
     allowed_strategies: tuple[str, ...] = ()
     llm_review: bool = True
+    daily_pipeline: bool = True
+    max_daily_loss_pct: float = 0.03
+    consecutive_loss_limit: int = 5
 
 
 @dataclass

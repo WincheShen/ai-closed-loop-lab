@@ -511,6 +511,31 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             "UPDATE trade_attributions SET persona_id = (SELECT p.persona_id FROM positions p WHERE p.position_id = trade_attributions.position_id) WHERE persona_id IS NULL",
             "UPDATE lessons SET persona_id = (SELECT ta.persona_id FROM trade_attributions ta WHERE ta.attribution_id = lessons.attribution_id) WHERE persona_id IS NULL",
         ]),
+        ("007_wheel_phase4b_proposals_and_shared_flags", [
+            """CREATE TABLE IF NOT EXISTS persona_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                persona_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                change_json TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                evidence_json TEXT,
+                backtest_report TEXT,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                reviewer TEXT,
+                review_note TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_persona_proposals_status ON persona_proposals(persona_id, status, created_at)",
+            """CREATE TABLE IF NOT EXISTS shared_stock_flags (
+                symbol TEXT NOT NULL,
+                flag_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (symbol, flag_type)
+            )""",
+        ]),
         # --- 未来迁移追加到这里 ---
     ]
 
@@ -2003,6 +2028,104 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             else:
                 result.append(item)
         return result
+
+    def save_persona_proposal(self, proposal: dict) -> str:
+        """写入一条角色配置变更提议（Phase 4b，禁止自动回写配置文件）。"""
+        conn = self._conn()
+        proposal_id = str(proposal.get("proposal_id") or f"PRP-{uuid.uuid4().hex[:10].upper()}")
+        now_iso = str(proposal.get("created_at") or datetime.now().isoformat())
+        conn.execute(
+            """INSERT OR REPLACE INTO persona_proposals
+            (proposal_id, persona_id, kind, change_json, rationale,
+             evidence_json, backtest_report, status, reviewer, review_note,
+             created_at, reviewed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                proposal_id,
+                str(proposal.get("persona_id") or "short_term_hot_rotation_v1"),
+                str(proposal.get("kind") or "param_change"),
+                json.dumps(proposal.get("change") or {}, ensure_ascii=False),
+                str(proposal.get("rationale") or ""),
+                json.dumps(proposal.get("evidence") or {}, ensure_ascii=False),
+                proposal.get("backtest_report"),
+                str(proposal.get("status") or "proposed"),
+                proposal.get("reviewer"),
+                proposal.get("review_note"),
+                now_iso,
+                proposal.get("reviewed_at"),
+            ),
+        )
+        self._auto_commit()
+        return proposal_id
+
+    def list_persona_proposals(
+        self,
+        persona_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        conn = self._conn()
+        conditions, params = [], []
+        if persona_id:
+            conditions.append("persona_id = ?")
+            params.append(persona_id)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM persona_proposals {where} ORDER BY created_at DESC LIMIT ?"
+        params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def review_persona_proposal(
+        self,
+        proposal_id: str,
+        status: str,
+        *,
+        reviewer: str = "human",
+        review_note: str = "",
+        backtest_report: str | None = None,
+    ) -> bool:
+        conn = self._conn()
+        cur = conn.execute(
+            """UPDATE persona_proposals
+            SET status = ?, reviewer = ?, review_note = ?,
+                backtest_report = COALESCE(?, backtest_report),
+                reviewed_at = ?
+            WHERE proposal_id = ?""",
+            (
+                status,
+                reviewer,
+                review_note,
+                backtest_report,
+                datetime.now().isoformat(),
+                proposal_id,
+            ),
+        )
+        self._auto_commit()
+        return cur.rowcount > 0
+
+    def set_shared_stock_flag(
+        self, symbol: str, flag_type: str, reason: str, active: bool = True,
+    ) -> None:
+        """跨角色共享的客观事实标记（如退市风险、财务造假、重大违规，§7.4）。"""
+        conn = self._conn()
+        conn.execute(
+            """INSERT OR REPLACE INTO shared_stock_flags
+            (symbol, flag_type, reason, active, created_at)
+            VALUES (?, ?, ?, ?, ?)""",
+            (symbol, flag_type, reason, 1 if active else 0, datetime.now().isoformat()),
+        )
+        self._auto_commit()
+
+    def get_shared_stock_flags(self, symbol: str) -> list[dict]:
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM shared_stock_flags WHERE symbol = ? AND active = 1 ORDER BY created_at DESC",
+            (symbol,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # 别名以保持向后兼容

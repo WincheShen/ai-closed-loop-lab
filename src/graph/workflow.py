@@ -232,7 +232,50 @@ async def run_daily_pipeline(
         result = initial_state
 
     # 持久化最终状态（失败也要落库）
-    get_central_brain().persist_state(session_id, run_mode, result)
+    brain = get_central_brain()
+    brain.persist_state(session_id, run_mode, result)
+
+    # Phase 3.4：15:35 日度入场转盘链并行影子评估（market_screen -> entry_confirm -> EntryGateway）
+    try:
+        from src.wheel.config import get_config
+        from src.wheel.persona import persona_policy
+        from src.wheel.protocol import WheelEvent
+        from src.wheel.runner import run_binding
+
+        eff_pid = initial_state["persona_id"]
+        cfg = get_config()
+        binding = cfg.binding_for(eff_pid, "clock.1535")
+        if binding and binding.mode != "off":
+            now_dt = datetime.now()
+            ev = WheelEvent(
+                event_id=f"wev-clock.1535-{now_dt:%Y%m%d-%H%M%S}-{eff_pid}",
+                type="clock.1535",
+                due_at=now_dt,
+                persona_id=eff_pid,
+                subject={},
+                source="daily_pipeline",
+            )
+            pol = persona_policy(cfg, eff_pid, binding)
+            sigs_by_sym = {
+                str(s.get("symbol")): s
+                for s in (result.get("trade_signals") or [])
+                if s.get("symbol")
+            }
+            run_binding(
+                cfg,
+                binding,
+                ev,
+                pol,
+                brain,
+                preloaded={
+                    "candidates": list(result.get("target_stocks") or []),
+                    "regime_snapshot": dict(result.get("market_regime") or {}),
+                    "signals_by_symbol": sigs_by_sym,
+                },
+                now=now_dt,
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug("clock.1535 日度入场转盘链评估异常", exc_info=True)
 
     logger.info("=" * 60)
     logger.info("✅ 日常交易流完成 — session=%s", session_id)

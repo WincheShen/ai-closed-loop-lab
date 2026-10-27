@@ -841,3 +841,182 @@ def test_phase3_pending_trigger_and_persona_profile(tmp_path):
     assert "POS-PAST" in hist_ids
     assert "POS-FUTURE" not in hist_ids
 
+
+def test_phase3_4_and_phase4_daily_screen_entry_and_account_risk(tmp_path):
+    """Phase 3.4 & Phase 4：market_screen -> entry_confirm 链、shared_stock_flags 过滤、
+    账户日亏否决与连亏熔断按角色配置生效。"""
+    from src.wheel.config import get_config
+    from src.wheel.persona import compute_account_risk_metrics, persona_policy
+    from src.wheel.runner import run_binding
+
+    brain = _MockBrain(tmp_path)
+    cfg = get_config(reload=True)
+    binding = cfg.binding_for("short_term_hot_rotation_v1", "clock.1535")
+    pol = persona_policy(cfg, "short_term_hot_rotation_v1", binding)
+    # short_term_hot_rotation_v1 在 trading_persona.yaml 中配置 consecutive_loss_limit=3
+    assert pol.consecutive_loss_limit == 3
+    assert pol.max_daily_loss_pct == pytest.approx(0.03)
+
+    # 标记 000002 存在退市风险（跨角色共享标记）
+    brain.store.set_shared_stock_flag("000002", "delisting_risk", "退市整理期")
+
+    cands = [
+        {"symbol": "000001", "name": "平安银行", "qlib_score": 0.9, "kline_summary": {"current_price": 11.2}},
+        {"symbol": "000002", "name": "万科A", "qlib_score": 0.8, "kline_summary": {"current_price": 7.5}},
+    ]
+    sigs = {
+        "000001": {
+            "signal_id": "SIG-D-1", "symbol": "000001", "name": "平安银行",
+            "action": "BUY", "entry_price": 11.2, "stop_loss": 10.5, "target_price": 12.5,
+            "position_pct": 0.05, "confidence": 0.85, "strategy": "主力吸筹",
+            "strategy_id": "institutional_accumulation",
+        },
+    }
+    ev = WheelEvent(
+        event_id="ev-1535-ok", type="clock.1535", due_at=_T.replace(hour=15, minute=35),
+        persona_id="short_term_hot_rotation_v1", subject={}, source="test",
+    )
+    run_binding(
+        cfg, binding, ev, pol, brain,
+        preloaded={
+            "candidates": cands,
+            "regime_snapshot": {"regime": "neutral", "recommended_posture": "selective_attack"},
+            "signals_by_symbol": sigs,
+        },
+        now=_T.replace(hour=15, minute=35),
+    )
+    # 000002 被 shared_stock_flags 过滤，只有 000001 进入 wheel_candidates 并产出 BUY
+    saved = brain.store.list_wheel_candidates("ev-1535-ok", "short_term_hot_rotation_v1")
+    assert [c["symbol"] for c in saved] == ["000001"]
+    dec = brain.store._conn().execute(
+        "SELECT action, gateway FROM wheel_decisions WHERE event_id='ev-1535-ok' AND subject_key='000001'"
+    ).fetchone()
+    assert dec["action"] == "BUY" and dec["gateway"] == "accepted"
+
+    # 制造 3 笔连亏 → 触发 short_term 的 consecutive_loss_limit=3，mod.consecutive_loss_throttle 将 BUY 调弱为 HOLD
+    for i in range(3):
+        pid = f"POS-LOSS-{i}"
+        _open(brain, {
+            **_ULTRA_POS, "position_id": pid, "symbol": f"30010{i}",
+            "persona_id": "short_term_hot_rotation_v1",
+        })
+        brain.store.close_position(
+            pid, 195.0, -500.0, closed_at=(_T - timedelta(days=i + 1)).isoformat(),
+        )
+
+    risk = compute_account_risk_metrics(
+        brain, "short_term_hot_rotation_v1", now=_T.replace(hour=15, minute=35), emit_events=True,
+    )
+    assert risk["consecutive_losses"] == 3 and risk["consecutive_loss_breached"] is True
+
+    ev2 = WheelEvent(
+        event_id="ev-1535-throttled", type="clock.1535", due_at=_T.replace(hour=15, minute=35),
+        persona_id="short_term_hot_rotation_v1", subject={}, source="test",
+    )
+    run_binding(
+        cfg, binding, ev2, pol, brain,
+        preloaded={
+            "candidates": cands,
+            "regime_snapshot": {"regime": "neutral", "recommended_posture": "selective_attack"},
+            "signals_by_symbol": sigs,
+        },
+        now=_T.replace(hour=15, minute=35),
+    )
+    dec2 = brain.store._conn().execute(
+        "SELECT action, decided_by FROM wheel_decisions WHERE event_id='ev-1535-throttled' AND subject_key='000001'"
+    ).fetchone()
+    assert dec2["action"] == "HOLD" and dec2["decided_by"] == "mod.consecutive_loss_throttle"
+
+
+def test_phase3_7_experience_layer_per_persona_isolation(tmp_path):
+    """Phase 3.7：短线角色的连续止损冷却不得污染价值角色。"""
+    from src.experience_layer.stock_memory import StockMemory
+    from src.experience_layer.strategy_ledger import StrategyLedger
+
+    brain = _MockBrain(tmp_path)
+    conn = brain.store._conn()
+    today_iso = datetime.now().isoformat()
+    for i in (1, 2):
+        pid = f"POS-ST-{i}"
+        _open(brain, {
+            **_ULTRA_POS, "position_id": pid, "symbol": "600887",
+            "persona_id": "short_term_hot_rotation_v1",
+        })
+        conn.execute(
+            """INSERT INTO trade_attributions
+            (attribution_id, position_id, symbol, name, entry_price, close_price,
+             realized_pnl, pnl_pct, holding_days, outcome, primary_cause,
+             entry_regime, strategy_id, persona_id, created_at)
+            VALUES (?, ?, '600887', '伊利股份', 28.0, 26.5, -1500, -5.3, 2, 'loss',
+                    'stop_loss_triggered', 'rebound', 'value_investing',
+                    'short_term_hot_rotation_v1', ?)""",
+            (f"ATR-ST-{i}", pid, today_iso),
+        )
+    conn.commit()
+
+    sm = StockMemory()
+    sm.brain = brain
+    assert sm.is_in_cooldown("600887", persona_id="short_term_hot_rotation_v1") is True
+    assert sm.is_in_cooldown("600887", persona_id="duan_yongping_v1") is False
+
+    sl = StrategyLedger()
+    sl.brain = brain
+    assert sl.get_stats("value_investing", regime="rebound", persona_id="duan_yongping_v1") is None
+    st_stats = sl.get_stats("value_investing", regime="rebound", persona_id="short_term_hot_rotation_v1")
+    assert st_stats is not None and st_stats["total_trades"] == 2
+
+
+def test_phase4b_proposals_and_phase5_replay_benchmark(tmp_path):
+    """Phase 4b 提议流转（样本不足降级 observe）与 Phase 5 WheelReplay + 随机买点对照闸门。"""
+    from src.wheel.proposals import submit_proposal
+    from src.wheel.replay import ReplayStep, WheelReplay, random_entry_benchmark
+
+    brain = _MockBrain(tmp_path)
+    p_obs = submit_proposal(
+        brain.store,
+        persona_id="short_term_hot_rotation_v1",
+        kind="param_change",
+        change={"stop_loss_pct": 0.04},
+        rationale="小样本测试",
+        sample_size=8,
+    )
+    assert p_obs["status"] == "observe"
+
+    p_ok = submit_proposal(
+        brain.store,
+        persona_id="short_term_hot_rotation_v1",
+        kind="param_change",
+        change={"stop_loss_pct": 0.04},
+        rationale="足量样本提议",
+        sample_size=25,
+    )
+    assert p_ok["status"] == "proposed"
+    assert brain.store.review_persona_proposal(p_ok["proposal_id"], "approved", reviewer="neo")
+    rows = brain.store.list_persona_proposals(status="approved")
+    assert len(rows) == 1 and rows[0]["proposal_id"] == p_ok["proposal_id"]
+
+    # Phase 5: WheelReplay 确定性回放 + 随机买点对照闸门
+    _open(brain, _ULTRA_POS)
+    replayer = WheelReplay(brain)
+    rep = replayer.replay(
+        "ultra_short_momentum_v1",
+        [
+            ReplayStep(
+                now=_T,
+                event_type="clock.intraday_5m",
+                subject={"position_id": "POS-U", "symbol": "688008"},
+                preloaded={"quote": {"price": 194.0, "is_mock": False}},
+            ),
+        ],
+        mode="shadow",
+    )
+    assert rep.steps_run == 1
+    assert rep.decisions[0].action == "EXIT"
+
+    bench_pass = random_entry_benchmark(
+        [3.5, 4.2, 2.8, 5.1, 1.9],
+        [-2.0, -1.0, 0.0, 0.5, 1.0, -0.5, 0.2],
+    )
+    assert bench_pass["passed"] is True and bench_pass["edge_pct"] > 2.0
+
+

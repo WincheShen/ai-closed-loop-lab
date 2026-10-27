@@ -56,9 +56,35 @@ class PersonaUpdater:
         if not avoid_patterns and not prefer_patterns:
             return result
 
+        # Phase 4b.3：元规则结论写入 persona_proposals 提议通道（待回测与人工审批），
+        # 默认不直接回写配置文件
+        try:
+            from src.central_brain import get_central_brain
+            from src.wheel.proposals import submit_proposal
+
+            brain = get_central_brain()
+            target_pid = persona_id or "short_term_hot_rotation_v1"
+            sample_n = int(rules.get("trades_count") or len(avoid_patterns) + len(prefer_patterns))
+            prp = submit_proposal(
+                brain.store,
+                persona_id=target_pid,
+                kind="setup_preference",
+                change={
+                    "avoid_append": [p.get("lesson", "").strip() for p in avoid_patterns[:_MAX_AVOID_APPEND] if p.get("lesson")],
+                    "prefer_append": [p.get("action", "").strip() for p in prefer_patterns[:_MAX_PREFER_APPEND] if p.get("action")],
+                },
+                rationale=str(rules.get("summary") or "周度元规则归纳提议"),
+                evidence={"avoid_patterns": avoid_patterns, "prefer_patterns": prefer_patterns},
+                sample_size=sample_n,
+            )
+            result["proposal_id"] = prp["proposal_id"]
+            result["proposal_status"] = prp["status"]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("persona_proposals 写入失败: %s", e)
+
         import os
         if os.getenv("PERSONA_AUTO_UPDATE", "0") not in {"1", "true", "TRUE"}:
-            logger.info("PERSONA_AUTO_UPDATE 未开启，跳过回写 persona.yaml")
+            logger.info("PERSONA_AUTO_UPDATE 未开启，已写入提议通道，跳过直接回写 persona.yaml")
             return result
 
         # 1. 备份

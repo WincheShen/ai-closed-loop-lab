@@ -470,7 +470,8 @@ class StrategistEngine:
         try:
             from src.experience_layer import get_experience
             exp = get_experience()
-            return exp.stock_prompt_block(symbol)
+            pid = getattr(self.persona, "id", None)
+            return exp.stock_prompt_block(symbol, persona_id=pid)
         except Exception:
             return ""
 
@@ -778,7 +779,10 @@ class StrategistEngine:
             try:
                 from src.experience_layer import get_experience
                 exp = get_experience()
-                stats = exp.get_strategy_stats(strategy_id_check, regime=current_regime)
+                pid = getattr(self.persona, "id", None)
+                stats = exp.get_strategy_stats(
+                    strategy_id_check, regime=current_regime, persona_id=pid,
+                )
                 if stats and stats.get("recommendation") == "SUSPEND":
                     self.logger.warning(
                         "[%s %s] PASS — 策略 %s 在 %s 环境下已被暂停 (胜率%.0f%%, 样本%d)",

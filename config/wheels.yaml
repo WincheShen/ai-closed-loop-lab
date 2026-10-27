@@ -111,6 +111,50 @@ wheels:
     modify:  [mod.portfolio_position_cap]
     output:  entry_proposal
 
+  # 3.4 短线/价值日度选股漏斗（写 wheel_candidates）+ 单票入场确认（送 EntryGateway）
+  market_screen:
+    kind: funnel
+    data:    [explorer_scan]
+    steps:   [screen.regime_posture_gate, screen.shared_flags_and_blacklist]
+    output:  candidates
+
+  entry_confirm:
+    kind: decision
+    data:    [strategist_eval, account_monitor]
+    veto:    [floor.trading_day, veto.account_daily_loss]
+    propose: [llm.signal_propose]
+    resolve: priority
+    modify:  [mod.consecutive_loss_throttle, mod.portfolio_position_cap]
+    output:  entry_proposal
+
+  # 3.8 & 4b 记忆类与复盘提议转盘
+  attribution:
+    kind: decision
+    data:    [position]
+    veto:    []
+    propose: [rule.memory_update(task=attribution)]
+    resolve: priority
+    modify:  []
+    output:  memory_update
+
+  watchlist_maintain:
+    kind: decision
+    data:    []
+    veto:    [floor.trading_day]
+    propose: [rule.memory_update(task=watchlist_maintain)]
+    resolve: priority
+    modify:  []
+    output:  memory_update
+
+  weekly_reflection:
+    kind: decision
+    data:    []
+    veto:    []
+    propose: [rule.memory_update(task=weekly_reflection)]
+    resolve: priority
+    modify:  []
+    output:  memory_update
+
 personas:
   short_term_hot_rotation_v1:
     kind: short
@@ -120,6 +164,10 @@ personas:
       market.regime_drift: { wheel: urgent_review, mode: shadow }
       clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
       clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
+      clock.1535:         { chain: [market_screen, entry_confirm], mode: shadow }
+      position.closed:    { wheel: attribution, mode: shadow }
+      clock.1530:         { wheel: watchlist_maintain, mode: shadow }
+      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
 
   ultra_short_momentum_v1:
     kind: ultra
@@ -129,6 +177,9 @@ personas:
       followup.morning_watch: { wheel: morning_watch, mode: shadow }
       clock.1430:         { wheel: overnight_force_close, mode: live }
       clock.1435:         { chain: [market_screen_ultra, entry_confirm_ultra], mode: shadow }
+      position.closed:    { wheel: attribution, mode: shadow }
+      clock.1530:         { wheel: watchlist_maintain, mode: shadow }
+      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
       # 无 clock.intraday_30m 与 market.regime_drift 绑定 — LLM 复审对隔夜客在结构上不存在
 
   duan_yongping_v1:
@@ -139,6 +190,9 @@ personas:
       market.regime_drift: { wheel: urgent_review, mode: shadow }
       clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
       clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
+      clock.1535:         { chain: [market_screen, entry_confirm], mode: shadow }
+      position.closed:    { wheel: attribution, mode: shadow }
+      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
 
   warren_buffett_v1:
     kind: value
@@ -148,3 +202,6 @@ personas:
       market.regime_drift: { wheel: urgent_review, mode: shadow }
       clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
       clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
+      clock.1535:         { chain: [market_screen, entry_confirm], mode: shadow }
+      position.closed:    { wheel: attribution, mode: shadow }
+      clock.weekly:       { wheel: weekly_reflection, mode: shadow }

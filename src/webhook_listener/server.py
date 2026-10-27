@@ -1082,6 +1082,19 @@ async def wheel_decisions(day: str | None = None, limit: int = 300):
         return []
 
 
+@app.get("/api/wheel/proposals")
+async def wheel_proposals(persona_id: str | None = None, status: str | None = None, limit: int = 100):
+    """复盘提议列表（Phase 4b）：查看待审批/观察中的规则修改提议。"""
+    try:
+        brain = _get_central_brain()
+        return brain.store.list_persona_proposals(
+            persona_id=persona_id, status=status, limit=max(1, min(limit, 500)),
+        )
+    except Exception as e:
+        logger.error("wheel_proposals error: %s", e)
+        return []
+
+
 @app.get("/api/workflow/runs")
 async def workflow_runs(date: str | None = None, limit: int = 100):
     """把今日事件按运行单元（job/session）聚合，供监控页时间线展示。

@@ -320,6 +320,102 @@ class PendingSignalStep:
             return {}
 
 
+class AccountMonitorStep:
+    """data.account_monitor — 计算当前角色当日盈亏与连续亏损笔数（Phase 4.1）。"""
+
+    name = "account_monitor"
+    provides = ("account_risk",)
+    param_keys: tuple[str, ...] = ("window_days",)
+
+    def load(self, ctx: Context, params: dict) -> dict:
+        if "account_risk" in ctx.data and ctx.data["account_risk"]:
+            return {"account_risk": ctx.data["account_risk"]}
+        from src.wheel.persona import compute_account_risk_metrics
+        window_days = int(params.get("window_days", 14))
+        metrics = compute_account_risk_metrics(
+            ctx.brain,
+            ctx.persona.persona_id or "short_term_hot_rotation_v1",
+            now=ctx.now,
+            window_days=window_days,
+            max_daily_loss_pct=ctx.persona.max_daily_loss_pct,
+            consecutive_loss_limit=ctx.persona.consecutive_loss_limit,
+        )
+        return {"account_risk": metrics}
+
+
+class ExplorerScanStep:
+    """data.explorer_scan — 日度全市场/价值池候选扫描（Phase 3.4）。"""
+
+    name = "explorer_scan"
+    provides = ("candidates", "regime_snapshot")
+    param_keys: tuple[str, ...] = ()
+
+    def load(self, ctx: Context, params: dict) -> dict:
+        if "candidates" in ctx.data:
+            return {
+                "candidates": list(ctx.data.get("candidates") or []),
+                "regime_snapshot": dict(ctx.data.get("regime_snapshot") or {}),
+            }
+        regime: dict[str, Any] = dict(ctx.data.get("regime_snapshot") or {})
+        if not regime and ctx.brain is not None:
+            try:
+                regime = ctx.brain.store.latest_market_regime() or {}
+            except Exception:  # noqa: BLE001
+                regime = {}
+        candidates: list[dict] = []
+        if ctx.mode == "live":
+            try:
+                from src.agents.explorer.scanner import ExplorerScanner
+                scanner = ExplorerScanner(
+                    ctx.event.event_id,
+                    persona_id=ctx.persona.persona_id or None,
+                    market_regime=regime,
+                )
+                candidates = scanner.scan_market()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("data.explorer_scan 扫描异常: %s", e)
+        return {"candidates": candidates, "regime_snapshot": regime}
+
+
+class StrategistEvalStep:
+    """data.strategist_eval — 单只候选票的策略/LLM 评估结果（Phase 3.4）。"""
+
+    name = "strategist_eval"
+    provides = ("candidate", "quote", "strategist_signal")
+    param_keys: tuple[str, ...] = ("invoke_llm",)
+
+    def load(self, ctx: Context, params: dict) -> dict:
+        cand = dict(ctx.data.get("candidate") or (ctx.event.subject or {}))
+        symbol = str(cand.get("symbol") or (ctx.event.subject or {}).get("symbol") or "").strip()
+        kline = cand.get("kline_summary") or {}
+        price = float(
+            cand.get("price")
+            or kline.get("current_price")
+            or (ctx.data.get("quote") or {}).get("price")
+            or 0.0
+        )
+        quote = dict(ctx.data.get("quote") or {"price": price, "is_mock": price <= 0, "symbol": symbol})
+
+        signals_by_sym = ctx.data.get("signals_by_symbol") or {}
+        sig = ctx.data.get("strategist_signal") or signals_by_sym.get(symbol)
+        if sig is None and cand and (ctx.mode == "live" or params.get("invoke_llm")):
+            try:
+                from src.agents.cio.trading_persona import get_persona
+                from src.agents.strategist.signal_generator import StrategistEngine
+                regime = ctx.data.get("regime_snapshot") or (
+                    ctx.brain.store.latest_market_regime() if ctx.brain else {}
+                ) or {}
+                engine = StrategistEngine(
+                    ctx.event.event_id,
+                    persona=get_persona(persona_id=ctx.persona.persona_id or None),
+                    market_regime=regime,
+                )
+                sig = engine.analyze_candidate(cand)  # type: ignore[arg-type]
+            except Exception as e:  # noqa: BLE001
+                logger.warning("data.strategist_eval 分析 %s 异常: %s", symbol, e)
+        return {"candidate": cand, "quote": quote, "strategist_signal": sig}
+
+
 def register(reg) -> None:
     reg.register_data_step(PositionStep())
     reg.register_data_step(QuoteRealtimeStep())
@@ -327,3 +423,6 @@ def register(reg) -> None:
     reg.register_data_step(WatchlistUltraStep())
     reg.register_data_step(CandidateIntradayStep())
     reg.register_data_step(PendingSignalStep())
+    reg.register_data_step(AccountMonitorStep())
+    reg.register_data_step(ExplorerScanStep())
+    reg.register_data_step(StrategistEvalStep())

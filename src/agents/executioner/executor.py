@@ -58,60 +58,34 @@ class ExecutionEngine:
     def _check_circuit_breaker(self) -> bool:
         """检查是否应触发熔断。返回 True 表示应停止交易。
 
-        设计原则:
-        - 日亏损检查: 当天已实现亏损超过资金的 3%
-        - 连续亏损检查: 最近 14 天内连续亏损 >= 5 笔
-          (超过 14 天的历史亏损不再计入，避免永久锁死)
+        Phase 4.4: 统一使用 compute_account_risk_metrics 按角色读取 PersonaPolicy
+        的 max_daily_loss_pct 与 consecutive_loss_limit（未配置时回退默认常量），
+        并在触发时同步写入 account.* 风险事件。
         """
-        from datetime import timedelta
+        from src.wheel.persona import compute_account_risk_metrics
 
-        now = datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        window_start = (now - timedelta(days=CIRCUIT_BREAKER_WINDOW_DAYS)).isoformat()
-
-        # 1) 日内已实现亏损检查
-        closed_positions = self.brain.store.list_positions(
-            persona_id=self.persona_id, status="closed",
+        metrics = compute_account_risk_metrics(
+            self.brain,
+            self.persona_id,
+            window_days=CIRCUIT_BREAKER_WINDOW_DAYS,
+            emit_events=True,
         )
-        closed_today = [
-            p for p in closed_positions
-            if (p.get("closed_at") or "").startswith(today)
-        ]
-        daily_pnl = sum(p.get("realized_pnl", 0) or 0 for p in closed_today)
 
-        account = self.brain.store.get_account_by_persona(self.persona_id)
-        capital = cfg().get("initial_capital", 300000)
-        if account:
-            capital = account.get("available_cash", 0) + sum(
-                p.get("entry_price", 0) * p.get("current_qty", 0)
-                for p in self.brain.store.list_open_positions(persona_id=self.persona_id)
-            )
-
-        daily_limit = capital * DAILY_LOSS_LIMIT_PCT
-        if daily_pnl < daily_limit:
+        if metrics["daily_loss_breached"]:
             self.logger.warning(
-                "⚠️ CIRCUIT BREAKER: 日内亏损 %.2f 超过限制 %.2f，停止买入",
-                daily_pnl, daily_limit,
+                "⚠️ CIRCUIT BREAKER: 日内亏损 %.2f 超过限制 %.2f (%.1f%%)，停止买入",
+                metrics["daily_pnl"],
+                metrics["daily_limit"],
+                metrics["max_daily_loss_pct"] * 100,
             )
             return True
 
-        # 2) 连续亏损检查 — 只看最近 CIRCUIT_BREAKER_WINDOW_DAYS 天
-        recent_in_window = [
-            p for p in closed_positions
-            if (p.get("closed_at") or "") >= window_start
-        ]
-        recent = sorted(recent_in_window, key=lambda p: p.get("closed_at", ""), reverse=True)
-        consecutive_losses = 0
-        for p in recent[:MAX_CONSECUTIVE_LOSSES + 2]:
-            if (p.get("realized_pnl") or 0) < 0:
-                consecutive_losses += 1
-            else:
-                break
-
-        if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+        if metrics["consecutive_loss_breached"]:
             self.logger.warning(
                 "⚠️ CIRCUIT BREAKER: 最近%d天内连续亏损 %d 笔(限制 %d)，停止买入",
-                CIRCUIT_BREAKER_WINDOW_DAYS, consecutive_losses, MAX_CONSECUTIVE_LOSSES,
+                metrics["window_days"],
+                metrics["consecutive_losses"],
+                metrics["consecutive_loss_limit"],
             )
             return True
 
@@ -147,7 +121,9 @@ class ExecutionEngine:
                 continue
 
             try:
-                stats = exp.get_strategy_stats(strategy_id, regime=regime or None)
+                stats = exp.get_strategy_stats(
+                    strategy_id, regime=regime or None, persona_id=self.persona_id,
+                )
                 if stats and stats.get("recommendation") == "SUSPEND":
                     self.logger.warning(
                         "SUSPEND REJECT %s %s | 策略 %s 在 %s 下已暂停 "
@@ -267,14 +243,22 @@ class ExecutionEngine:
         action = signal.get("action", "")
         symbol = signal["symbol"]
 
-        # --- P0.1: 买入前重复持仓与策略专属校验 ---
+        # --- P0.1: 买入前重复持仓与策略专属校验（Phase 3.5 改为读 PersonaPolicy.allowed_strategies） ---
         if action == "buy":
-            if self.persona_id == "ultra_short_momentum_v1":
+            allowed_strats: tuple[str, ...] = ()
+            try:
+                from src.wheel.config import get_config
+                from src.wheel.persona import persona_policy
+                allowed_strats = persona_policy(get_config(), self.persona_id, None).allowed_strategies
+            except Exception:  # noqa: BLE001
+                if self.persona_id == "ultra_short_momentum_v1":
+                    allowed_strats = ("ultra_short_momentum",)
+            if allowed_strats:
                 sig_strat = signal.get("strategy_id") or signal.get("strategy")
-                if sig_strat != "ultra_short_momentum":
+                if sig_strat not in allowed_strats:
                     self.logger.warning(
-                        "[MOCK] ❌ 人格 %s 仅允许 ultra_short_momentum 专属策略开仓，拒绝信号 %s (strategy=%s)",
-                        self.persona_id, signal["signal_id"], sig_strat,
+                        "[MOCK] ❌ 人格 %s 仅允许 %s 专属策略开仓，拒绝信号 %s (strategy=%s)",
+                        self.persona_id, allowed_strats, signal["signal_id"], sig_strat,
                     )
                     self.brain.store.update_signal_status(signal["signal_id"], "rejected_strategy_mismatch")
                     rejected_order: Order = {

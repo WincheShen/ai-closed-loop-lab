@@ -36,34 +36,21 @@ class StrategyLedger:
         self,
         strategy_id: str,
         regime: str | None = None,
+        persona_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """查询某策略在指定 regime 下的胜率统计。
-
-        Returns:
-            {
-                "strategy_id": str,
-                "regime": str | "all",
-                "total_trades": int,
-                "wins": int, "losses": int, "breakevens": int,
-                "win_rate": float,
-                "avg_pnl_pct": float,
-                "recommendation": "BOOST" | "NORMAL" | "SUSPEND" | "INSUFFICIENT",
-                "weight_multiplier": float,   # 给规则引擎用
-            }
-        """
+        """查询某策略在指定 regime 下的胜率统计（Phase 3.7 支持按 persona_id 角色隔离）。"""
         conn = self.brain.store._conn()
+        sql = """SELECT ta.outcome, ta.pnl_pct FROM trade_attributions ta
+                 LEFT JOIN positions p ON p.position_id = ta.position_id
+                 WHERE ta.strategy_id = ?"""
+        params: list[Any] = [strategy_id]
         if regime:
-            rows = conn.execute(
-                "SELECT outcome, pnl_pct FROM trade_attributions "
-                "WHERE strategy_id = ? AND entry_regime = ?",
-                (strategy_id, regime),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT outcome, pnl_pct FROM trade_attributions "
-                "WHERE strategy_id = ?",
-                (strategy_id,),
-            ).fetchall()
+            sql += " AND ta.entry_regime = ?"
+            params.append(regime)
+        if persona_id:
+            sql += " AND (ta.persona_id = ? OR p.persona_id = ?)"
+            params.extend([persona_id, persona_id])
+        rows = conn.execute(sql, params).fetchall()
 
         if not rows:
             return None

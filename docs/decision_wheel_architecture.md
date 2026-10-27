@@ -712,7 +712,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：新开仓全部为盘中或开盘可成交的价格；入场决策轨迹可在监控页逐条解释；隔夜客硬编码清零；一个角色的止损/冷却不再影响其他角色。
 
-### Phase 4 — 账户风控事件
+### Phase 4 — 账户风控事件 ✅ 已实现
+
+`AccountMonitorStep`（`data.account_monitor`）、`compute_account_risk_metrics`、`veto.account_daily_loss`、`mod.consecutive_loss_throttle` 及 `ExecutionEngine._check_circuit_breaker` 按角色 `PersonaPolicy`（`max_daily_loss_pct`、`consecutive_loss_limit`）统一计算并发射 `account.*` 事件已落地。
 
 | 任务 | 产出 |
 |---|---|
@@ -723,7 +725,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：人格配置中的账户级风险限制全部按人格生效，有代码执行路径与测试。
 
-### Phase 4b — 复盘提议通道
+### Phase 4b — 复盘提议通道 ✅ 已实现
+
+迁移 `007_wheel_phase4b_proposals_and_shared_flags`（`persona_proposals` 与 `shared_stock_flags` 表）、`src/wheel/proposals.py`（样本不足 `<20` 自动标记 `observe`）、`PersonaUpdater` 提议生产通道、`weekly_reflection` 转盘与 `/api/wheel/proposals` 接口已落地。
 
 | 任务 | 产出 |
 |---|---|
@@ -735,7 +739,9 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：系统中不存在任何未经审批即修改行为配置或身份配置的代码路径。
 
-### Phase 5 — 回测同源
+### Phase 5 — 回测同源 ✅ 已实现
+
+`src/wheel/replay.py`（`WheelReplay` 确定性历史事件回放 + `random_entry_benchmark` 随机买点对照闸门）已落地。
 
 | 任务 | 产出 |
 |---|---|
