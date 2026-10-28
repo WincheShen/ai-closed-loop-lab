@@ -247,19 +247,33 @@ async def _check_pending_signals(
                     },
                     now=now_dt,
                 )
-                if binding.mode == "live" and any(r.decisions for r in w_results):
+                if binding.mode == "live":
+                    # live 转盘是裁判：无论有无 BUY 决策，旧路径都不再执行
                     for r in w_results:
                         for d in r.decisions:
-                            if d.action == "BUY":
-                                triggered_results.append({
-                                    "symbol": symbol,
-                                    "action": "BUY",
-                                    "reason": d.reason,
-                                    "trade_price": current_price,
-                                    "signal_id": sig["signal_id"],
-                                    "entry_condition": condition,
-                                    "executed_via": "wheel",
-                                })
+                            if d.action != "BUY":
+                                continue
+                            # 只有 EntryGateway 真正成交才算触发
+                            # （veto/网关拒绝的 BUY 决策不构成执行）
+                            try:
+                                gw_row = brain.store._conn().execute(
+                                    "SELECT executed FROM wheel_decisions "
+                                    "WHERE decision_id = ?",
+                                    (d.decision_id,),
+                                ).fetchone()
+                            except Exception:  # noqa: BLE001
+                                gw_row = None
+                            if not gw_row or not gw_row["executed"]:
+                                continue
+                            triggered_results.append({
+                                "symbol": symbol,
+                                "action": "BUY",
+                                "reason": d.reason,
+                                "trade_price": current_price,
+                                "signal_id": sig["signal_id"],
+                                "entry_condition": condition,
+                                "executed_via": "wheel",
+                            })
                     continue
         except Exception:  # noqa: BLE001
             logger.debug("pending_trigger 转盘评估异常 %s", symbol, exc_info=True)
@@ -358,7 +372,7 @@ async def _check_pending_signals(
         sig["entry_condition"] = "immediate"
         sig["current_price"] = current_price  # 传递实时价给 executor 的 price guard
         sig["market_price_at_trigger"] = current_price  # 触发时的真实市场价
-        engine = ExecutionEngine(session_id, persona_id=persona_id)
+        engine = ExecutionEngine(session_id, persona_id=persona_id, brain=brain)
         try:
             orders, fills = await engine.monitor_and_execute([sig])
             if fills:

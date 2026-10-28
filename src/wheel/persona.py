@@ -272,6 +272,14 @@ def compute_account_risk_metrics(
         except Exception:  # noqa: BLE001
             pass
 
+    # 回放时钟：now 之后才平仓的持仓属于未来数据，不得计入
+    # （否则历史日期回放会提前看到未来连亏并 100% 误判为冷静期）
+    as_of_iso = now_dt.isoformat()
+    closed_positions = [
+        p for p in closed_positions
+        if (p.get("closed_at") or "") <= as_of_iso
+    ]
+
     closed_today = [
         p for p in closed_positions
         if (p.get("closed_at") or "").startswith(today)

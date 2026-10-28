@@ -47,17 +47,23 @@ class ExperienceAPI:
         strategy_id: str,
         regime: str | None = None,
         persona_id: str | None = None,
+        as_of=None,
     ) -> dict[str, Any] | None:
-        """查询策略胜率统计（支持按 persona_id 角色隔离）。"""
+        """查询策略胜率统计（persona_id 隔离，as_of 回放时钟）。"""
         return self.strategy_ledger.get_stats(
-            strategy_id, regime=regime, persona_id=persona_id,
+            strategy_id, regime=regime, persona_id=persona_id, as_of=as_of,
         )
 
     def get_all_strategy_stats(
-        self, regime: str | None = None, persona_id: str | None = None,
+        self,
+        regime: str | None = None,
+        persona_id: str | None = None,
+        as_of=None,
     ) -> list[dict[str, Any]]:
-        """查询所有策略统计（支持按 persona_id 角色隔离）。"""
-        return self.strategy_ledger.get_all_stats(regime=regime, persona_id=persona_id)
+        """查询所有策略统计（persona_id 隔离，as_of 回放时钟）。"""
+        return self.strategy_ledger.get_all_stats(
+            regime=regime, persona_id=persona_id, as_of=as_of,
+        )
 
     def get_regime_matrix(self) -> dict:
         """获取策略×regime 胜率矩阵。"""

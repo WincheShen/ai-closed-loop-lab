@@ -858,7 +858,12 @@ def test_phase3_4_and_phase4_daily_screen_entry_and_account_risk(tmp_path):
     assert pol.max_daily_loss_pct == pytest.approx(0.03)
 
     # 标记 000002 存在退市风险（跨角色共享标记）
+    # （created_at 回填到 _T 之前，绕过回放时钟 as_of 过滤）
     brain.store.set_shared_stock_flag("000002", "delisting_risk", "退市整理期")
+    brain.store._conn().execute(
+        "UPDATE shared_stock_flags SET created_at = ? WHERE symbol = '000002'",
+        ("2026-10-11T09:00:00",),
+    )
 
     cands = [
         {"symbol": "000001", "name": "平安银行", "qlib_score": 0.9, "kline_summary": {"current_price": 11.2}},
@@ -1653,15 +1658,21 @@ def test_next_open_event_emitted_and_deferred(tmp_path, monkeypatch):
     sig = {"signal_id": "SIG-NO-1", "symbol": "300001", "action": "buy",
            "entry_price": 10.0}
 
-    # shadow 绑定：登记事件但不让位
-    assert engine._next_open_deferred(sig) is False
+    # shadow 绑定：mode 返回 "shadow"（事件登记推迟到成交确认后）
+    assert engine._next_open_mode(sig) == "shadow"
+    engine._emit_next_open_event(sig)
     row = brain.store._conn().execute(
         "SELECT type, due_at, status FROM wheel_events "
         "WHERE event_id = 'clock.next_open|SIG-NO-1'",
     ).fetchone()
     assert row["type"] == "clock.next_open" and row["status"] == "due"
     # 幂等：重复登记不报错、不重复行
-    assert engine._next_open_deferred(sig) is False
+    engine._emit_next_open_event(sig)
+    cnt = brain.store._conn().execute(
+        "SELECT COUNT(*) AS c FROM wheel_events "
+        "WHERE event_id = 'clock.next_open|SIG-NO-1'",
+    ).fetchone()
+    assert cnt["c"] == 1
 
     # live 绑定：让位给次日开盘转盘
     real_cfg = wc.get_config()
@@ -1674,10 +1685,14 @@ def test_next_open_event_emitted_and_deferred(tmp_path, monkeypatch):
             binding_for=lambda pid, et: live_binding,
         ),
     )
-    assert engine._next_open_deferred(sig) is True
+    assert engine._next_open_mode(sig) == "live"
 
     # 转盘网关自身执行的信号不递归登记
-    assert engine._next_open_deferred({**sig, "_wheel_entry": True}) is False
+    assert engine._next_open_mode({**sig, "_wheel_entry": True}) is None
+    # 盘中条件单触发改写为 immediate 的信号不属于次日开盘语义
+    assert engine._next_open_mode(
+        {**sig, "market_price_at_trigger": 10.0},
+    ) is None
 
 
 def test_entry_gateway_shadow_same_signal_not_duplicate(tmp_path):
@@ -1811,3 +1826,166 @@ def test_kelly_sizer_persona_isolation(tmp_path):
     assert rb.stats["win_rate"] == 0.0
 
 
+
+
+def test_account_risk_metrics_as_of_no_future_leak(tmp_path):
+    """compute_account_risk_metrics：now 之后的平仓不污染历史回放。
+
+    修复前：未来连亏满足 closed_at >= window_start，且 trading_days_between
+    (未来, 过去) 返回 0 <= cooldown → 历史日期 100% 误判为冷静期。
+    """
+    from src.wheel.persona import compute_account_risk_metrics
+
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    # 10-20 / 10-21 两笔连亏
+    for i, d in enumerate(("2026-10-20", "2026-10-21")):
+        pos_id = f"POS-RK{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id,
+                      "persona_id": pid, "entry_date": "2026-10-19"})
+        brain.store.close_position(
+            pos_id, 190.0, -500.0, closed_at=f"{d}T14:00:00")
+
+    # 回放 10-15（连亏尚未发生）：不得触发冷静期
+    m_past = compute_account_risk_metrics(
+        brain, pid, now=datetime(2026, 10, 15, 9, 35),
+        consecutive_loss_limit=2, cooldown_days=1,
+    )
+    assert m_past["consecutive_losses"] == 0
+    assert m_past["consecutive_loss_breached"] is False
+
+    # 回放 10-22（连亏之后 1 个交易日）：触发冷静期
+    m_now = compute_account_risk_metrics(
+        brain, pid, now=datetime(2026, 10, 22, 9, 35),
+        consecutive_loss_limit=2, cooldown_days=1,
+    )
+    assert m_now["consecutive_losses"] == 2
+    assert m_now["consecutive_loss_breached"] is True
+
+
+def test_strategy_ledger_as_of_replay_clock(tmp_path):
+    """StrategyLedger.get_stats/get_all_stats 按 as_of 截断，不吃未来归因。"""
+    from src.experience_layer.strategy_ledger import StrategyLedger
+
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-SL1",
+                  "persona_id": pid, "entry_date": "2026-10-01"})
+    _attr(brain, "AT-SL1", "POS-SL1", "300001", "loss",
+          strategy="institutional_accumulation",
+          created_at="2026-10-20T15:00:00")
+
+    ledger = StrategyLedger(brain=brain)
+    # 回放 10-10：归因尚未发生 → 无统计
+    assert ledger.get_stats(
+        "institutional_accumulation", persona_id=pid,
+        as_of=datetime(2026, 10, 10),
+    ) is None
+    assert ledger.get_all_stats(
+        persona_id=pid, as_of=datetime(2026, 10, 10),
+    ) == []
+    # 回放 10-22：归因可见
+    st = ledger.get_stats(
+        "institutional_accumulation", persona_id=pid,
+        as_of=datetime(2026, 10, 22),
+    )
+    assert st and st["total_trades"] == 1
+
+
+def test_shared_flags_screen_as_of_replay_clock(tmp_path):
+    """screen.shared_flags_and_blacklist：ctx.now 之后才打上的标记不拦截。"""
+    from types import SimpleNamespace
+
+    from src.wheel.factors.entry_factors import SharedFlagsAndBlacklistScreenFactor
+
+    brain = _MockBrain(tmp_path)
+    brain.store.set_shared_stock_flag("300001", "delisting_risk", "退市风险")
+
+    factor = SharedFlagsAndBlacklistScreenFactor()
+    persona = SimpleNamespace(persona_id="short_term_hot_rotation_v1")
+    cands = [{"symbol": "300001"}]
+
+    # 回放历史时刻（标记尚未打上）：不拦截——未来标记不泄露
+    ctx_past = SimpleNamespace(
+        persona=persona, brain=brain,
+        data={"candidates": list(cands)},
+        now=datetime(2020, 1, 1, 9, 35),
+    )
+    op_past = factor.evaluate(ctx_past, {})
+    assert op_past.evidence["kept"] == cands
+
+    # 标记已存在的时刻：正常拦截
+    ctx_now = SimpleNamespace(
+        persona=persona, brain=brain,
+        data={"candidates": list(cands)},
+        now=datetime(2099, 1, 1, 9, 35),
+    )
+    op_now = factor.evaluate(ctx_now, {})
+    assert op_now.evidence["kept"] == []
+    assert op_now.evidence["blocked"] == ["300001:delisting_risk"]
+
+
+def test_entry_gateway_live_pending_condition_deferred(tmp_path):
+    """live 模式 breakout 条件单挂起（pending_condition），不按市价成交也不判拒。"""
+    from types import SimpleNamespace
+
+    from src.wheel.entry_gateway import EntryGateway
+    from src.wheel.protocol import Decision
+
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    ctx = SimpleNamespace(
+        persona=SimpleNamespace(persona_id=pid, kind="short", params={}),
+        data={"regime_snapshot": {"regime": "neutral", "data_quality": "real"}},
+        mode="live",
+        now=_T,
+        event=SimpleNamespace(event_id="ev-pc", subject={}),
+    )
+    d = Decision(
+        wheel="entry_confirm", action="BUY", subject_key="300001",
+        qty_pct=0.05, price=10.0, reason="t",
+        evidence={"signal_id": "SIG-PC", "symbol": "300001", "price": 10.0,
+                  "entry_condition": "breakout", "strategy_id": "s1"},
+    )
+    out = EntryGateway(brain).submit_batch([d], ctx)
+    o = out[d.subject_key]
+    assert o["accepted"] is True
+    assert o["executed"] is False
+    assert o["reason"] == "pending_condition"
+
+
+def test_wheel_entry_shadow_node_live_suppresses_old_path_buys(tmp_path, monkeypatch):
+    """clock.1535 为 live 时，节点从 trade_signals 移除买单阻止旧路径双执行。"""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import src.wheel.config as wc
+    import src.wheel.runner as wr
+    import src.graph.workflow as wf
+
+    real_cfg = wc.get_config()
+    binding = real_cfg.binding_for(
+        "short_term_hot_rotation_v1", "clock.1535")
+    live_binding = replace(binding, mode="live")
+    monkeypatch.setattr(
+        wc, "get_config",
+        lambda: SimpleNamespace(
+            binding_for=lambda pid, et: live_binding,
+            personas=real_cfg.personas, wheels=real_cfg.wheels,
+        ),
+    )
+    # 不真跑转盘（live 会进 EntryGateway 执行），只验证买单抑制返回值
+    monkeypatch.setattr(wr, "run_binding", lambda *a, **k: [])
+
+    state = {
+        "persona_id": "short_term_hot_rotation_v1",
+        "trade_signals": [
+            {"symbol": "300001", "action": "buy", "signal_id": "S1"},
+            {"symbol": "300002", "action": "sell", "signal_id": "S2"},
+        ],
+        "target_stocks": [{"symbol": "300001"}],
+        "market_regime": {"regime": "neutral", "data_quality": "real"},
+    }
+    out = wf.run_wheel_entry_shadow_node(state)
+    assert out is not None
+    assert [s["action"] for s in out["trade_signals"]] == ["sell"]

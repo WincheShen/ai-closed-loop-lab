@@ -37,8 +37,12 @@ class StrategyLedger:
         strategy_id: str,
         regime: str | None = None,
         persona_id: str | None = None,
+        as_of=None,
     ) -> dict[str, Any] | None:
-        """查询某策略在指定 regime 下的胜率统计（Phase 3.7 支持按 persona_id 角色隔离）。"""
+        """查询某策略在指定 regime 下的胜率统计。
+
+        persona_id：角色隔离；as_of：回放时钟（只统计该时刻之前的归因）。
+        """
         conn = self.brain.store._conn()
         sql = """SELECT ta.outcome, ta.pnl_pct FROM trade_attributions ta
                  LEFT JOIN positions p ON p.position_id = ta.position_id
@@ -50,6 +54,9 @@ class StrategyLedger:
         if persona_id:
             sql += " AND COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?"
             params.append(persona_id)
+        if as_of:
+            sql += " AND ta.created_at <= ?"
+            params.append(as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of))
         rows = conn.execute(sql, params).fetchall()
 
         if not rows:
@@ -90,9 +97,12 @@ class StrategyLedger:
         }
 
     def get_all_stats(
-        self, regime: str | None = None, persona_id: str | None = None,
+        self,
+        regime: str | None = None,
+        persona_id: str | None = None,
+        as_of=None,
     ) -> list[dict[str, Any]]:
-        """查询所有策略在指定 regime 下的统计（支持按 persona_id 角色隔离）。"""
+        """查询所有策略在指定 regime 下的统计（persona_id 隔离，as_of 回放时钟）。"""
         conn = self.brain.store._conn()
         sql = """SELECT DISTINCT ta.strategy_id FROM trade_attributions ta
                  LEFT JOIN positions p ON p.position_id = ta.position_id
@@ -104,12 +114,16 @@ class StrategyLedger:
         if persona_id:
             sql += " AND COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?"
             params.append(persona_id)
+        if as_of:
+            sql += " AND ta.created_at <= ?"
+            params.append(as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of))
         rows = conn.execute(sql, params).fetchall()
 
         results = []
         for r in rows:
             stats = self.get_stats(
                 r["strategy_id"], regime=regime, persona_id=persona_id,
+                as_of=as_of,
             )
             if stats:
                 results.append(stats)

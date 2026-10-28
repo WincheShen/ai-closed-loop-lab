@@ -94,16 +94,24 @@ class EntryGateway:
             except Exception:  # noqa: BLE001
                 market_regime = {}
 
+        # shadow 期旧路径已按同一 signal_id 建的持仓不算"重复"，也不计入
+        # 持仓只数/已用仓位/板块集中度——order_fill_at_open 评估的正是
+        # 同一信号的次日开盘成交语义（positions 表存 original_signal_id 列）
+        if not is_live:
+            shadow_sig_ids = {
+                str(d.evidence.get("signal_id") or "")
+                for d in buy_decisions if d.evidence.get("signal_id")
+            }
+            if shadow_sig_ids:
+                open_positions = [
+                    p for p in open_positions
+                    if str(p.get("original_signal_id") or p.get("signal_id") or "")
+                    not in shadow_sig_ids
+                ]
+
         capital = float(account.get("total_value") or account.get("capital") or 300000.0) if account else 300000.0
         available_cash = float(account.get("available_cash", 300000.0)) if account else 300000.0
         open_symbols = {str(p.get("symbol") or "") for p in open_positions}
-        # shadow 期旧路径已按同一 signal_id 建仓的持仓不算"重复"——
-        # order_fill_at_open 评估的正是同一信号的次日开盘成交语义
-        # （positions 表存的是 original_signal_id 列）
-        legacy_sig_symbols: dict[str, str] = {} if is_live else {
-            str(p.get("original_signal_id") or p.get("signal_id") or ""): str(p.get("symbol") or "")
-            for p in open_positions if p.get("original_signal_id") or p.get("signal_id")
-        }
         used_cost = sum(
             float(p.get("entry_price") or 0) * int(p.get("current_qty") or 0)
             for p in open_positions
@@ -157,12 +165,10 @@ class EntryGateway:
                 outcomes[key] = _reject("strategy_mismatch")
                 continue
 
-            # 4. 重复持仓检查（影子评估同一 signal 的已建仓持仓除外）
+            # 4. 重复持仓检查（shadow 下同 signal_id 的旧路径持仓已前置剔除）
             if d.action == "BUY" and symbol in open_symbols:
-                ev_sig = str(d.evidence.get("signal_id") or "")
-                if not (ev_sig and legacy_sig_symbols.get(ev_sig) == symbol):
-                    outcomes[key] = _reject("duplicate_position")
-                    continue
+                outcomes[key] = _reject("duplicate_position")
+                continue
 
             # 5. 在持仓只数上限
             if d.action == "BUY" and (len(open_positions) + accepted_count) >= max_open:
@@ -224,6 +230,16 @@ class EntryGateway:
             finally:
                 self._release(lock_key)
 
+            if exec_res.get("reason") == "pending_condition":
+                # 条件单挂起：决策通过但不立即成交，计入已用额度
+                accepted_count += 1
+                open_symbols.add(symbol)
+                used_pct += qty_pct
+                outcomes[key] = {
+                    "accepted": True, "executed": False,
+                    "reason": "pending_condition",
+                }
+                continue
             if exec_res.get("executed"):
                 self._mark_executed(d.decision_id)
                 accepted_count += 1
@@ -291,6 +307,15 @@ class EntryGateway:
         stop_loss = float(ev.get("stop_loss") or round(price * (0.975 if ctx.persona.kind == "ultra" else 0.92), 2))
         target_price = float(ev.get("target_price") or round(price * 1.08, 2))
         sig_id = str(ev.get("signal_id") or f"SIG-WHL-{uuid.uuid4().hex[:8].upper()}")
+        entry_cond = str(ev.get("entry_condition") or "immediate")
+        if entry_cond != "immediate":
+            # 条件单：信号已由 Strategist 落库为 pending，交由盘中
+            # clock.pending_5m → rule.pending_condition_met 链路触发，
+            # 网关不按市价立即成交
+            return {
+                "executed": False, "symbol": symbol,
+                "reason": "pending_condition",
+            }
 
         signal = {
             "signal_id": sig_id,
@@ -307,7 +332,7 @@ class EntryGateway:
             "target_qty": qty,
             "strategy": str(ev.get("strategy") or strategy_id),
             "strategy_id": strategy_id,
-            "entry_condition": "immediate",
+            "entry_condition": entry_cond,
             "_wheel_entry": True,
             "rationale": decision.reason,
             "timestamp": ctx.now.isoformat(),

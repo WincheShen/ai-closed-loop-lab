@@ -211,9 +211,16 @@ class ExecutionEngine:
                 )
                 continue
 
-            # immediate 买单登记 clock.next_open 事件（次日 09:32 由
-            # order_fill_at_open 转盘评估）；live 绑定下让位给转盘执行
-            if sig.get("action") == "buy" and self._next_open_deferred(sig):
+            # immediate 买单衔接 clock.next_open：
+            # live → 登记事件并让位给次日开盘转盘；
+            # shadow → 旧路径照常执行，成交后才登记事件做影子比对。
+            # 盘中条件单触发（market_price_at_trigger 已写入）不属于
+            # "收盘后次日开盘成交"语义，不登记也不让位。
+            next_open_mode = (
+                self._next_open_mode(sig) if sig.get("action") == "buy" else None
+            )
+            if next_open_mode == "live":
+                self._emit_next_open_event(sig)
                 self.brain.store.update_signal_status(
                     sig["signal_id"], "pending_next_open",
                 )
@@ -238,6 +245,10 @@ class ExecutionEngine:
             if fill:
                 self.filled_orders.append(fill)
                 self.brain.store.update_signal_status(sig["signal_id"], "filled")
+                # shadow 期：成交确认后再登记次日开盘影子比对事件
+                # （_mock_execute 前置校验拒单时不残留孤儿事件）
+                if next_open_mode == "shadow":
+                    self._emit_next_open_event(sig)
 
         self.logger.info(
             "执行完成 — 立即成交 %d/%d 笔, 条件单(pending) %d 笔",
@@ -249,24 +260,33 @@ class ExecutionEngine:
     # clock.next_open — 次日开盘成交转盘衔接
     # ------------------------------------------------------------------
 
-    def _next_open_deferred(self, sig: TradeSignal) -> bool:
-        """immediate 买单：登记下一交易日 09:32 的 clock.next_open 事件。
+    def _next_open_mode(self, sig: TradeSignal) -> str | None:
+        """日度管线 immediate 买单的 clock.next_open 绑定 mode（"shadow"/"live"）。
 
-        返回 True 表示 order_fill_at_open 绑定为 live —— 旧路径让位，
-        信号标为 pending_next_open，由次日开盘转盘执行；shadow/off 时
-        仅登记事件（影子比对次日开盘成交 vs 收盘成交），旧路径照常执行。
+        返回 None 表示不纳入次日开盘转盘：
+        - _wheel_entry：转盘网关自身执行的信号不递归登记
+        - market_price_at_trigger：盘中条件单触发改写为 immediate 的实时
+          成交（intraday_loop 写入），属于盘中语义而非"收盘后次日开盘成交"
+        - 无绑定或绑定 mode=off
         """
-        if sig.get("_wheel_entry"):
-            return False  # 转盘网关自身执行的信号不再递归登记
+        if sig.get("_wheel_entry") or sig.get("market_price_at_trigger"):
+            return None
+        try:
+            from src.wheel.config import get_config
+            binding = get_config().binding_for(self.persona_id, "clock.next_open")
+            if binding and binding.mode != "off":
+                return binding.mode
+        except Exception:  # noqa: BLE001
+            self.logger.debug("clock.next_open 绑定读取失败", exc_info=True)
+        return None
+
+    def _emit_next_open_event(self, sig: TradeSignal) -> None:
+        """登记下一交易日 09:32 的 clock.next_open 事件（按 signal_id 幂等）。"""
         try:
             from datetime import time as _time
 
             from src.infra.trading_calendar import next_trading_day
-            from src.wheel.config import get_config
 
-            binding = get_config().binding_for(self.persona_id, "clock.next_open")
-            if not binding or binding.mode == "off":
-                return False
             due = datetime.combine(next_trading_day(), _time(9, 32))
             self.brain.store.insert_wheel_event({
                 "event_id": f"clock.next_open|{sig['signal_id']}",
@@ -280,13 +300,11 @@ class ExecutionEngine:
                 "source": "executioner",
                 "due_at": due.isoformat(),
             })
-            return binding.mode == "live"
         except Exception:  # noqa: BLE001
             self.logger.debug(
                 "clock.next_open 事件登记失败 %s", sig.get("signal_id"),
                 exc_info=True,
             )
-            return False
 
     async def _mock_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:
         """模拟执行：按市场价成交，并自动建仓。

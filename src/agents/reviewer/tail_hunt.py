@@ -185,6 +185,14 @@ async def execute_tail_hunt(
             )
             pol = persona_policy(cfg, persona_id, binding)
             run_binding(cfg, binding, ev, pol, brain, now=now_dt)
+            if binding.mode == "live":
+                # 尾盘转盘接管入场决策，旧路径不再扫描/执行（成交与拒绝
+                # 均留痕于 wheel_decisions）
+                return _done({
+                    "executed": False,
+                    "reason": "clock.1435 转盘接管尾盘入场，旧路径不再执行",
+                    "action": "WHEEL_LIVE",
+                })
     except Exception:  # noqa: BLE001
         logger.debug("clock.1435 尾盘转盘链执行异常", exc_info=True)
 

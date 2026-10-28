@@ -84,14 +84,16 @@ class DynamicBlacklist:
                 )
         return blocked
 
-    def get_blocked_strategies(self, regime: str) -> list[dict[str, Any]]:
-        """查询在指定 regime 下应暂停的策略列表。
+    def get_blocked_strategies(
+        self, regime: str, as_of=None,
+    ) -> list[dict[str, Any]]:
+        """查询在指定 regime 下应暂停的策略列表（as_of 回放时钟）。
 
         Returns:
             [{"strategy_id": str, "win_rate": float, "reason": str}, ...]
         """
         stats = self.strategy_ledger.get_all_stats(
-            regime=regime, persona_id=self.persona_id,
+            regime=regime, persona_id=self.persona_id, as_of=as_of,
         )
         blocked = []
         for s in stats:

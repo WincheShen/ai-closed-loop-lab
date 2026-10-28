@@ -42,7 +42,9 @@ class ColdAndWeatherScreenFactor:
         candidates = list(ctx.data.get("candidates") or [])
         persona_id = ctx.persona.persona_id or "ultra_short_momentum_v1"
         if ctx.brain is not None:
-            is_cold, reason = check_cold_period(ctx.brain, persona_id=persona_id)
+            is_cold, reason = check_cold_period(
+                ctx.brain, persona_id=persona_id, as_of=ctx.now,
+            )
             if is_cold:
                 return Opinion(
                     factor=self.name,
@@ -123,7 +125,9 @@ class ColdPeriodVetoFactor:
         if ctx.brain is None:
             return Opinion(factor=self.name, verdict="pass")
         persona_id = ctx.persona.persona_id or "ultra_short_momentum_v1"
-        is_cold, reason = check_cold_period(ctx.brain, persona_id=persona_id)
+        is_cold, reason = check_cold_period(
+            ctx.brain, persona_id=persona_id, as_of=ctx.now,
+        )
         if is_cold:
             return Opinion(factor=self.name, verdict="veto", reason=reason)
         return Opinion(factor=self.name, verdict="pass")
@@ -435,14 +439,22 @@ class StockCooldownAndSuspendVetoFactor:
             else:
                 from src.experience_layer import get_experience
                 exp = get_experience()
-            if symbol and exp.is_stock_in_cooldown(symbol, persona_id=persona_id):
+            if symbol and exp.is_stock_in_cooldown(
+                symbol, persona_id=persona_id, as_of=ctx.now,
+            ):
                 return Opinion(factor=self.name, verdict="veto", reason=f"{symbol} 处于个股冷却期")
             if strategy_id and ctx.brain is not None:
-                latest_regime = ctx.brain.store.latest_market_regime() or {}
-                cur_regime = latest_regime.get("regime", "")
+                # 回放时钟：只读 ctx.now 当日及之前的 regime 快照
+                row = ctx.brain.store._conn().execute(
+                    "SELECT regime FROM market_regime_snapshots WHERE trade_date <= ? "
+                    "ORDER BY trade_date DESC, created_at DESC LIMIT 1",
+                    (ctx.now.date().isoformat(),),
+                ).fetchone()
+                cur_regime = (row["regime"] if row else "") or ""
                 if cur_regime:
                     stats = exp.get_strategy_stats(
                         strategy_id, regime=cur_regime, persona_id=persona_id,
+                        as_of=ctx.now,
                     )
                     if stats and stats.get("recommendation") == "SUSPEND":
                         return Opinion(
@@ -529,19 +541,50 @@ class PortfolioPositionCapModifier:
             return Opinion(factor=self.name, verdict="pass")
         try:
             from src.agents.cio.trading_persona import get_persona
-            from src.agents.risk.risk_governor import RiskGovernor
+            from src.infra.config import cfg as app_cfg
             persona_obj = get_persona(persona_id=persona_id)
-            latest_regime = ctx.brain.store.latest_market_regime() or {}
-            gov = RiskGovernor("wheel-cap", persona=persona_obj, market_regime=latest_regime)
-            gov.brain = ctx.brain
-            gov._positions = ctx.brain.store.list_open_positions(persona_id=persona_id)
-            used_pct = gov._current_used_pct()
-            if used_pct >= gov.max_total_position_pct:
+            # 直接按 EntryGateway 口径计算，不构造 RiskGovernor（其 __init__
+            # 会触达全局 get_central_brain，回放/注入库下会串库）
+            positions = ctx.brain.store.list_open_positions(persona_id=persona_id)
+            if getattr(ctx, "mode", "shadow") != "live":
+                # 影子评估同一 signal 的旧路径持仓不计入已用仓位，
+                # 否则 order_fill_at_open 场景被算成"旧持仓+新提议"双倍仓位
+                ev_sig = str(
+                    (getattr(resolved, "evidence", None) or {}).get("signal_id")
+                    or sig.get("signal_id") or ""
+                )
+                if ev_sig:
+                    positions = [
+                        p for p in positions
+                        if str(p.get("original_signal_id") or p.get("signal_id") or "")
+                        != ev_sig
+                    ]
+            capital = float(
+                getattr(persona_obj, "capital", 0.0)
+                or app_cfg().get("initial_capital", 300000)
+            )
+            used_cost = sum(
+                float(p.get("entry_price") or 0) * int(p.get("current_qty") or 0)
+                for p in positions
+            )
+            used_pct = used_cost / capital if capital > 0 else 0.0
+            # regime 快照优先取本链路数据步注入的，其次库内最新
+            regime_snap = dict(
+                ctx.data.get("regime_snapshot")
+                or ctx.brain.store.latest_market_regime()
+                or {}
+            )
+            regime = str(regime_snap.get("regime") or "neutral")
+            max_total_pct = float(
+                regime_snap.get("max_total_position_pct")
+                or persona_obj.max_total_position_for(regime)
+            )
+            if used_pct >= max_total_pct:
                 return Opinion(
                     factor=self.name,
                     verdict="modify",
                     action="HOLD",
-                    reason=f"组合仓位已达上限 ({used_pct:.0%} >= {gov.max_total_position_pct:.0%})",
+                    reason=f"组合仓位已达上限 ({used_pct:.0%} >= {max_total_pct:.0%})",
                 )
         except Exception as e:  # noqa: BLE001
             logger.debug("mod.portfolio_position_cap 检查异常: %s", e)
@@ -667,7 +710,7 @@ class SharedFlagsAndBlacklistScreenFactor:
                 bl = DynamicBlacklist(
                     persona_id=ctx.persona.persona_id or None, brain=ctx.brain,
                 )
-                blacklist_syms = set(bl.get_blacklisted_symbols())
+                blacklist_syms = set(bl.get_blacklisted_symbols(as_of=ctx.now))
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "screen.shared_flags_and_blacklist 黑名单加载失败（放行全部候选）: %s", e,
@@ -683,6 +726,11 @@ class SharedFlagsAndBlacklistScreenFactor:
             if ctx.brain is not None:
                 try:
                     flags = ctx.brain.store.get_shared_stock_flags(sym)
+                    # 回放时钟：ctx.now 之后才打上的风险标记属于未来数据
+                    flags = [
+                        f for f in (flags or [])
+                        if (f.get("created_at") or "") <= ctx.now.isoformat()
+                    ]
                     if flags:
                         blocked.append(f"{sym}:{flags[0].get('flag_type', 'flagged')}")
                         continue

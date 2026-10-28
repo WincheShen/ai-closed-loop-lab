@@ -168,6 +168,17 @@ def run_wheel_entry_shadow_node(state: TradingState) -> dict:
             },
             now=now_dt,
         )
+        if binding.mode == "live":
+            # 入场转盘接管买入决策（成交/拒绝均留痕于 wheel_decisions）：
+            # 从 trade_signals 移除买单，阻止旧路径 RiskGovernor/Executioner
+            # 对同一批信号二次执行；卖出信号仍走旧路径处理退出
+            logger.info("clock.1535 入场转盘为 live，旧路径买单执行已接管")
+            return {
+                "trade_signals": [
+                    s for s in (state.get("trade_signals") or [])
+                    if str(s.get("action") or "") != "buy"
+                ]
+            }
     except Exception:  # noqa: BLE001
         logger.debug("clock.1535 入场转盘影子评估异常", exc_info=True)
     return {}
