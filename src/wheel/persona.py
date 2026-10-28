@@ -60,10 +60,10 @@ class MemoryViews:
             rows = conn.execute(
                 """SELECT ta.* FROM trade_attributions ta
                 LEFT JOIN positions p ON p.position_id = ta.position_id
-                WHERE (ta.persona_id = ? OR p.persona_id = ?)
+                WHERE COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?
                   AND ta.created_at >= ? AND ta.created_at <= ?
                 ORDER BY ta.created_at DESC""",
-                (self.persona_id, self.persona_id, cutoff_iso, as_of_iso),
+                (self.persona_id, cutoff_iso, as_of_iso),
             ).fetchall()
             res = [dict(r) for r in rows]
         except Exception:  # noqa: BLE001
@@ -84,10 +84,11 @@ class MemoryViews:
                 """SELECT l.* FROM lessons l
                 LEFT JOIN trade_attributions ta ON ta.attribution_id = l.attribution_id
                 LEFT JOIN positions p ON p.position_id = ta.position_id
-                WHERE (l.persona_id = ? OR ta.persona_id = ? OR p.persona_id = ?)
+                WHERE COALESCE(NULLIF(l.persona_id, ''), NULLIF(ta.persona_id, ''),
+                               p.persona_id) = ?
                   AND l.created_at <= ?
                 ORDER BY l.relevance_score DESC, l.created_at DESC LIMIT ?""",
-                (self.persona_id, self.persona_id, self.persona_id, as_of_iso, int(top)),
+                (self.persona_id, as_of_iso, int(top)),
             ).fetchall()
             res = [dict(r) for r in rows]
         except Exception:  # noqa: BLE001

@@ -1244,3 +1244,143 @@ def test_value_pool_stale_cache_missing_pe_rebuilds(tmp_path, monkeypatch):
     assert pool._load_from_cache() is None
 
 
+def test_check_stale_positions_skips_recently_reduced(tmp_path, monkeypatch):
+    """14:50 超期检查与复审冷却共用同一窗口：已减仓的持仓不再注入强制复审。"""
+    from src.agents.reviewer import stale_position_check as spc
+
+    brain = _MockBrain(tmp_path)
+    monkeypatch.setattr(spc, "get_central_brain", lambda: brain)
+
+    pos = {
+        **_ULTRA_POS, "position_id": "POS-V", "symbol": "600660",
+        "persona_id": "duan_yongping_v1", "entry_price": 55.0,
+        "entry_date": "2026-07-20", "strategy_id": "value_investing",
+    }
+    _open(brain, pos)
+
+    stale = spc.check_stale_positions(persona_id="duan_yongping_v1")
+    assert [p["position_id"] for p in stale] == ["POS-V"]
+
+    # 30 天冷却窗内已实际减仓 → 不再重复强制复审
+    brain.store.save_fill({
+        "fill_id": "F-S1", "order_id": "O-S1", "persona_id": "duan_yongping_v1",
+        "symbol": "600660", "side": "sell", "quantity": 200,
+        "avg_price": 52.0, "filled_at": datetime.now().isoformat(),
+    })
+    assert spc.check_stale_positions(persona_id="duan_yongping_v1") == []
+
+
+def _attr(brain, attr_id, pos_id, symbol, outcome, pnl=-3.0,
+          strategy="s1", created_at=None):
+    """写归因记录（persona 归属经 positions 表 fallback，不直接写 ta.persona_id）。"""
+    brain.store.save_attribution({
+        "attribution_id": attr_id, "position_id": pos_id, "symbol": symbol,
+        "outcome": outcome, "primary_cause": "test", "pnl_pct": pnl,
+        "strategy_id": strategy, "entry_regime": "bull",
+        "created_at": created_at or datetime.now().isoformat(),
+    })
+
+
+def test_dynamic_blacklist_persona_isolation(tmp_path, monkeypatch):
+    """DynamicBlacklist 的个股冷却/胜率降权只统计本角色的归因，不串其他角色。"""
+    from src.experience_layer import dynamic_blacklist as db_mod
+    from src.experience_layer import stock_memory as sm_mod
+    from src.experience_layer import strategy_ledger as sl_mod
+
+    brain = _MockBrain(tmp_path)
+    for mod in (db_mod, sm_mod, sl_mod):
+        monkeypatch.setattr(mod, "get_central_brain", lambda: brain)
+
+    # persona A 在同一只票上连亏 2 笔 → 触发个股冷却
+    for i in range(2):
+        pid = f"POS-A{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pid, "symbol": "300999",
+                      "persona_id": "short_term_hot_rotation_v1",
+                      "entry_date": "2026-10-10"})
+        brain.store.close_position(pid, 190.0, -500.0,
+                                   closed_at=f"2026-10-{20 + i}T14:00:00")
+        _attr(brain, f"AT-A{i}", pid, "300999", "loss")
+
+    bl_a = db_mod.DynamicBlacklist(persona_id="short_term_hot_rotation_v1")
+    bl_b = db_mod.DynamicBlacklist(persona_id="duan_yongping_v1")
+
+    blocked_a, _ = bl_a.is_blocked("300999")
+    blocked_b, _ = bl_b.is_blocked("300999")
+    assert blocked_a is True       # A 自己的连亏冷却
+    assert blocked_b is False      # B 不受 A 的连亏影响（修复前会误拦）
+
+
+def test_strategy_ledger_get_all_stats_persona_isolation(tmp_path, monkeypatch):
+    """get_all_stats(persona_id=...) 只聚合该角色的归因行。"""
+    from src.experience_layer import strategy_ledger as sl_mod
+
+    brain = _MockBrain(tmp_path)
+    monkeypatch.setattr(sl_mod, "get_central_brain", lambda: brain)
+
+    for persona, n_losses in (("short_term_hot_rotation_v1", 6), ("duan_yongping_v1", 0)):
+        for i in range(6):
+            pid = f"POS-{persona[:4]}-{i}"
+            _open(brain, {**_ULTRA_POS, "position_id": pid, "symbol": f"600{i}0",
+                          "persona_id": persona, "entry_date": "2026-10-01"})
+            outcome = "loss" if i < n_losses else "win"
+            pnl = -3.0 if outcome == "loss" else 5.0
+            brain.store.close_position(pid, 190.0, pnl * 100,
+                                       closed_at=f"2026-10-{10 + i}T14:00:00")
+            _attr(brain, f"AT-{persona[:4]}-{i}", pid, f"600{i}0", outcome,
+                  pnl=pnl, strategy="hot_rotation")
+
+    from src.experience_layer.strategy_ledger import StrategyLedger
+    ledger = StrategyLedger()
+
+    all_stats = ledger.get_all_stats()
+    short_stats = ledger.get_all_stats(persona_id="short_term_hot_rotation_v1")
+    duan_stats = ledger.get_all_stats(persona_id="duan_yongping_v1")
+
+    s_short = next(s for s in short_stats if s["strategy_id"] == "hot_rotation")
+    s_duan = next(s for s in duan_stats if s["strategy_id"] == "hot_rotation")
+    s_all = next(s for s in all_stats if s["strategy_id"] == "hot_rotation")
+
+    assert s_short["total_trades"] == 6 and s_short["losses"] == 6
+    assert s_short["recommendation"] == "SUSPEND"          # 短线连亏 → 暂停
+    assert s_duan["total_trades"] == 6 and s_duan["wins"] == 6
+    assert s_duan["recommendation"] == "BOOST"             # 段永平全胜 → 加权
+    assert s_all["total_trades"] == 12                     # 未隔离时合计
+    # ExperienceAPI 门面透传 persona_id
+    from src.experience_layer.experience_api import ExperienceAPI
+    api = ExperienceAPI.__new__(ExperienceAPI)
+    api.strategy_ledger = ledger
+    api_stats = api.get_all_strategy_stats(persona_id="duan_yongping_v1")
+    assert next(s for s in api_stats if s["strategy_id"] == "hot_rotation")["wins"] == 6
+
+
+def test_account_monitor_step_uses_persona_cooldown(tmp_path):
+    """AccountMonitorStep 把 PersonaPolicy 的 cooldown_days 传入指标计算。"""
+    from types import SimpleNamespace
+
+    from src.wheel.data.steps import AccountMonitorStep
+
+    brain = _MockBrain(tmp_path)
+    pid = "ultra_short_momentum_v1"
+    for i in range(2):
+        pos_id = f"POS-M{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id, "symbol": f"30022{i}"})
+        brain.store.close_position(pos_id, 194.0, -500.0,
+                                   closed_at="2026-10-23T14:00:00")
+
+    persona = SimpleNamespace(
+        persona_id=pid, max_daily_loss_pct=0.02,
+        consecutive_loss_limit=2, consecutive_loss_cooldown_days=5,
+    )
+    ctx = SimpleNamespace(
+        data={}, brain=brain, persona=persona,
+        now=datetime(2026, 10, 28, 14, 35),
+    )
+    out = AccountMonitorStep().load(ctx, {})
+    # 最近亏损(10-23)距今 3 个交易日：cooldown=5 → 仍拦截；cooldown=1 → 已恢复
+    assert out["account_risk"]["consecutive_loss_breached"] is True
+
+    persona.consecutive_loss_cooldown_days = 1
+    out = AccountMonitorStep().load(ctx, {})
+    assert out["account_risk"]["consecutive_loss_breached"] is False
+
+

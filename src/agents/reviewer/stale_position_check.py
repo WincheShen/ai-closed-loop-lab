@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from src.central_brain import get_central_brain
 
@@ -28,6 +28,45 @@ def _get_threshold_for_persona(persona_id: str | None, default: int) -> int:
     if persona_id and persona_id in _PERSONA_STALE_THRESHOLDS:
         return _PERSONA_STALE_THRESHOLDS[persona_id]
     return default
+
+
+def sold_within_days(
+    brain,
+    persona_id: str,
+    symbol: str,
+    days: int,
+    since: str | None = None,
+) -> bool:
+    """某角色最近 days 个自然日内是否已实际卖出过某标的（以 fills 成交为准）。
+
+    复审建议/网关拦截不算已减仓；since（通常为持仓 entry_date）存在时，
+    只统计建仓以来的卖出——同标的旧仓位的平仓不影响新仓位的判定。
+    """
+    try:
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        if since and str(since) > cutoff:
+            cutoff = str(since)
+        conn = brain.store._conn()
+        row = conn.execute(
+            "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? "
+            "AND lower(side) = 'sell' AND filled_at >= ? LIMIT 1",
+            (persona_id, symbol, cutoff),
+        ).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def stale_reduce_cooldown_days(threshold_days: int, pnl_pct: float) -> int:
+    """与 PositionReviewAgent._apply_rule_override 的超期冷却窗口保持一致：
+    价值持仓(阈值>=90) 30 天；短线按盈亏分级 10/5/3 天。"""
+    if threshold_days >= 90:
+        return 30
+    if pnl_pct > 5.0:
+        return 10
+    if pnl_pct > -3.0:
+        return 5
+    return 3
 
 
 def check_stale_positions(
@@ -79,6 +118,17 @@ def check_stale_positions(
 
         # 标记为 stale
         pnl_pct = _calc_unrealized_pnl_pct(pos)
+
+        # 超期减仓冷却：冷却窗内已实际减仓过的持仓不再触发强制复审，
+        # 避免每天 14:50 向 LLM 注入卖出倾向提示词绕过复审冷却
+        cd = stale_reduce_cooldown_days(threshold_days, pnl_pct)
+        pid = pos.get("persona_id") or persona_id or "short_term_hot_rotation_v1"
+        if sold_within_days(brain, pid, pos.get("symbol", ""), cd, since=entry_date_str):
+            logger.info(
+                "[STALE-SKIP] %s %s | 冷却窗 %d 天内已减仓，跳过强制复审",
+                pos.get("symbol", "?"), pos.get("name", ""), cd,
+            )
+            continue
         force_reason = (
             f"持仓已达{hold_days}天(阈值{threshold_days}天)，"
             f"浮动盈亏{pnl_pct:+.1f}%，需重新评估是否继续持有"

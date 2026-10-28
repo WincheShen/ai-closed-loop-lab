@@ -339,6 +339,7 @@ class AccountMonitorStep:
             window_days=window_days,
             max_daily_loss_pct=ctx.persona.max_daily_loss_pct,
             consecutive_loss_limit=ctx.persona.consecutive_loss_limit,
+            cooldown_days=getattr(ctx.persona, "consecutive_loss_cooldown_days", 1),
         )
         return {"account_risk": metrics}
 

@@ -41,9 +41,10 @@ class StockMemory:
             rows = conn.execute(
                 """SELECT ta.* FROM trade_attributions ta
                 LEFT JOIN positions p ON p.position_id = ta.position_id
-                WHERE ta.symbol = ? AND (ta.persona_id = ? OR p.persona_id = ?)
+                WHERE ta.symbol = ?
+                  AND COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?
                 ORDER BY ta.created_at DESC""",
-                (symbol, persona_id, persona_id),
+                (symbol, persona_id),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -58,7 +59,6 @@ class StockMemory:
         rows = [dict(r) for r in rows]
         total = len(rows)
         wins = sum(1 for r in rows if r["outcome"] == "win")
-        losses = sum(1 for r in rows if r["outcome"] == "loss")
         avg_pnl = sum(r.get("pnl_pct", 0) or 0 for r in rows) / total
         avg_hold = sum(r.get("holding_days", 0) or 0 for r in rows) / total
 
@@ -98,9 +98,11 @@ class StockMemory:
                 """SELECT l.lesson_text FROM lessons l
                 LEFT JOIN trade_attributions ta ON ta.attribution_id = l.attribution_id
                 LEFT JOIN positions p ON p.position_id = ta.position_id
-                WHERE l.symbol = ? AND (l.persona_id = ? OR ta.persona_id = ? OR p.persona_id = ?)
+                WHERE l.symbol = ?
+                  AND COALESCE(NULLIF(l.persona_id, ''), NULLIF(ta.persona_id, ''),
+                                   p.persona_id) = ?
                 ORDER BY l.created_at DESC LIMIT 3""",
-                (symbol, persona_id, persona_id, persona_id),
+                (symbol, persona_id),
             ).fetchall()
         else:
             lesson_rows = conn.execute(

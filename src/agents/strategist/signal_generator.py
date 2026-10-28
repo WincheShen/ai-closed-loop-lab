@@ -461,7 +461,8 @@ class StrategistEngine:
             from src.experience_layer import get_experience
             exp = get_experience()
             regime = self.market_regime.get("regime") if self.market_regime else None
-            return exp.strategy_prompt_block(regime=regime)
+            pid = getattr(self.persona, "id", None)
+            return exp.strategy_prompt_block(regime=regime, persona_id=pid)
         except Exception:
             return ""
 

@@ -49,8 +49,8 @@ class ExperienceAPI:
     def get_all_strategy_stats(
         self, regime: str | None = None, persona_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """查询所有策略统计。"""
-        return self.strategy_ledger.get_all_stats(regime=regime)
+        """查询所有策略统计（支持按 persona_id 角色隔离）。"""
+        return self.strategy_ledger.get_all_stats(regime=regime, persona_id=persona_id)
 
     def get_regime_matrix(self) -> dict:
         """获取策略×regime 胜率矩阵。"""
@@ -64,9 +64,11 @@ class ExperienceAPI:
 
     # ── Prompt 生成接口 ───────────────────────────────────────────────
 
-    def strategy_prompt_block(self, regime: str | None = None) -> str:
-        """生成策略表现 prompt 片段（给 Strategist 用）。"""
-        return self.strategy_ledger.generate_prompt_block(regime=regime)
+    def strategy_prompt_block(
+        self, regime: str | None = None, persona_id: str | None = None,
+    ) -> str:
+        """生成策略表现 prompt 片段（给 Strategist 用，支持按 persona_id 角色隔离）。"""
+        return self.strategy_ledger.generate_prompt_block(regime=regime, persona_id=persona_id)
 
     def stock_prompt_block(
         self, symbol: str, persona_id: str | None = None,

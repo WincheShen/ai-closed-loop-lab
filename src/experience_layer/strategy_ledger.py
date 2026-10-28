@@ -48,8 +48,8 @@ class StrategyLedger:
             sql += " AND ta.entry_regime = ?"
             params.append(regime)
         if persona_id:
-            sql += " AND (ta.persona_id = ? OR p.persona_id = ?)"
-            params.extend([persona_id, persona_id])
+            sql += " AND COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?"
+            params.append(persona_id)
         rows = conn.execute(sql, params).fetchall()
 
         if not rows:
@@ -89,24 +89,28 @@ class StrategyLedger:
             "weight_multiplier": round(multiplier, 2),
         }
 
-    def get_all_stats(self, regime: str | None = None) -> list[dict[str, Any]]:
-        """查询所有策略在指定 regime 下的统计。"""
+    def get_all_stats(
+        self, regime: str | None = None, persona_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """查询所有策略在指定 regime 下的统计（支持按 persona_id 角色隔离）。"""
         conn = self.brain.store._conn()
+        sql = """SELECT DISTINCT ta.strategy_id FROM trade_attributions ta
+                 LEFT JOIN positions p ON p.position_id = ta.position_id
+                 WHERE ta.strategy_id != ''"""
+        params: list[Any] = []
         if regime:
-            rows = conn.execute(
-                "SELECT DISTINCT strategy_id FROM trade_attributions "
-                "WHERE entry_regime = ? AND strategy_id != ''",
-                (regime,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT DISTINCT strategy_id FROM trade_attributions "
-                "WHERE strategy_id != ''"
-            ).fetchall()
+            sql += " AND ta.entry_regime = ?"
+            params.append(regime)
+        if persona_id:
+            sql += " AND COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?"
+            params.append(persona_id)
+        rows = conn.execute(sql, params).fetchall()
 
         results = []
         for r in rows:
-            stats = self.get_stats(r["strategy_id"], regime=regime)
+            stats = self.get_stats(
+                r["strategy_id"], regime=regime, persona_id=persona_id,
+            )
             if stats:
                 results.append(stats)
 
@@ -159,13 +163,15 @@ class StrategyLedger:
 
         return matrix
 
-    def generate_prompt_block(self, regime: str | None = None) -> str:
+    def generate_prompt_block(
+        self, regime: str | None = None, persona_id: str | None = None,
+    ) -> str:
         """生成注入 Strategist prompt 的策略表现总结。
 
         替代旧的 PromptEvolution.generate_evolution_prompt()。
         基于 DB 实时数据，不依赖 JSON 文件。
         """
-        stats = self.get_all_stats(regime=regime)
+        stats = self.get_all_stats(regime=regime, persona_id=persona_id)
         if not stats:
             return ""
 

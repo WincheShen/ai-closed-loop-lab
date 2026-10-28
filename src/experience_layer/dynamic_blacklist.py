@@ -40,7 +40,9 @@ class DynamicBlacklist:
             (is_blocked, reason)
         """
         # 1. 个股冷却期
-        reason = self.stock_memory.get_cooldown_reason(symbol)
+        reason = self.stock_memory.get_cooldown_reason(
+            symbol, persona_id=self.persona_id,
+        )
         if reason:
             return True, reason
 
@@ -61,7 +63,9 @@ class DynamicBlacklist:
         Returns:
             [{"strategy_id": str, "win_rate": float, "reason": str}, ...]
         """
-        stats = self.strategy_ledger.get_all_stats(regime=regime)
+        stats = self.strategy_ledger.get_all_stats(
+            regime=regime, persona_id=self.persona_id,
+        )
         blocked = []
         for s in stats:
             if s["recommendation"] == "SUSPEND":
@@ -105,7 +109,7 @@ class DynamicBlacklist:
                 continue
 
             # 历史胜率降权（不移除，给 Strategist 一个机会）
-            history = self.stock_memory.get_history(symbol)
+            history = self.stock_memory.get_history(symbol, persona_id=self.persona_id)
             if history and history["trade_count"] >= 3 and history["win_rate"] < 0.3:
                 original_score = c.get("qlib_score", 1.0)
                 c["qlib_score"] = round(original_score * 0.5, 3)

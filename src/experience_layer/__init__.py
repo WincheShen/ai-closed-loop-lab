@@ -8,9 +8,14 @@
 所有数据基于 trade_attributions 表实时聚合，单一事实来源，不再维护独立的 JSON 文件。
 """
 
+from typing import TYPE_CHECKING
+
 from src.experience_layer.strategy_ledger import StrategyLedger
 from src.experience_layer.stock_memory import StockMemory
 from src.experience_layer.dynamic_blacklist import DynamicBlacklist
+
+if TYPE_CHECKING:
+    from src.experience_layer.experience_api import ExperienceAPI
 
 __all__ = ["StrategyLedger", "StockMemory", "DynamicBlacklist", "get_experience"]
 

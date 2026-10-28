@@ -754,27 +754,16 @@ class PositionReviewAgent:
         只统计本仓位建仓以来的卖出：同标的旧仓位平仓不影响新仓位的超期减仓。
         """
         try:
-            from datetime import datetime as dt_cls, timedelta
-            cutoff = (dt_cls.now() - timedelta(days=cooldown_days)).isoformat()
-            entry = str(position.get("entry_date") or "")
-            if entry and entry > cutoff:
-                cutoff = entry
+            from src.agents.reviewer.stale_position_check import sold_within_days
             persona = (
                 position.get("persona_id")
                 or getattr(self, "persona_id", None)
                 or "short_term_hot_rotation_v1"
             )
-            conn = self.brain.store._conn()
-            row = conn.execute(
-                "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? "
-                "AND lower(side) = 'sell' AND filled_at >= ? LIMIT 1",
-                (
-                    persona,
-                    position.get("symbol") or "",
-                    cutoff,
-                ),
-            ).fetchone()
-            return row is not None
+            return sold_within_days(
+                self.brain, persona, position.get("symbol") or "",
+                cooldown_days, since=str(position.get("entry_date") or "") or None,
+            )
         except Exception:  # noqa: BLE001
             return False
 
