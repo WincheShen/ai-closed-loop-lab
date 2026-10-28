@@ -32,6 +32,9 @@ RECOVER_AFTER_S = 300        # running 超过该时长视为僵尸，回退 due
 _MORNING = (time(9, 30), time(11, 30))
 _AFTERNOON = (time(13, 0), time(15, 0))
 _HANDLED_PREFIXES = ("followup.", "market.", "account.", "position.", "clock.next_open")
+# 记账/账户类事件：由平仓、熔断等动作触发，可能在收盘后或持仓已平时分发，
+# 不应受"交易时段"与"持仓须为 open"的盘中约束
+_BOOKKEEPING_PREFIXES = ("position.", "account.")
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wheel-dispatch")
 
@@ -308,7 +311,8 @@ def dispatch_once(brain, now: datetime | None = None) -> dict[str, int]:
             store.set_wheel_event_status(eid, "expired", error="超过复查次数上限")
             stats["expired"] += 1
             continue
-        if not _in_session(now.time()):
+        is_bookkeeping = event_type.startswith(_BOOKKEEPING_PREFIXES)
+        if not is_bookkeeping and not _in_session(now.time()):
             if now.time() < _AFTERNOON[0]:
                 store.defer_wheel_event(eid, _next_session_start(now))
                 stats["deferred"] += 1
@@ -318,7 +322,7 @@ def dispatch_once(brain, now: datetime | None = None) -> dict[str, int]:
             continue
 
         subject = _row_to_event(row).subject
-        if not _position_open(store, subject):
+        if not is_bookkeeping and not _position_open(store, subject):
             store.set_wheel_event_status(eid, "cancelled", error="持仓已平")
             stats["cancelled"] += 1
             continue

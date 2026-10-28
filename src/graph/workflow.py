@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any
 
 from langgraph.graph import END, StateGraph
 
@@ -122,6 +121,58 @@ def _route_after_strategist(state: TradingState) -> str:
     return END
 
 
+def run_wheel_entry_shadow_node(state: TradingState) -> dict:
+    """LangGraph 节点 — Strategist 产出原始信号后立即跑入场转盘链（Phase 3.4）。
+
+    必须位于 RiskGovernor（会删改/覆写 trade_signals）与 Executioner（会把
+    immediate 信号写库建仓）之前，否则：
+    - 转盘读到的不是 Strategist 原始提议，影子语义失真；
+    - funnel / EntryGateway 会把当日新买标的误判为"已持仓"整批拦截。
+    """
+    try:
+        from src.wheel.config import get_config
+        from src.wheel.persona import persona_policy
+        from src.wheel.protocol import WheelEvent
+        from src.wheel.runner import run_binding
+
+        pid = state.get("persona_id") or "short_term_hot_rotation_v1"
+        cfg = get_config()
+        binding = cfg.binding_for(pid, "clock.1535")
+        if not binding or binding.mode == "off":
+            return {}
+        now_dt = datetime.now()
+        ev = WheelEvent(
+            event_id=f"wev-clock.1535-{now_dt:%Y%m%d-%H%M%S}-{pid}",
+            type="clock.1535",
+            due_at=now_dt,
+            persona_id=pid,
+            subject={},
+            source="daily_pipeline",
+        )
+        pol = persona_policy(cfg, pid, binding)
+        sigs_by_sym = {
+            str(s.get("symbol")): s
+            for s in (state.get("trade_signals") or [])
+            if s.get("symbol")
+        }
+        run_binding(
+            cfg,
+            binding,
+            ev,
+            pol,
+            get_central_brain(),
+            preloaded={
+                "candidates": list(state.get("target_stocks") or []),
+                "regime_snapshot": dict(state.get("market_regime") or {}),
+                "signals_by_symbol": sigs_by_sym,
+            },
+            now=now_dt,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("clock.1535 入场转盘影子评估异常", exc_info=True)
+    return {}
+
+
 def _route_after_risk_governor(state: TradingState) -> str:
     """风控后路由：有通过的信号才进入执行。
 
@@ -171,6 +222,8 @@ def build_daily_graph() -> StateGraph:
     graph.add_node("market_brain", node_guard("market_brain")(run_market_brain_node))
     graph.add_node("explorer", node_guard("explorer")(run_discovery_node))
     graph.add_node("strategist", node_guard("strategist")(run_strategy_node))
+    # Phase 3.4：入场转盘影子评估必须在 RiskGovernor 删改信号与 Executioner 建仓之前
+    graph.add_node("wheel_shadow", node_guard("wheel_shadow")(run_wheel_entry_shadow_node))
     graph.add_node("risk_governor", node_guard("risk_governor")(run_risk_governor_node))
     graph.add_node("executioner", node_guard("executioner")(run_execution_node))
     graph.add_node("influencer", node_guard("influencer")(run_influencer_node))
@@ -181,7 +234,8 @@ def build_daily_graph() -> StateGraph:
     # 边
     graph.add_conditional_edges("market_brain", _route_after_market_brain)
     graph.add_conditional_edges("explorer", _route_after_explorer)
-    graph.add_conditional_edges("strategist", _route_after_strategist)
+    graph.add_edge("strategist", "wheel_shadow")
+    graph.add_conditional_edges("wheel_shadow", _route_after_strategist)
     graph.add_conditional_edges("risk_governor", _route_after_risk_governor)
     graph.add_conditional_edges("executioner", _route_after_executioner)
     graph.add_edge("influencer", END)
@@ -234,48 +288,6 @@ async def run_daily_pipeline(
     # 持久化最终状态（失败也要落库）
     brain = get_central_brain()
     brain.persist_state(session_id, run_mode, result)
-
-    # Phase 3.4：15:35 日度入场转盘链并行影子评估（market_screen -> entry_confirm -> EntryGateway）
-    try:
-        from src.wheel.config import get_config
-        from src.wheel.persona import persona_policy
-        from src.wheel.protocol import WheelEvent
-        from src.wheel.runner import run_binding
-
-        eff_pid = initial_state["persona_id"]
-        cfg = get_config()
-        binding = cfg.binding_for(eff_pid, "clock.1535")
-        if binding and binding.mode != "off":
-            now_dt = datetime.now()
-            ev = WheelEvent(
-                event_id=f"wev-clock.1535-{now_dt:%Y%m%d-%H%M%S}-{eff_pid}",
-                type="clock.1535",
-                due_at=now_dt,
-                persona_id=eff_pid,
-                subject={},
-                source="daily_pipeline",
-            )
-            pol = persona_policy(cfg, eff_pid, binding)
-            sigs_by_sym = {
-                str(s.get("symbol")): s
-                for s in (result.get("trade_signals") or [])
-                if s.get("symbol")
-            }
-            run_binding(
-                cfg,
-                binding,
-                ev,
-                pol,
-                brain,
-                preloaded={
-                    "candidates": list(result.get("target_stocks") or []),
-                    "regime_snapshot": dict(result.get("market_regime") or {}),
-                    "signals_by_symbol": sigs_by_sym,
-                },
-                now=now_dt,
-            )
-    except Exception:  # noqa: BLE001
-        logger.debug("clock.1535 日度入场转盘链评估异常", exc_info=True)
 
     logger.info("=" * 60)
     logger.info("✅ 日常交易流完成 — session=%s", session_id)

@@ -29,8 +29,8 @@ _COOLDOWN_DAYS = 5
 class StockMemory:
     """个股交易记忆 — 从 trade_attributions 实时聚合。"""
 
-    def __init__(self) -> None:
-        self.brain = get_central_brain()
+    def __init__(self, brain=None) -> None:
+        self.brain = brain or get_central_brain()
 
     def get_history(
         self, symbol: str, persona_id: str | None = None,

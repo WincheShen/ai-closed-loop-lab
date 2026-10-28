@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.central_brain import get_central_brain
 from src.experience_layer.strategy_ledger import StrategyLedger
 from src.experience_layer.stock_memory import StockMemory
 from src.experience_layer.dynamic_blacklist import DynamicBlacklist
@@ -19,13 +20,14 @@ logger = get_agent_logger("experience", "api")
 class ExperienceAPI:
     """经验层统一门面。"""
 
-    def __init__(self) -> None:
-        self.strategy_ledger = StrategyLedger()
-        self.stock_memory = StockMemory()
+    def __init__(self, brain=None) -> None:
+        self.brain = brain or get_central_brain()
+        self.strategy_ledger = StrategyLedger(brain=self.brain)
+        self.stock_memory = StockMemory(brain=self.brain)
 
     def blacklist_for(self, persona_id: str | None = None) -> DynamicBlacklist:
         """获取针对特定人格的黑名单实例。"""
-        return DynamicBlacklist(persona_id=persona_id)
+        return DynamicBlacklist(persona_id=persona_id, brain=self.brain)
 
     # ── 查询接口 ──────────────────────────────────────────────────────
 

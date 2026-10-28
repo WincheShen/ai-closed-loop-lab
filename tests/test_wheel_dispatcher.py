@@ -1470,3 +1470,125 @@ def test_llm_signal_propose_uses_raw_position_pct(tmp_path):
     assert op.qty_pct == 0.08   # 若误读 approved_position_pct 会得到 0.05 兜底值
 
 
+def test_entry_gateway_lock_acquire_release(tmp_path):
+    """EntryGateway 原子锁：签名与 MemoryStore.try_acquire_factor_lock / clear_factor_state 对齐。"""
+    from src.wheel.entry_gateway import EntryGateway, LOCK_TTL
+
+    gw = EntryGateway(_MockBrain(tmp_path))
+    key = "duan_yongping_v1:600660"
+    assert gw._acquire(key, _T) is True          # 首次抢锁成功
+    assert gw._acquire(key, _T) is False         # 锁仍持有 → 拒
+    gw._release(key)
+    assert gw._acquire(key, _T) is True          # 释放后可再抢
+    # TTL 过期后可重抢
+    later = _T + LOCK_TTL + timedelta(seconds=1)
+    gw._release(key)
+    assert gw._acquire(key, later) is True
+
+
+def test_portfolio_position_cap_runs_without_signal(tmp_path, monkeypatch):
+    """mod.portfolio_position_cap 不要求 signal 数据步（entry_confirm 中必须真正执行）。"""
+    from types import SimpleNamespace
+
+    from src.agents.risk import risk_governor as rg_mod
+    from src.wheel.factors.entry_factors import PortfolioPositionCapModifier
+
+    assert PortfolioPositionCapModifier.requires == ()
+
+    brain = _MockBrain(tmp_path)
+    monkeypatch.setattr(rg_mod, "get_central_brain", lambda: brain)
+    pid = "duan_yongping_v1"
+    # 持仓市值 2x 资金 → used_pct 远超上限
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-BIG", "symbol": "600660",
+                  "persona_id": pid, "entry_price": 1500.0, "current_qty": 400})
+    ctx = SimpleNamespace(
+        resolved=SimpleNamespace(action="BUY"),
+        data={"strategist_signal": {"persona_id": pid}},
+        brain=brain,
+        persona=SimpleNamespace(persona_id=pid),
+    )
+    op = PortfolioPositionCapModifier().evaluate(ctx, {})
+    assert op.verdict == "modify" and op.action == "HOLD"
+
+
+def test_position_closed_event_dispatches_post_close(tmp_path):
+    """close_position 发射 position.closed；记账类事件不受"已收盘/持仓已平"约束。"""
+    from src.wheel.dispatcher import dispatch_once
+
+    brain = _MockBrain(tmp_path)
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-C", "entry_date": "2026-10-10"})
+    brain.store.close_position("POS-C", 190.0, -500.0, closed_at="2026-10-28T14:55:00")
+
+    # 15:05 已收盘：position.* 记账事件仍应被分发（修复前会因"已收盘"/"持仓已平"被吞）
+    stats = dispatch_once(brain, now=datetime(2026, 10, 28, 15, 5))
+    assert stats["done"] >= 1
+    row = brain.store._conn().execute(
+        "SELECT status FROM wheel_events WHERE event_id = 'position.closed|POS-C'",
+    ).fetchone()
+    assert row["status"] == "done"
+    # attribution 转盘留下决策留痕
+    dec = brain.store._conn().execute(
+        "SELECT action FROM wheel_decisions WHERE wheel = 'attribution' AND persona_id = ?",
+        ("ultra_short_momentum_v1",),
+    ).fetchone()
+    assert dec is not None and dec["action"] == "WATCH"
+
+
+def test_experience_layer_uses_injected_brain(tmp_path):
+    """ExperienceAPI/DynamicBlacklist 接受注入 brain（转盘回测/测试不走全局单例）。"""
+    from src.experience_layer.experience_api import ExperienceAPI
+
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    for i in range(2):  # 连亏 2 笔 → 冷却
+        pos_id = f"POS-I{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id, "symbol": "300999",
+                      "persona_id": pid, "entry_date": "2026-10-10"})
+        brain.store.close_position(pos_id, 190.0, -500.0,
+                                   closed_at=f"2026-10-{20 + i}T14:00:00")
+        _attr(brain, f"AT-I{i}", pos_id, "300999", "loss")
+
+    exp = ExperienceAPI(brain=brain)
+    assert exp.is_stock_in_cooldown("300999", persona_id=pid) is True
+    bl = exp.blacklist_for(pid)
+    assert "300999" in bl.get_blacklisted_symbols()
+
+
+def test_wheel_entry_shadow_node_uses_raw_signals(tmp_path, monkeypatch):
+    """clock.1535 图内节点：在风控删改前用 Strategist 原始信号跑入场转盘链。"""
+    from src.agents.risk import risk_governor as rg_mod
+    from src.graph import workflow as workflow_mod
+
+    brain = _MockBrain(tmp_path)
+    monkeypatch.setattr(workflow_mod, "get_central_brain", lambda: brain)
+    monkeypatch.setattr(rg_mod, "get_central_brain", lambda: brain)
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 28, 15, 35)   # 交易日 15:35
+
+    monkeypatch.setattr(workflow_mod, "datetime", _FakeDT)
+
+    state = {
+        "persona_id": "short_term_hot_rotation_v1",
+        "target_stocks": [{"symbol": "300001", "name": "测试", "price": 10.0,
+                           "qlib_score": 0.8}],
+        "market_regime": {"regime": "neutral", "recommended_posture": "selective_attack"},
+        "trade_signals": [{
+            "signal_id": "SIG-T1", "symbol": "300001", "action": "buy",
+            "position_pct": 0.08, "approved_position_pct": 0.0,
+            "entry_price": 10.0, "name": "测试",
+        }],
+    }
+    workflow_mod.run_wheel_entry_shadow_node(state)
+
+    conn = brain.store._conn()
+    dec = conn.execute(
+        "SELECT action, qty_pct FROM wheel_decisions WHERE wheel = 'entry_confirm'",
+    ).fetchone()
+    assert dec is not None
+    assert dec["action"] == "BUY"
+    assert abs(dec["qty_pct"] - 0.08) < 1e-6   # 原始 position_pct，非 approved(0.0)
+
+

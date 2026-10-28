@@ -240,16 +240,17 @@ class EntryGateway:
     def _acquire(self, lock_key: str, now: datetime) -> bool:
         try:
             return self.store.try_acquire_factor_lock(
-                "*", _LOCK_FACTOR, lock_key, ttl_seconds=LOCK_TTL.total_seconds(), now=now,
+                "*", _LOCK_FACTOR, lock_key, now, LOCK_TTL,
             )
         except Exception:  # noqa: BLE001
+            logger.error("entry lock 获取失败 %s", lock_key, exc_info=True)
             return False
 
     def _release(self, lock_key: str) -> None:
         try:
-            self.store.delete_factor_state("*", _LOCK_FACTOR, lock_key)
+            self.store.clear_factor_state("*", _LOCK_FACTOR, lock_key)
         except Exception:  # noqa: BLE001
-            logger.debug("entry lock 释放失败 %s", lock_key, exc_info=True)
+            logger.warning("entry lock 释放失败 %s", lock_key, exc_info=True)
 
     def _mark_executed(self, decision_id: str) -> None:
         if not decision_id:

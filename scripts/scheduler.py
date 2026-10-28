@@ -125,6 +125,44 @@ def tracked_job(job_name: str):
     return deco
 
 
+def _run_clock_binding(event_type: str, source: str) -> int:
+    """为所有绑定 event_type 的角色跑对应转盘（时钟事件由 scheduler 直接调用，§12）。"""
+    from src.central_brain import get_central_brain
+    from src.wheel.config import get_config
+    from src.wheel.persona import persona_policy
+    from src.wheel.protocol import WheelEvent
+    from src.wheel.runner import run_binding
+
+    ran = 0
+    try:
+        cfg = get_config()
+        brain = get_central_brain()
+        now_dt = datetime.now()
+        for pid in cfg.personas:
+            binding = cfg.binding_for(pid, event_type)
+            if not binding or binding.mode == "off":
+                continue
+            try:
+                ev = WheelEvent(
+                    event_id=f"wev-{event_type}-{now_dt:%Y%m%d-%H%M%S}-{pid}",
+                    type=event_type,
+                    due_at=now_dt,
+                    persona_id=pid,
+                    subject={},
+                    source=source,
+                )
+                run_binding(
+                    cfg, binding, ev,
+                    persona_policy(cfg, pid, binding), brain, now=now_dt,
+                )
+                ran += 1
+            except Exception as e:
+                logger.warning("%s 转盘执行失败 %s: %s", event_type, pid, e)
+    except Exception as e:
+        logger.warning("%s 转盘绑定执行异常: %s", event_type, e)
+    return ran
+
+
 # --- 定时任务 ---
 
 @skip_if_weekend
@@ -453,6 +491,9 @@ def job_weekly_feedback() -> None:
     except Exception as e:
         logger.error("[MetaRule] 归纳失败 (不影响主流程): %s", e)
 
+    # Phase 3.8 / 4b：clock.weekly → weekly_reflection 记忆转盘（shadow 留痕）
+    _run_clock_binding("clock.weekly", source="weekly_feedback")
+
 
 @skip_if_weekend
 @tracked_job("morning_pulse")
@@ -511,6 +552,8 @@ def job_short_term_watchlist_audit() -> None:
             res.get("data_ok"), audited.get("checked", 0), audited.get("removed", 0),
             res.get("added", 0), res.get("pool_size", 0),
         )
+        # Phase 3.8：clock.1530 → watchlist_maintain 记忆转盘（shadow 留痕）
+        _run_clock_binding("clock.1530", source="short_term_watchlist_audit")
         return {
             "data_ok": res.get("data_ok"),
             "checked": audited.get("checked", 0),

@@ -429,8 +429,12 @@ class StockCooldownAndSuspendVetoFactor:
         strategy_id = str(sig.get("strategy_id") or "")
         persona_id = str(sig.get("persona_id") or ctx.persona.persona_id or "") or None
         try:
-            from src.experience_layer import get_experience
-            exp = get_experience()
+            if ctx.brain is not None:
+                from src.experience_layer.experience_api import ExperienceAPI
+                exp = ExperienceAPI(brain=ctx.brain)
+            else:
+                from src.experience_layer import get_experience
+                exp = get_experience()
             if symbol and exp.is_stock_in_cooldown(symbol, persona_id=persona_id):
                 return Opinion(factor=self.name, verdict="veto", reason=f"{symbol} 处于个股冷却期")
             if strategy_id and ctx.brain is not None:
@@ -504,18 +508,22 @@ class PendingConditionMetRuleFactor:
 
 
 class PortfolioPositionCapModifier:
-    """mod.portfolio_position_cap — 组合总仓位已达上限时将 BUY 调弱为 HOLD。"""
+    """mod.portfolio_position_cap — 组合总仓位已达上限时将 BUY 调弱为 HOLD。
+
+    signal 只是 persona_id 的可选回退来源，不是硬依赖（entry_confirm 的
+    数据步产出 candidate/strategist_signal 而非 signal，requires 若声明
+    signal 会导致本修饰器永远被依赖检查 skip）。"""
 
     name = "mod.portfolio_position_cap"
     stage = "modify"
-    requires = ("signal",)
+    requires: tuple[str, ...] = ()
     param_keys: tuple[str, ...] = ()
 
     def evaluate(self, ctx: Context, params: dict) -> Opinion:
         resolved = ctx.resolved
         if not resolved or resolved.action not in ("BUY", "ADD") or ctx.brain is None:
             return Opinion(factor=self.name, verdict="pass")
-        sig = ctx.data.get("signal") or {}
+        sig = ctx.data.get("signal") or ctx.data.get("strategist_signal") or {}
         persona_id = str(sig.get("persona_id") or ctx.persona.persona_id or "")
         if not persona_id:
             return Opinion(factor=self.name, verdict="pass")
@@ -656,7 +664,9 @@ class SharedFlagsAndBlacklistScreenFactor:
         if ctx.brain is not None:
             try:
                 from src.experience_layer.dynamic_blacklist import DynamicBlacklist
-                bl = DynamicBlacklist(persona_id=ctx.persona.persona_id or None)
+                bl = DynamicBlacklist(
+                    persona_id=ctx.persona.persona_id or None, brain=ctx.brain,
+                )
                 blacklist_syms = set(bl.get_blacklisted_symbols())
             except Exception as e:  # noqa: BLE001
                 logger.warning(

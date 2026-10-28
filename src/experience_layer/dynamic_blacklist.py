@@ -23,11 +23,11 @@ logger = get_agent_logger("experience", "blacklist")
 class DynamicBlacklist:
     """动态黑名单 — 基于交易经验自动屏蔽。"""
 
-    def __init__(self, persona_id: str | None = None) -> None:
-        self.brain = get_central_brain()
+    def __init__(self, persona_id: str | None = None, brain=None) -> None:
+        self.brain = brain or get_central_brain()
         self.persona_id = persona_id
-        self.stock_memory = StockMemory()
-        self.strategy_ledger = StrategyLedger()
+        self.stock_memory = StockMemory(brain=self.brain)
+        self.strategy_ledger = StrategyLedger(brain=self.brain)
 
     def is_blocked(
         self,

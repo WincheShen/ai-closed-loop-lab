@@ -29,8 +29,8 @@ _WEIGHT_MULTIPLIER_MAX = 1.8
 class StrategyLedger:
     """策略×regime 实时胜率台账。"""
 
-    def __init__(self) -> None:
-        self.brain = get_central_brain()
+    def __init__(self, brain=None) -> None:
+        self.brain = brain or get_central_brain()
 
     def get_stats(
         self,

@@ -1230,6 +1230,10 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
     ) -> None:
         conn = self._conn()
         ts = closed_at or datetime.now().isoformat()
+        row = conn.execute(
+            "SELECT status, symbol, persona_id FROM positions WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
         conn.execute(
             """UPDATE positions
             SET status = 'closed', close_price = ?, realized_pnl = ?,
@@ -1241,6 +1245,23 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             "DELETE FROM wheel_factor_state WHERE subject_key = ?",
             (position_id,),
         )
+        if row and row["status"] == "open":
+            # Phase 3.8：发射 position.closed 事件 → Dispatcher 派发 attribution
+            # 记忆转盘；与平仓同事务（回滚则事件一并回滚），event_id 幂等
+            try:
+                self.insert_wheel_event({
+                    "event_id": f"position.closed|{position_id}",
+                    "type": "position.closed",
+                    "persona_id": row["persona_id"],
+                    "subject": {"position_id": position_id, "symbol": row["symbol"]},
+                    "payload": {"close_price": close_price, "realized_pnl": realized_pnl},
+                    "source": "close_position",
+                    "due_at": ts,
+                })
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "position.closed 事件发射失败 %s", position_id, exc_info=True,
+                )
         self._auto_commit()
 
     def save_position_review(
