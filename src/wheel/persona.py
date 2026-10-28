@@ -182,6 +182,9 @@ def persona_policy(
         daily_pipeline=meta["daily_pipeline"],
         max_daily_loss_pct=float(bparams.get("max_daily_loss_pct", meta["max_daily_loss_pct"])),
         consecutive_loss_limit=int(bparams.get("consecutive_loss_limit", meta["consecutive_loss_limit"])),
+        consecutive_loss_cooldown_days=int(
+            bparams.get("consecutive_loss_cooldown_days", meta["consecutive_loss_cooldown_days"])
+        ),
     )
 
 
@@ -191,6 +194,7 @@ def _persona_meta(persona_id: str, kind: str) -> dict[str, Any]:
     daily_pipeline = kind != "ultra"
     max_daily_loss_pct = 0.02 if kind == "ultra" else (0.05 if kind == "value" else 0.03)
     consecutive_loss_limit = 2 if kind == "ultra" else 5
+    consecutive_loss_cooldown_days = 1
     try:
         from src.agents.cio.trading_persona import list_personas, load_persona_by_id
         for raw in list_personas():
@@ -201,6 +205,9 @@ def _persona_meta(persona_id: str, kind: str) -> dict[str, Any]:
         if p is not None and p.id == persona_id:
             max_daily_loss_pct = float(p.max_daily_loss_pct)
             consecutive_loss_limit = int(p.consecutive_loss_limit)
+            consecutive_loss_cooldown_days = int(
+                p.risk_limits.get("consecutive_loss_cooldown_days", 1)
+            )
             if kind == "ultra" and p.strategy_regime_compatibility:
                 allowed = tuple(p.strategy_regime_compatibility.keys())
     except Exception:  # noqa: BLE001
@@ -210,6 +217,7 @@ def _persona_meta(persona_id: str, kind: str) -> dict[str, Any]:
         "daily_pipeline": daily_pipeline,
         "max_daily_loss_pct": max_daily_loss_pct,
         "consecutive_loss_limit": consecutive_loss_limit,
+        "consecutive_loss_cooldown_days": consecutive_loss_cooldown_days,
     }
 
 
@@ -243,7 +251,7 @@ def compute_account_risk_metrics(
             if consecutive_loss_limit is None:
                 consecutive_loss_limit = pol.consecutive_loss_limit
             if cooldown_days is None:
-                cooldown_days = int(pol.params.get("consecutive_loss_cooldown_days", 1))
+                cooldown_days = int(pol.consecutive_loss_cooldown_days)
         except Exception:  # noqa: BLE001
             max_daily_loss_pct = max_daily_loss_pct or 0.03
             consecutive_loss_limit = consecutive_loss_limit or 5
@@ -296,16 +304,20 @@ def compute_account_risk_metrics(
     # 连亏冷静期：只有"最近一笔亏损仍在 cooldown_days 个交易日内"才拦截；
     # 冷静期过后连亏计数保留在指标中，但不再拦截新开仓
     streak_active = False
-    if consecutive_losses >= consecutive_loss_limit and recent:
+    days_since_last_loss: int | None = None
+    if consecutive_losses > 0 and recent:
         try:
             from src.infra.trading_calendar import trading_days_between
             last_closed = str(recent[0].get("closed_at") or "")[:10]
-            days_since = trading_days_between(
+            days_since_last_loss = trading_days_between(
                 datetime.fromisoformat(last_closed).date(), now_dt.date(),
             )
-            streak_active = days_since <= int(cooldown_days)
+            streak_active = (
+                consecutive_losses >= consecutive_loss_limit
+                and days_since_last_loss <= int(cooldown_days)
+            )
         except (ValueError, TypeError):
-            streak_active = True
+            streak_active = consecutive_losses >= consecutive_loss_limit
 
     consecutive_loss_breached = consecutive_losses >= consecutive_loss_limit and streak_active
 
@@ -352,6 +364,8 @@ def compute_account_risk_metrics(
         "consecutive_losses": consecutive_losses,
         "consecutive_loss_limit": consecutive_loss_limit,
         "consecutive_loss_breached": consecutive_loss_breached,
+        "streak_active": streak_active,
+        "days_since_last_loss": days_since_last_loss,
         "cooldown_days": int(cooldown_days),
         "window_days": window_days,
     }

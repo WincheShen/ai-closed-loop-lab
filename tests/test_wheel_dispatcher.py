@@ -1048,6 +1048,41 @@ def test_consecutive_loss_cooldown_releases_after_cold_period(tmp_path):
     assert m2["consecutive_loss_breached"] is False
 
 
+def test_consecutive_loss_throttle_factor_respects_cooldown(tmp_path):
+    """mod.consecutive_loss_throttle 与执行器一致读 consecutive_loss_breached，
+    冷静期过后不再拦截买入。"""
+    from types import SimpleNamespace
+
+    from src.wheel.factors.entry_factors import ConsecutiveLossThrottleModifier
+    from src.wheel.persona import compute_account_risk_metrics
+
+    brain = _MockBrain(tmp_path)
+    pid = "ultra_short_momentum_v1"
+    for i, closed_at in enumerate(("2026-10-23T14:30:00", "2026-10-26T09:35:00")):
+        pos_id = f"POS-T{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id, "symbol": f"30011{i}"})
+        brain.store.close_position(pos_id, 194.0, -500.0, closed_at=closed_at)
+
+    factor = ConsecutiveLossThrottleModifier()
+
+    def _ctx(now):
+        risk = compute_account_risk_metrics(
+            brain, pid, now=now, consecutive_loss_limit=2, cooldown_days=1,
+        )
+        return SimpleNamespace(
+            resolved=SimpleNamespace(action="BUY"),
+            data={"account_risk": risk},
+        )
+
+    # 冷静期内（10-27）：拦截 BUY → HOLD
+    op = factor.evaluate(_ctx(datetime(2026, 10, 27, 14, 35)), {})
+    assert op.verdict == "modify" and op.action == "HOLD"
+
+    # 冷静期过后（10-28）：放行 BUY
+    op = factor.evaluate(_ctx(datetime(2026, 10, 28, 14, 35)), {})
+    assert op.verdict == "pass"
+
+
 def test_stale_position_reduce_cooldown(tmp_path):
     """价值持仓超 90 天减仓一次后，30 天内不再因超期规则重复减仓（防跨日切香肠）。"""
     from src.agents.reviewer.position_reviewer import PositionReviewAgent
@@ -1064,6 +1099,15 @@ def test_stale_position_reduce_cooldown(tmp_path):
     }
     hold = {"action": "HOLD", "thesis_status": "intact"}
 
+    # 建仓前的旧仓位平仓成交 → 不算本仓位已减仓，超期规则仍应触发 REDUCE
+    brain.store.save_fill({
+        "fill_id": "F-0", "order_id": "O-0", "persona_id": "duan_yongping_v1",
+        "symbol": "600660", "side": "sell", "quantity": 400,
+        "avg_price": 50.0, "filled_at": "2026-07-20T10:00:00",
+    })
+    out0 = agent._apply_rule_override(dict(hold), pos, current_price=53.0, pnl_pct=-3.6)
+    assert out0["action"] == "REDUCE" and out0["risk_flag"] == "stale_position"
+
     # 30 天内无卖出 → 超期规则触发 REDUCE
     out1 = agent._apply_rule_override(dict(hold), pos, current_price=53.0, pnl_pct=-3.6)
     assert out1["action"] == "REDUCE" and out1["risk_flag"] == "stale_position"
@@ -1076,6 +1120,25 @@ def test_stale_position_reduce_cooldown(tmp_path):
     })
     out2 = agent._apply_rule_override(dict(hold), pos, current_price=53.0, pnl_pct=-3.6)
     assert out2["action"] == "HOLD"
+
+    # entry_date 下界：建仓前的旧仓位卖出不算"本仓位已减仓"
+    recent = {
+        **pos, "position_id": "POS-V2", "symbol": "603195",
+        "entry_date": (datetime.now() - timedelta(days=2)).date().isoformat(),
+    }
+    brain.store.save_fill({
+        "fill_id": "F-2", "order_id": "O-2", "persona_id": "duan_yongping_v1",
+        "symbol": "603195", "side": "sell", "quantity": 400,
+        "avg_price": 52.0,
+        "filled_at": (datetime.now() - timedelta(days=3)).isoformat(),
+    })
+    assert agent._stale_reduce_on_cooldown(recent, cooldown_days=30) is False
+    brain.store.save_fill({
+        "fill_id": "F-3", "order_id": "O-3", "persona_id": "duan_yongping_v1",
+        "symbol": "603195", "side": "sell", "quantity": 200,
+        "avg_price": 53.0, "filled_at": datetime.now().isoformat(),
+    })
+    assert agent._stale_reduce_on_cooldown(recent, cooldown_days=30) is True
 
 
 def test_value_pool_initial_screen_without_pe_in_snapshot(tmp_path):
@@ -1116,5 +1179,68 @@ def test_value_pool_initial_screen_without_pe_in_snapshot(tmp_path):
 
     syms = {s.symbol for s in result}
     assert syms == {"600519", "000001"}
+
+
+def test_value_pool_mixed_pe_snapshot_keeps_missing_pe_rows(tmp_path):
+    """快照部分有 PE 时，缺 PE 的大市值股不在初筛被误杀，留待 enrich 填充后精筛。"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from src.agents.explorer import value_pool as vp
+
+    def _stock(sym, mcap, pe=None, st=False):
+        return SimpleNamespace(
+            symbol=sym, name=f"测试{sym}", market_cap_yi=mcap, pe_ttm=pe,
+            roe=None, is_st=st, turnover=5.0, pb=None, fcf_yield=None,
+            debt_ratio=None, dividend_yield=None,
+        )
+
+    fake_snapshot = SimpleNamespace(stocks=[
+        _stock("600519", 19000.0, pe=22.0),   # 有 PE 且合规 → 过初筛
+        _stock("600660", 1500.0),             # 缺 PE 大市值 → 初筛放行，enrich 填充
+        _stock("600661", 1200.0, pe=80.0),    # PE 超限 → 初筛剔除
+        _stock("600662", 1300.0),             # 缺 PE 大市值 → enrich 后 PE 超标，精筛剔除
+    ])
+
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        def fetch_snapshot(self): return fake_snapshot
+
+    class _FakeFC:
+        def enrich_quotes(self, candidates):
+            for s in candidates:
+                if s.pe_ttm is None:
+                    s.pe_ttm = 70.0 if s.symbol == "600662" else 18.0
+                s.roe = 15.0
+
+    pool = vp.ValueStockPool.__new__(vp.ValueStockPool)
+    with patch("src.stock_analyzer.data_source.AkshareClient", _FakeClient), \
+         patch("src.stock_analyzer.data_source.FundamentalClient", lambda *a, **k: _FakeFC()):
+        result = pool._build_pool()
+
+    assert {s.symbol for s in result} == {"600519", "600660"}
+
+
+def test_value_pool_stale_cache_missing_pe_rebuilds(tmp_path, monkeypatch):
+    """7 天内缓存行全部缺 pe_ttm/fcf_yield 时视为旧版缓存，返回 None 触发重建。"""
+    import sqlite3
+    from datetime import date as date_cls
+
+    from src.agents.explorer import value_pool as vp
+
+    db = tmp_path / "value_pool.db"
+    monkeypatch.setattr(vp, "_POOL_DB", db)
+    pool = vp.ValueStockPool()
+    conn = sqlite3.connect(str(db))
+    today = date_cls.today().isoformat()
+    conn.execute(
+        "INSERT INTO value_pool (symbol, name, industry, pe_ttm, pb, roe, "
+        "debt_to_equity, dividend_yield, fcf_yield, market_cap_yi, refresh_date) "
+        "VALUES ('600519','茅台','白酒',NULL,NULL,30.0,NULL,NULL,NULL,19000.0,?)",
+        (today,),
+    )
+    conn.commit()
+    conn.close()
+    assert pool._load_from_cache() is None
 
 

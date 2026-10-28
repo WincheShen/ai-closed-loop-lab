@@ -581,14 +581,23 @@ class ConsecutiveLossThrottleModifier:
         risk = ctx.data.get("account_risk") or {}
         limit = int(params.get("consecutive_loss_limit", risk.get("consecutive_loss_limit", 5)))
         losses = int(risk.get("consecutive_losses", 0))
-        if losses >= limit:
-            return Opinion(
-                factor=self.name,
-                verdict="modify",
-                action="HOLD",
-                reason=f"最近 {risk.get('window_days', 14)} 天内连续亏损 {losses} 笔 (限制 {limit})，触发连亏熔断停止买入",
-            )
-        return Opinion(factor=self.name, verdict="pass")
+        if losses < limit:
+            return Opinion(factor=self.name, verdict="pass")
+        if "consecutive_loss_breached" in risk and limit == int(risk.get("consecutive_loss_limit", 5)):
+            active = bool(risk["consecutive_loss_breached"])
+        elif risk.get("days_since_last_loss") is not None:
+            cooldown = int(params.get("consecutive_loss_cooldown_days", risk.get("cooldown_days", 1)))
+            active = int(risk["days_since_last_loss"]) <= cooldown
+        else:
+            active = bool(risk.get("streak_active", True))
+        if not active:
+            return Opinion(factor=self.name, verdict="pass")
+        return Opinion(
+            factor=self.name,
+            verdict="modify",
+            action="HOLD",
+            reason=f"最近 {risk.get('window_days', 14)} 天内连续亏损 {losses} 笔 (限制 {limit})，连亏冷静期内停止买入",
+        )
 
 
 # ----------------------------------------------------------------------

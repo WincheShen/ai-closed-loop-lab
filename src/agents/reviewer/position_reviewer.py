@@ -751,16 +751,25 @@ class PositionReviewAgent:
         """同一持仓在 cooldown_days 个自然日内已实际卖出过 → 超期规则不再重复减仓。
 
         用 fills 实际成交为准（复审建议可能被网关拦截，未成交不算已释放资金）。
+        只统计本仓位建仓以来的卖出：同标的旧仓位平仓不影响新仓位的超期减仓。
         """
         try:
             from datetime import datetime as dt_cls, timedelta
             cutoff = (dt_cls.now() - timedelta(days=cooldown_days)).isoformat()
+            entry = str(position.get("entry_date") or "")
+            if entry and entry > cutoff:
+                cutoff = entry
+            persona = (
+                position.get("persona_id")
+                or getattr(self, "persona_id", None)
+                or "short_term_hot_rotation_v1"
+            )
             conn = self.brain.store._conn()
             row = conn.execute(
                 "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? "
                 "AND lower(side) = 'sell' AND filled_at >= ? LIMIT 1",
                 (
-                    position.get("persona_id") or "",
+                    persona,
                     position.get("symbol") or "",
                     cutoff,
                 ),

@@ -142,6 +142,7 @@ class PersonaPolicy:
     daily_pipeline: bool = True
     max_daily_loss_pct: float = 0.03
     consecutive_loss_limit: int = 5
+    consecutive_loss_cooldown_days: int = 1
 
 
 @dataclass

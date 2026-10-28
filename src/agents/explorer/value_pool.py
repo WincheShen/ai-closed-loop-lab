@@ -67,12 +67,16 @@ class ValueStockPool:
 
         # 需要刷新
         pool = self._build_pool()
-        self._save_to_cache(pool)
+        if pool:
+            self._save_to_cache(pool)
         logger.info("ValueStockPool: 刷新完成 (%d 只)", len(pool))
         return pool
 
     def _load_from_cache(self) -> list[StockQuote] | None:
-        """加载缓存池（7天内有效）。"""
+        """加载缓存池（7天内有效）。
+
+        缓存行全部缺 pe_ttm 或 fcf_yield 时视为旧版不完整缓存，返回 None 触发重建。
+        """
         cutoff = (date.today() - timedelta(days=_POOL_TTL_DAYS)).isoformat()
         conn = sqlite3.connect(str(_POOL_DB))
         rows = conn.execute(
@@ -84,6 +88,9 @@ class ValueStockPool:
         conn.close()
 
         if not rows:
+            return None
+        if all(r[3] is None for r in rows) or all(r[9] is None for r in rows):
+            logger.info("ValueStockPool: 缓存缺 pe_ttm/fcf_yield，视为旧版缓存并重建")
             return None
 
         return [
@@ -122,7 +129,7 @@ class ValueStockPool:
         筛选标准（宽松版，允许后续精筛）：
         - 非 ST
         - 市值 > 100 亿
-        - PE(TTM) > 0 且 < 50
+        - PE(TTM) > 0 且 <= 50（缺 PE 的进入精筛再判，不在初筛误杀）
         - 如果有 ROE 数据，ROE > 10%
         """
         try:
@@ -138,7 +145,7 @@ class ValueStockPool:
                     s for s in snapshot.stocks
                     if not s.is_st
                     and s.market_cap_yi is not None and s.market_cap_yi >= 100
-                    and s.pe_ttm is not None and 0 < s.pe_ttm <= 50
+                    and (s.pe_ttm is None or 0 < s.pe_ttm <= 50)
                 ]
             elif has_mcap:
                 # 快照只有市值（PE 依赖 FundamentalClient 填充）→ 初筛只卡市值，
