@@ -401,6 +401,7 @@ class StrategistEngine:
             regime = self.market_regime.get("regime")
             kelly_result = sizer.calculate(
                 strategy_id=strategy_name, regime=regime, is_value=is_value,
+                persona_id=getattr(self.persona, "id", None),
             )
             if kelly_result.method == "kelly":
                 # Kelly 有效：使用 Kelly 仓位

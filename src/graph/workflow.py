@@ -289,6 +289,12 @@ async def run_daily_pipeline(
     brain = get_central_brain()
     brain.persist_state(session_id, run_mode, result)
 
+    # 兜底：MarketBrain（posture=exit/数据不可用）或 Explorer 提前 END 时
+    # wheel_shadow 节点未执行，补跑一次 clock.1535 漏斗评估——
+    # 异常天气下"为什么没买"也要留下可审计的转盘轨迹
+    if not result.get("target_stocks"):
+        run_wheel_entry_shadow_node(result)
+
     logger.info("=" * 60)
     logger.info("✅ 日常交易流完成 — session=%s", session_id)
     regime = result.get("market_regime") or {}

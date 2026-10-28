@@ -61,14 +61,15 @@ class KellyResult:
 class KellySizer:
     """基于 Kelly Criterion 的动态仓位计算器。"""
 
-    def __init__(self) -> None:
-        self.brain = get_central_brain()
+    def __init__(self, brain: Any = None) -> None:
+        self.brain = brain or get_central_brain()
 
     def calculate(
         self,
         strategy_id: str,
         regime: str | None = None,
         is_value: bool = False,
+        persona_id: str | None = None,
     ) -> KellyResult:
         """计算策略在当前 regime 下的 Kelly 仓位。
 
@@ -76,6 +77,7 @@ class KellySizer:
             strategy_id: 策略标识（如 "热点板块前排回踩"）
             regime: 当前市场环境
             is_value: 是否价值投资策略
+            persona_id: 只统计该角色的归因；None 保持旧行为（全局）
 
         Returns:
             KellyResult 包含最终仓位比例
@@ -84,7 +86,7 @@ class KellySizer:
         default_frac = DEFAULT_FRACTION_VALUE if is_value else DEFAULT_FRACTION_SHORT
 
         # 1. 从 trade_attributions 获取策略历史数据
-        stats = self._get_strategy_pnl_stats(strategy_id, regime)
+        stats = self._get_strategy_pnl_stats(strategy_id, regime, persona_id)
 
         if not stats or stats["total_trades"] < MIN_SAMPLE_FOR_KELLY:
             sample = stats["total_trades"] if stats else 0
@@ -151,12 +153,31 @@ class KellySizer:
         )
 
     def _get_strategy_pnl_stats(
-        self, strategy_id: str, regime: str | None = None,
+        self,
+        strategy_id: str,
+        regime: str | None = None,
+        persona_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """从 trade_attributions 获取策略的详细盈亏统计。"""
+        """从 trade_attributions 获取策略的详细盈亏统计。
+
+        persona_id 非空时按角色隔离：归因行 persona_id 优先，旧数据为空时
+        回退关联 positions.persona_id（与其他经验层查询同一语义）。
+        """
         conn = self.brain.store._conn()
 
-        if regime:
+        if persona_id:
+            sql = (
+                "SELECT ta.outcome, ta.pnl_pct FROM trade_attributions ta "
+                "LEFT JOIN positions p ON ta.position_id = p.position_id "
+                "WHERE ta.strategy_id = ? AND "
+                "COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?"
+            )
+            params: tuple = (strategy_id, persona_id)
+            if regime:
+                sql += " AND ta.entry_regime = ?"
+                params = (strategy_id, persona_id, regime)
+            rows = conn.execute(sql, params).fetchall()
+        elif regime:
             rows = conn.execute(
                 "SELECT outcome, pnl_pct FROM trade_attributions "
                 "WHERE strategy_id = ? AND entry_regime = ?",

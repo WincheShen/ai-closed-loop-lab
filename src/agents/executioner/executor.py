@@ -100,8 +100,8 @@ class ExecutionEngine:
     def _filter_suspended_signals(self, signals: list[TradeSignal]) -> list[TradeSignal]:
         """过滤被经验层标记为 SUSPEND 的策略信号（仅阻止买入，卖出放行）。"""
         try:
-            from src.experience_layer import get_experience
-            exp = get_experience()
+            from src.experience_layer.experience_api import ExperienceAPI
+            exp = ExperienceAPI(brain=self.brain)
         except Exception:
             self.logger.debug("无法加载 ExperienceLayer，跳过 SUSPEND 检查")
             return signals
@@ -211,6 +211,17 @@ class ExecutionEngine:
                 )
                 continue
 
+            # immediate 买单登记 clock.next_open 事件（次日 09:32 由
+            # order_fill_at_open 转盘评估）；live 绑定下让位给转盘执行
+            if sig.get("action") == "buy" and self._next_open_deferred(sig):
+                self.brain.store.update_signal_status(
+                    sig["signal_id"], "pending_next_open",
+                )
+                self.logger.info(
+                    "[NEXT_OPEN] %s 转交次日开盘转盘执行", sig["symbol"],
+                )
+                continue
+
             # 立即执行（包括 mock 模式下的条件单）
             if self.mode == "mock":
                 order, fill = await self._mock_execute(sig)
@@ -233,6 +244,49 @@ class ExecutionEngine:
             len(self.filled_orders), len(self.submitted_orders), pending_count,
         )
         return self.submitted_orders, self.filled_orders
+
+    # ------------------------------------------------------------------
+    # clock.next_open — 次日开盘成交转盘衔接
+    # ------------------------------------------------------------------
+
+    def _next_open_deferred(self, sig: TradeSignal) -> bool:
+        """immediate 买单：登记下一交易日 09:32 的 clock.next_open 事件。
+
+        返回 True 表示 order_fill_at_open 绑定为 live —— 旧路径让位，
+        信号标为 pending_next_open，由次日开盘转盘执行；shadow/off 时
+        仅登记事件（影子比对次日开盘成交 vs 收盘成交），旧路径照常执行。
+        """
+        if sig.get("_wheel_entry"):
+            return False  # 转盘网关自身执行的信号不再递归登记
+        try:
+            from datetime import time as _time
+
+            from src.infra.trading_calendar import next_trading_day
+            from src.wheel.config import get_config
+
+            binding = get_config().binding_for(self.persona_id, "clock.next_open")
+            if not binding or binding.mode == "off":
+                return False
+            due = datetime.combine(next_trading_day(), _time(9, 32))
+            self.brain.store.insert_wheel_event({
+                "event_id": f"clock.next_open|{sig['signal_id']}",
+                "type": "clock.next_open",
+                "persona_id": self.persona_id,
+                "subject": {
+                    "signal_id": sig["signal_id"],
+                    "symbol": sig.get("symbol", ""),
+                },
+                "payload": {"entry_price": sig.get("entry_price")},
+                "source": "executioner",
+                "due_at": due.isoformat(),
+            })
+            return binding.mode == "live"
+        except Exception:  # noqa: BLE001
+            self.logger.debug(
+                "clock.next_open 事件登记失败 %s", sig.get("signal_id"),
+                exc_info=True,
+            )
+            return False
 
     async def _mock_execute(self, signal: TradeSignal) -> tuple[Order, Fill | None]:
         """模拟执行：按市场价成交，并自动建仓。

@@ -33,15 +33,18 @@ class DynamicBlacklist:
         self,
         symbol: str,
         regime: str | None = None,
+        as_of=None,
     ) -> tuple[bool, str]:
         """检查某只股票是否应被屏蔽。
+
+        as_of：回放时钟（冷却判定按该时刻），None 用当前真实时间。
 
         Returns:
             (is_blocked, reason)
         """
         # 1. 个股冷却期
         reason = self.stock_memory.get_cooldown_reason(
-            symbol, persona_id=self.persona_id,
+            symbol, persona_id=self.persona_id, as_of=as_of,
         )
         if reason:
             return True, reason
@@ -57,10 +60,15 @@ class DynamicBlacklist:
 
         return False, ""
 
-    def get_blacklisted_symbols(self) -> set[str]:
-        """当前应屏蔽的标的集合：个股冷却期 + 本角色已持仓（Phase 3.7 转盘漏斗用）。"""
+    def get_blacklisted_symbols(self, as_of=None) -> set[str]:
+        """当前应屏蔽的标的集合：个股冷却期 + 本角色已持仓（Phase 3.7 转盘漏斗用）。
+
+        as_of：回放时钟，冷却判定按该时刻计算。
+        """
         blocked = set(
-            self.stock_memory.cooldown_symbols(persona_id=self.persona_id).keys()
+            self.stock_memory.cooldown_symbols(
+                persona_id=self.persona_id, as_of=as_of,
+            ).keys()
         )
         if self.persona_id:
             try:

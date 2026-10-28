@@ -223,8 +223,8 @@ class ExplorerScanner:
         这是闭环的关键环节：交易归因 → ExperienceLayer → Explorer 选股。
         """
         try:
-            from src.experience_layer import get_experience
-            exp = get_experience()
+            from src.experience_layer.experience_api import ExperienceAPI
+            exp = ExperienceAPI(brain=self.brain)
             blacklist = exp.blacklist_for(persona_id=self.persona_id)
             regime = self._market_regime.get("regime")
             filtered = blacklist.filter_candidates(candidates, regime=regime)
@@ -373,8 +373,8 @@ class ExplorerScanner:
         例如: 放量突破在 bear 市场胜率 0% → volume_breakout 权重 × 0.3
         """
         try:
-            from src.experience_layer import get_experience
-            exp = get_experience()
+            from src.experience_layer.experience_api import ExperienceAPI
+            exp = ExperienceAPI(brain=self.brain)
             regime = self._market_regime.get("regime")
             adjusted = 0
             for rule in rules:
@@ -383,7 +383,9 @@ class ExplorerScanner:
                 strategy_id = _RULE_TO_STRATEGY.get(rule.id)
                 if not strategy_id:
                     continue
-                multiplier = exp.get_rule_weight_multiplier(strategy_id, regime=regime)
+                multiplier = exp.get_rule_weight_multiplier(
+                    strategy_id, regime=regime, persona_id=self.persona_id,
+                )
                 if multiplier != 1.0:
                     old_weight = rule.weight
                     rule.weight = round(rule.weight * multiplier, 2)

@@ -298,8 +298,8 @@ async def _check_pending_signals(
 
         # 触发前重评估 — 检查经验层是否建议取消
         try:
-            from src.experience_layer import get_experience
-            exp = get_experience()
+            from src.experience_layer.experience_api import ExperienceAPI
+            exp = ExperienceAPI(brain=brain)
             persona_id = sig.get("persona_id")
 
             # 检查个股冷却期（按角色隔离）

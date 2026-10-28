@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from src.central_brain import get_central_brain
@@ -26,6 +26,18 @@ _CONSECUTIVE_LOSS_COOLDOWN = 2
 _COOLDOWN_DAYS = 5
 
 
+def _ref_date(as_of: Any) -> date:
+    """as_of（datetime/date/None）→ 参考日期；None 时用当前墙钟日期。"""
+    if as_of is None:
+        return datetime.now().date()
+    return as_of.date() if isinstance(as_of, datetime) else as_of
+
+
+def _as_of_clause(as_of: Any, col: str) -> tuple[str, tuple]:
+    """回放时钟：as_of 非空时生成 "AND <col> <= ?" 过滤片段。"""
+    return (f" AND {col} <= ?", (as_of.isoformat(),)) if as_of else ("", ())
+
+
 class StockMemory:
     """个股交易记忆 — 从 trade_attributions 实时聚合。"""
 
@@ -33,24 +45,33 @@ class StockMemory:
         self.brain = brain or get_central_brain()
 
     def get_history(
-        self, symbol: str, persona_id: str | None = None,
+        self,
+        symbol: str,
+        persona_id: str | None = None,
+        as_of: datetime | date | None = None,
     ) -> dict[str, Any] | None:
-        """查询某只股票的完整交易记忆（Phase 3.7 支持按 persona_id 角色隔离）。"""
+        """查询某只股票的完整交易记忆。
+
+        persona_id：按角色隔离；as_of：回放时钟（只统计该时刻之前的归因/教训），
+        None 保持旧行为（当前真实时间）。
+        """
         conn = self.brain.store._conn()
         if persona_id:
+            ta_cut, ta_params = _as_of_clause(as_of, "ta.created_at")
             rows = conn.execute(
                 """SELECT ta.* FROM trade_attributions ta
                 LEFT JOIN positions p ON p.position_id = ta.position_id
                 WHERE ta.symbol = ?
                   AND COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?
-                ORDER BY ta.created_at DESC""",
-                (symbol, persona_id),
+                """ + ta_cut + " ORDER BY ta.created_at DESC",
+                (symbol, persona_id, *ta_params),
             ).fetchall()
         else:
+            ta_cut, ta_params = _as_of_clause(as_of, "created_at")
             rows = conn.execute(
-                "SELECT * FROM trade_attributions WHERE symbol = ? "
-                "ORDER BY created_at DESC",
-                (symbol,),
+                "SELECT * FROM trade_attributions WHERE symbol = ?"
+                + ta_cut + " ORDER BY created_at DESC",
+                (symbol, *ta_params),
             ).fetchall()
 
         if not rows:
@@ -94,6 +115,7 @@ class StockMemory:
 
         # 获取相关 lessons
         if persona_id:
+            l_cut, l_params = _as_of_clause(as_of, "l.created_at")
             lesson_rows = conn.execute(
                 """SELECT l.lesson_text FROM lessons l
                 LEFT JOIN trade_attributions ta ON ta.attribution_id = l.attribution_id
@@ -101,14 +123,15 @@ class StockMemory:
                 WHERE l.symbol = ?
                   AND COALESCE(NULLIF(l.persona_id, ''), NULLIF(ta.persona_id, ''),
                                    p.persona_id) = ?
-                ORDER BY l.created_at DESC LIMIT 3""",
-                (symbol, persona_id),
+                """ + l_cut + " ORDER BY l.created_at DESC LIMIT 3",
+                (symbol, persona_id, *l_params),
             ).fetchall()
         else:
+            l_cut, l_params = _as_of_clause(as_of, "created_at")
             lesson_rows = conn.execute(
-                "SELECT lesson_text FROM lessons WHERE symbol = ? "
-                "ORDER BY created_at DESC LIMIT 3",
-                (symbol,),
+                "SELECT lesson_text FROM lessons WHERE symbol = ?"
+                + l_cut + " ORDER BY created_at DESC LIMIT 3",
+                (symbol, *l_params),
             ).fetchall()
         lessons = [r["lesson_text"] for r in lesson_rows if r["lesson_text"]]
 
@@ -127,26 +150,40 @@ class StockMemory:
             "cooldown_until": cooldown_until,
         }
 
-    def is_in_cooldown(self, symbol: str, persona_id: str | None = None) -> bool:
-        """判断某只股票是否在冷却期内（支持按 persona_id 角色隔离）。"""
-        history = self.get_history(symbol, persona_id=persona_id)
+    def is_in_cooldown(
+        self,
+        symbol: str,
+        persona_id: str | None = None,
+        as_of: datetime | date | None = None,
+    ) -> bool:
+        """判断某只股票是否在冷却期内（persona_id 隔离，as_of 回放时钟）。"""
+        history = self.get_history(symbol, persona_id=persona_id, as_of=as_of)
         if not history or not history.get("cooldown_until"):
             return False
-        return datetime.now().date() <= history["cooldown_until"]
+        return _ref_date(as_of) <= history["cooldown_until"]
 
-    def get_cooldown_reason(self, symbol: str, persona_id: str | None = None) -> str | None:
+    def get_cooldown_reason(
+        self,
+        symbol: str,
+        persona_id: str | None = None,
+        as_of: datetime | date | None = None,
+    ) -> str | None:
         """返回冷却原因描述，None 表示不在冷却期。"""
-        history = self.get_history(symbol, persona_id=persona_id)
+        history = self.get_history(symbol, persona_id=persona_id, as_of=as_of)
         if not history or not history.get("cooldown_until"):
             return None
-        if datetime.now().date() > history["cooldown_until"]:
+        if _ref_date(as_of) > history["cooldown_until"]:
             return None
         return (
             f"{symbol} {history['name']} 连续{history['consecutive_losses']}次止损，"
             f"冷却至 {history['cooldown_until']}"
         )
 
-    def cooldown_symbols(self, persona_id: str | None = None) -> dict[str, str]:
+    def cooldown_symbols(
+        self,
+        persona_id: str | None = None,
+        as_of: datetime | date | None = None,
+    ) -> dict[str, str]:
         """当前处于冷却期的标的 → {symbol: 冷却原因}（复用 get_cooldown_reason 判定）。"""
         conn = self.brain.store._conn()
         if persona_id:
@@ -162,7 +199,9 @@ class StockMemory:
             ).fetchall()
         out: dict[str, str] = {}
         for r in rows:
-            reason = self.get_cooldown_reason(r["symbol"], persona_id=persona_id)
+            reason = self.get_cooldown_reason(
+                r["symbol"], persona_id=persona_id, as_of=as_of,
+            )
             if reason:
                 out[r["symbol"]] = reason
         return out

@@ -85,3 +85,11 @@ def previous_trading_day(d: date | None = None) -> date:
     while not is_trading_day(cur):
         cur -= timedelta(days=1)
     return cur
+
+
+def next_trading_day(d: date | None = None) -> date:
+    """d（默认今日）之后最近的一个交易日。"""
+    cur = _to_date(d) + timedelta(days=1)
+    while not is_trading_day(cur):
+        cur += timedelta(days=1)
+    return cur

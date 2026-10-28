@@ -256,6 +256,9 @@ def run_funnel(wheel: WheelDef, ctx: Context) -> WheelResult:
         kept = op.evidence.get("kept")
         if isinstance(kept, list):
             candidates = kept
+            # 链式过滤：筛后候选必须写回 ctx.data，否则后续 screen 仍读原始池，
+            # 前序步骤（行情硬闸/黑名单/冷静期）的拦截会被最后一步覆盖作废
+            ctx.data["candidates"] = kept
         # screen 的意见（含淘汰原因）全部进入轨迹
     result.candidates = candidates
     return result

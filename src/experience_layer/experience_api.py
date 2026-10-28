@@ -32,10 +32,15 @@ class ExperienceAPI:
     # ── 查询接口 ──────────────────────────────────────────────────────
 
     def get_stock_history(
-        self, symbol: str, persona_id: str | None = None,
+        self,
+        symbol: str,
+        persona_id: str | None = None,
+        as_of=None,
     ) -> dict[str, Any] | None:
-        """查询个股交易记忆（支持按 persona_id 角色隔离）。"""
-        return self.stock_memory.get_history(symbol, persona_id=persona_id)
+        """查询个股交易记忆（persona_id 隔离，as_of 回放时钟）。"""
+        return self.stock_memory.get_history(
+            symbol, persona_id=persona_id, as_of=as_of,
+        )
 
     def get_strategy_stats(
         self,
@@ -59,10 +64,15 @@ class ExperienceAPI:
         return self.strategy_ledger.get_regime_matrix()
 
     def is_stock_in_cooldown(
-        self, symbol: str, persona_id: str | None = None,
+        self,
+        symbol: str,
+        persona_id: str | None = None,
+        as_of=None,
     ) -> bool:
-        """判断个股是否在冷却期（支持按 persona_id 角色隔离）。"""
-        return self.stock_memory.is_in_cooldown(symbol, persona_id=persona_id)
+        """判断个股是否在冷却期（persona_id 隔离，as_of 回放时钟）。"""
+        return self.stock_memory.is_in_cooldown(
+            symbol, persona_id=persona_id, as_of=as_of,
+        )
 
     # ── Prompt 生成接口 ───────────────────────────────────────────────
 

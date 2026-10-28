@@ -48,17 +48,33 @@ logger = logging.getLogger(__name__)
 PERSONA_ID = "ultra_short_momentum_v1"
 
 
-def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
+def check_cold_period(
+    brain,
+    persona_id: str = PERSONA_ID,
+    as_of: date | datetime | None = None,
+) -> tuple[bool, str]:
     """检查是否处于大亏冷静期或恶劣天气强制空仓期。
+
+    as_of：回放时钟（转盘历史回放传 ctx.now）；None 用当前墙钟日期。
 
     Returns:
         (is_cold, reason): True 表示触发冷静期/恶劣天气，禁止开新仓。
     """
     store = brain.store
+    ref_date = (
+        as_of.date() if isinstance(as_of, datetime)
+        else as_of
+    ) or date.today()
+    as_of_iso = as_of.isoformat() if as_of else None
 
     # 1. 检查最近一笔平仓交易是否大亏（<= -2.5%）
     try:
         closed_positions = store.list_positions(persona_id=persona_id, status="closed")
+        if as_of_iso:
+            closed_positions = [
+                p for p in closed_positions
+                if (p.get("closed_at") or "") <= as_of_iso
+            ]
         if closed_positions:
             # 按 closed_at 倒序排序
             sorted_closed = sorted(
@@ -71,7 +87,7 @@ def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
             if closed_at_str:
                 closed_date = date.fromisoformat(closed_at_str[:10])
                 from src.infra.data_quality import trading_days_between
-                days_since_closed = trading_days_between(closed_date, date.today())
+                days_since_closed = trading_days_between(closed_date, ref_date)
                 # 如果在 1 个交易日之内（含当日平仓或上个交易日平仓），且亏损 >= 2.5%
                 entry_p = float(latest.get("entry_price") or 0)
                 close_p = float(latest.get("close_price") or 0)
@@ -86,12 +102,20 @@ def check_cold_period(brain, persona_id: str = PERSONA_ID) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001
         logger.warning("检查交易历史冷静期异常: %s", e)
 
-    # 2. 检查当日大盘天气（上涨比例 < 30% 或 panic 状态）
+    # 2. 检查当日大盘天气（上涨比例 < 30% 或 panic 状态；as_of 时只读当日及之前快照）
     try:
         conn = store._conn()
-        row = conn.execute(
-            "SELECT * FROM market_regime_snapshots ORDER BY trade_date DESC, created_at DESC LIMIT 1"
-        ).fetchone()
+        if as_of:
+            row = conn.execute(
+                "SELECT * FROM market_regime_snapshots WHERE trade_date <= ? "
+                "ORDER BY trade_date DESC, created_at DESC LIMIT 1",
+                (ref_date.isoformat(),),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM market_regime_snapshots "
+                "ORDER BY trade_date DESC, created_at DESC LIMIT 1"
+            ).fetchone()
         if row:
             regime = row["regime"]
             if regime == "panic":

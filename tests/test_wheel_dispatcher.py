@@ -1404,12 +1404,15 @@ def test_shared_flags_blacklist_factor_blocks_cooldown_symbol(tmp_path, monkeypa
                       "persona_id": pid, "entry_date": "2026-10-10"})
         brain.store.close_position(pos_id, 190.0, -500.0,
                                    closed_at=f"2026-10-{20 + i}T14:00:00")
-        _attr(brain, f"AT-B{i}", pos_id, "300999", "loss")
+        _attr(brain, f"AT-B{i}", pos_id, "300999", "loss",
+              created_at=f"2026-10-{20 + i}T15:00:00")
 
     ctx = SimpleNamespace(
         brain=brain,
         persona=SimpleNamespace(persona_id=pid),
         data={"candidates": [{"symbol": "300999"}, {"symbol": "600660"}]},
+        # 回放时钟：10-22 在最后一笔亏损(10-21)之后、冷却截止(10-26)之前
+        now=datetime(2026, 10, 22),
     )
     op = SharedFlagsAndBlacklistScreenFactor().evaluate(ctx, {})
     kept_syms = {s["symbol"] for s in op.evidence["kept"]}
@@ -1486,24 +1489,28 @@ def test_entry_gateway_lock_acquire_release(tmp_path):
     assert gw._acquire(key, later) is True
 
 
-def test_portfolio_position_cap_runs_without_signal(tmp_path, monkeypatch):
-    """mod.portfolio_position_cap 不要求 signal 数据步（entry_confirm 中必须真正执行）。"""
+def test_portfolio_position_cap_runs_without_signal(tmp_path):
+    """mod.portfolio_position_cap 不要求 signal 数据步（entry_confirm 中必须真正执行）。
+
+    直接按 ctx.brain 持仓计算（不构造 RiskGovernor——其 __init__ 触全局 brain）。
+    """
     from types import SimpleNamespace
 
-    from src.agents.risk import risk_governor as rg_mod
     from src.wheel.factors.entry_factors import PortfolioPositionCapModifier
 
     assert PortfolioPositionCapModifier.requires == ()
 
     brain = _MockBrain(tmp_path)
-    monkeypatch.setattr(rg_mod, "get_central_brain", lambda: brain)
     pid = "duan_yongping_v1"
     # 持仓市值 2x 资金 → used_pct 远超上限
     _open(brain, {**_ULTRA_POS, "position_id": "POS-BIG", "symbol": "600660",
                   "persona_id": pid, "entry_price": 1500.0, "current_qty": 400})
     ctx = SimpleNamespace(
         resolved=SimpleNamespace(action="BUY"),
-        data={"strategist_signal": {"persona_id": pid}},
+        data={
+            "strategist_signal": {"persona_id": pid},
+            "regime_snapshot": {"regime": "neutral", "max_total_position_pct": 0.80},
+        },
         brain=brain,
         persona=SimpleNamespace(persona_id=pid),
     )
@@ -1590,5 +1597,217 @@ def test_wheel_entry_shadow_node_uses_raw_signals(tmp_path, monkeypatch):
     assert dec is not None
     assert dec["action"] == "BUY"
     assert abs(dec["qty_pct"] - 0.08) < 1e-6   # 原始 position_pct，非 approved(0.0)
+
+
+# ── 五轮 review 修复回归 ─────────────────────────────────────
+
+
+def test_run_funnel_chains_screen_results(tmp_path):
+    """screen 链式过滤：前序步骤的清空结果必须传给后续 screen。
+
+    修复前 run_funnel 只更新局部 candidates 不写回 ctx.data——多步漏斗只有
+    最后一个 screen 生效，posture=exit / data_quality 硬闸被第二步复活。
+    """
+    from src.wheel.config import get_config
+    from src.wheel.persona import persona_policy
+    from src.wheel.runner import run_wheel
+
+    cfg = get_config()
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    binding = cfg.binding_for(pid, "clock.1535")
+    pol = persona_policy(cfg, pid, binding)
+    ev = WheelEvent(
+        event_id="ev-funnel", type="clock.1535", due_at=_T, persona_id=pid,
+    )
+    res = run_wheel(
+        cfg.wheels["market_screen"], ev, pol, brain, mode="shadow",
+        preloaded={
+            "candidates": [
+                {"symbol": "300001", "name": "A"},
+                {"symbol": "300002", "name": "B"},
+            ],
+            "regime_snapshot": {
+                "regime": "panic", "recommended_posture": "exit",
+                "data_quality": "unavailable",
+            },
+        },
+        now=_T,
+    )
+    # posture=exit + data_quality 硬闸在第 1 步清空候选；
+    # 修复前第 2 步 shared_flags 会从原始池复活全部 2 只
+    assert res.candidates == []
+
+
+def test_next_open_event_emitted_and_deferred(tmp_path, monkeypatch):
+    """immediate 买单登记 clock.next_open 事件；live 绑定时旧路径让位。"""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import src.wheel.config as wc
+    from src.agents.executioner.executor import ExecutionEngine
+
+    brain = _MockBrain(tmp_path)
+    engine = ExecutionEngine("sess-no", persona_id="short_term_hot_rotation_v1",
+                             brain=brain)
+    sig = {"signal_id": "SIG-NO-1", "symbol": "300001", "action": "buy",
+           "entry_price": 10.0}
+
+    # shadow 绑定：登记事件但不让位
+    assert engine._next_open_deferred(sig) is False
+    row = brain.store._conn().execute(
+        "SELECT type, due_at, status FROM wheel_events "
+        "WHERE event_id = 'clock.next_open|SIG-NO-1'",
+    ).fetchone()
+    assert row["type"] == "clock.next_open" and row["status"] == "due"
+    # 幂等：重复登记不报错、不重复行
+    assert engine._next_open_deferred(sig) is False
+
+    # live 绑定：让位给次日开盘转盘
+    real_cfg = wc.get_config()
+    binding = real_cfg.binding_for(
+        "short_term_hot_rotation_v1", "clock.next_open")
+    live_binding = replace(binding, mode="live")
+    monkeypatch.setattr(
+        wc, "get_config",
+        lambda: SimpleNamespace(
+            binding_for=lambda pid, et: live_binding,
+        ),
+    )
+    assert engine._next_open_deferred(sig) is True
+
+    # 转盘网关自身执行的信号不递归登记
+    assert engine._next_open_deferred({**sig, "_wheel_entry": True}) is False
+
+
+def test_entry_gateway_shadow_same_signal_not_duplicate(tmp_path):
+    """影子裁决：旧路径已按同一 signal_id 建的持仓不算 duplicate_position。"""
+    from types import SimpleNamespace
+
+    from src.wheel.entry_gateway import EntryGateway
+    from src.wheel.protocol import Decision
+
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    # 旧路径 15:35 已按 SIG-NO-1 建仓（positions.original_signal_id 列）
+    pos = {**_ULTRA_POS, "position_id": "POS-DUP", "symbol": "300001",
+           "persona_id": pid, "entry_date": "2026-10-11"}
+    _open(brain, pos)
+    brain.store._conn().execute(
+        "UPDATE positions SET original_signal_id = 'SIG-NO-1' "
+        "WHERE position_id = 'POS-DUP'"
+    )
+    # 另一持仓占用不同 signal → 仍算重复
+    pos2 = {**_ULTRA_POS, "position_id": "POS-DUP2", "symbol": "300002",
+            "persona_id": pid, "entry_date": "2026-10-11"}
+    _open(brain, pos2)
+    brain.store._conn().execute(
+        "UPDATE positions SET original_signal_id = 'SIG-OTHER' "
+        "WHERE position_id = 'POS-DUP2'"
+    )
+
+    ctx = SimpleNamespace(
+        persona=SimpleNamespace(persona_id=pid, kind="short", params={}),
+        data={"regime_snapshot": {"regime": "neutral", "data_quality": "real"}},
+        mode="shadow",
+        now=_T,
+        event=SimpleNamespace(event_id="ev-gw", subject={}),
+    )
+    d_same = Decision(
+        wheel="order_fill_at_open", action="BUY", subject_key="300001",
+        qty_pct=0.05, price=10.0, reason="t",
+        evidence={"signal_id": "SIG-NO-1", "symbol": "300001", "price": 10.0,
+                  "position_pct": 0.05, "strategy_id": "s1"},
+    )
+    d_other = Decision(
+        wheel="order_fill_at_open", action="BUY", subject_key="300002",
+        qty_pct=0.05, price=10.0, reason="t",
+        evidence={"signal_id": "SIG-NEW", "symbol": "300002", "price": 10.0,
+                  "position_pct": 0.05, "strategy_id": "s1"},
+    )
+    out = EntryGateway(brain).submit_batch([d_same, d_other], ctx)
+    assert out[d_same.subject_key]["accepted"] is True          # 同 signal 不算重复
+    assert out[d_other.subject_key]["accepted"] is False        # 不同 signal 仍是重复
+    assert out[d_other.subject_key]["reason"] == "duplicate_position"
+
+
+def test_stock_memory_as_of_replay_clock(tmp_path):
+    """StockMemory 冷却判定按 as_of 回放时钟，不吃未来归因、不用墙钟。"""
+    from src.experience_layer.stock_memory import StockMemory
+
+    brain = _MockBrain(tmp_path)
+    pid = "short_term_hot_rotation_v1"
+    # 2026-10-20 / 10-21 两笔连亏 → 冷却至 10-26
+    for i, d in enumerate(("2026-10-20", "2026-10-21")):
+        pos_id = f"POS-AO{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id, "symbol": "300999",
+                      "persona_id": pid, "entry_date": "2026-10-15"})
+        brain.store.close_position(pos_id, 190.0, -500.0,
+                                   closed_at=f"{d}T14:00:00")
+        _attr(brain, f"AT-AO{i}", pos_id, "300999", "loss",
+              created_at=f"{d}T15:00:00")
+
+    mem = StockMemory(brain=brain)
+    # 回放 10-22：冷却中
+    assert mem.is_in_cooldown(
+        "300999", persona_id=pid, as_of=datetime(2026, 10, 22)) is True
+    # 回放 10-19（归因尚未发生）：不冷却——未来归因不得泄露
+    assert mem.is_in_cooldown(
+        "300999", persona_id=pid, as_of=datetime(2026, 10, 19)) is False
+    # 回放 10-28：冷却已过
+    assert mem.is_in_cooldown(
+        "300999", persona_id=pid, as_of=datetime(2026, 10, 28)) is False
+
+
+def test_check_cold_period_as_of_replay_clock(tmp_path):
+    """check_cold_period 按 as_of 判定（平仓快照与 regime 均不读未来数据）。"""
+    from src.agents.reviewer.tail_hunt import check_cold_period
+
+    brain = _MockBrain(tmp_path)
+    pid = "ultra_short_momentum_v1"
+    # 10-19（周日）止损平仓 -5% → 10-20 应冷静，10-22 起解除
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-CP", "symbol": "300888",
+                  "persona_id": pid, "entry_date": "2026-10-16"})
+    brain.store.close_position("POS-CP", 190.0, -500.0,
+                               closed_at="2026-10-19T14:55:00")
+
+    cold_20, _ = check_cold_period(brain, persona_id=pid,
+                                   as_of=datetime(2026, 10, 20))
+    assert cold_20 is True
+    cold_22, _ = check_cold_period(brain, persona_id=pid,
+                                   as_of=datetime(2026, 10, 22))
+    assert cold_22 is False
+    # 回放 10-17（平仓尚未发生）：不得看到未来的平仓记录
+    cold_17, _ = check_cold_period(brain, persona_id=pid,
+                                   as_of=datetime(2026, 10, 17))
+    assert cold_17 is False
+
+
+def test_kelly_sizer_persona_isolation(tmp_path):
+    """KellySizer 按 persona_id 过滤归因，不跨角色混算胜率。"""
+    from src.agents.strategist.kelly_sizer import KellySizer
+
+    brain = _MockBrain(tmp_path)
+    # 角色 A：8 笔全赢；角色 B：8 笔全输——同策略
+    for i in range(8):
+        pid = f"POS-KA{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pid,
+                      "persona_id": "duan_yongping_v1",
+                      "symbol": f"60001{i}", "entry_date": "2026-09-01"})
+        _attr(brain, f"AT-KA{i}", pid, f"60001{i}", "win", pnl=10.0,
+              strategy="value_investing")
+        pid2 = f"POS-KB{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pid2,
+                      "persona_id": "short_term_hot_rotation_v1",
+                      "symbol": f"30002{i}", "entry_date": "2026-09-01"})
+        _attr(brain, f"AT-KB{i}", pid2, f"30002{i}", "loss", pnl=-4.0,
+              strategy="value_investing")
+
+    sizer = KellySizer(brain=brain)
+    ra = sizer.calculate("value_investing", persona_id="duan_yongping_v1")
+    rb = sizer.calculate("value_investing",
+                         persona_id="short_term_hot_rotation_v1")
+    assert ra.stats["win_rate"] == 1.0
+    assert rb.stats["win_rate"] == 0.0
 
 

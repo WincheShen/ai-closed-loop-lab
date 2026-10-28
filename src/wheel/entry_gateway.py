@@ -97,6 +97,13 @@ class EntryGateway:
         capital = float(account.get("total_value") or account.get("capital") or 300000.0) if account else 300000.0
         available_cash = float(account.get("available_cash", 300000.0)) if account else 300000.0
         open_symbols = {str(p.get("symbol") or "") for p in open_positions}
+        # shadow 期旧路径已按同一 signal_id 建仓的持仓不算"重复"——
+        # order_fill_at_open 评估的正是同一信号的次日开盘成交语义
+        # （positions 表存的是 original_signal_id 列）
+        legacy_sig_symbols: dict[str, str] = {} if is_live else {
+            str(p.get("original_signal_id") or p.get("signal_id") or ""): str(p.get("symbol") or "")
+            for p in open_positions if p.get("original_signal_id") or p.get("signal_id")
+        }
         used_cost = sum(
             float(p.get("entry_price") or 0) * int(p.get("current_qty") or 0)
             for p in open_positions
@@ -143,15 +150,19 @@ class EntryGateway:
                 outcomes[key] = _reject("no_real_price")
                 continue
 
-            # 3. 角色策略白名单
-            if is_ultra and strategy_id and strategy_id != "ultra_short_momentum":
+            # 3. 角色策略白名单（对齐 PersonaPolicy.allowed_strategies；
+            #    非空时缺 strategy_id 一样拒绝，不再只对 ultra 生效）
+            allowed = tuple(getattr(ctx.persona, "allowed_strategies", ()) or ())
+            if allowed and (not strategy_id or strategy_id not in allowed):
                 outcomes[key] = _reject("strategy_mismatch")
                 continue
 
-            # 4. 重复持仓检查
+            # 4. 重复持仓检查（影子评估同一 signal 的已建仓持仓除外）
             if d.action == "BUY" and symbol in open_symbols:
-                outcomes[key] = _reject("duplicate_position")
-                continue
+                ev_sig = str(d.evidence.get("signal_id") or "")
+                if not (ev_sig and legacy_sig_symbols.get(ev_sig) == symbol):
+                    outcomes[key] = _reject("duplicate_position")
+                    continue
 
             # 5. 在持仓只数上限
             if d.action == "BUY" and (len(open_positions) + accepted_count) >= max_open:
@@ -297,6 +308,7 @@ class EntryGateway:
             "strategy": str(ev.get("strategy") or strategy_id),
             "strategy_id": strategy_id,
             "entry_condition": "immediate",
+            "_wheel_entry": True,
             "rationale": decision.reason,
             "timestamp": ctx.now.isoformat(),
             "expiry": None,
