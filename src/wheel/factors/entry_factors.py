@@ -658,8 +658,10 @@ class SharedFlagsAndBlacklistScreenFactor:
                 from src.experience_layer.dynamic_blacklist import DynamicBlacklist
                 bl = DynamicBlacklist(persona_id=ctx.persona.persona_id or None)
                 blacklist_syms = set(bl.get_blacklisted_symbols())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "screen.shared_flags_and_blacklist 黑名单加载失败（放行全部候选）: %s", e,
+                )
 
         for item in candidates:
             sym = str(item.get("symbol") or "")
@@ -702,7 +704,10 @@ class LlmSignalProposeFactor:
         quote = ctx.data.get("quote") or {}
         symbol = str(sig.get("symbol") or cand.get("symbol") or "")
         price = float(sig.get("entry_price") or quote.get("price") or 0.0)
-        qty_pct = float(sig.get("approved_position_pct") or sig.get("position_pct") or 0.05)
+        # 只表达 Strategist 原始提议仓位；approved_position_pct 是旧链路 RiskGovernor
+        # 的裁决结果（拒单时为 0.0），组合级截断由 mod.portfolio_position_cap 与
+        # EntryGateway 统一负责
+        qty_pct = float(sig.get("position_pct") or 0.05)
         score = float(sig.get("confidence") or cand.get("qlib_score") or 0.5) * 100.0
         return Opinion(
             factor=self.name,

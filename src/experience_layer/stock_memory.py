@@ -146,6 +146,27 @@ class StockMemory:
             f"冷却至 {history['cooldown_until']}"
         )
 
+    def cooldown_symbols(self, persona_id: str | None = None) -> dict[str, str]:
+        """当前处于冷却期的标的 → {symbol: 冷却原因}（复用 get_cooldown_reason 判定）。"""
+        conn = self.brain.store._conn()
+        if persona_id:
+            rows = conn.execute(
+                """SELECT DISTINCT ta.symbol FROM trade_attributions ta
+                LEFT JOIN positions p ON p.position_id = ta.position_id
+                WHERE COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) = ?""",
+                (persona_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT symbol FROM trade_attributions"
+            ).fetchall()
+        out: dict[str, str] = {}
+        for r in rows:
+            reason = self.get_cooldown_reason(r["symbol"], persona_id=persona_id)
+            if reason:
+                out[r["symbol"]] = reason
+        return out
+
     def generate_prompt_block(self, symbol: str, persona_id: str | None = None) -> str:
         """为 Strategist 生成个股历史记忆的 prompt 片段。"""
         history = self.get_history(symbol, persona_id=persona_id)

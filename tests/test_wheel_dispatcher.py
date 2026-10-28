@@ -1384,3 +1384,89 @@ def test_account_monitor_step_uses_persona_cooldown(tmp_path):
     assert out["account_risk"]["consecutive_loss_breached"] is False
 
 
+def test_shared_flags_blacklist_factor_blocks_cooldown_symbol(tmp_path, monkeypatch):
+    """screen.shared_flags_and_blacklist 真正过滤冷却标的（修 get_blacklisted_symbols 静默 AttributeError）。"""
+    from types import SimpleNamespace
+
+    from src.experience_layer import dynamic_blacklist as db_mod
+    from src.experience_layer import stock_memory as sm_mod
+    from src.experience_layer import strategy_ledger as sl_mod
+    from src.wheel.factors.entry_factors import SharedFlagsAndBlacklistScreenFactor
+
+    brain = _MockBrain(tmp_path)
+    for mod in (db_mod, sm_mod, sl_mod):
+        monkeypatch.setattr(mod, "get_central_brain", lambda: brain)
+
+    pid = "short_term_hot_rotation_v1"
+    for i in range(2):  # 连亏 2 笔 → 300999 进入个股冷却
+        pos_id = f"POS-B{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id, "symbol": "300999",
+                      "persona_id": pid, "entry_date": "2026-10-10"})
+        brain.store.close_position(pos_id, 190.0, -500.0,
+                                   closed_at=f"2026-10-{20 + i}T14:00:00")
+        _attr(brain, f"AT-B{i}", pos_id, "300999", "loss")
+
+    ctx = SimpleNamespace(
+        brain=brain,
+        persona=SimpleNamespace(persona_id=pid),
+        data={"candidates": [{"symbol": "300999"}, {"symbol": "600660"}]},
+    )
+    op = SharedFlagsAndBlacklistScreenFactor().evaluate(ctx, {})
+    kept_syms = {s["symbol"] for s in op.evidence["kept"]}
+    assert kept_syms == {"600660"}                        # 冷却标的被拦截
+    assert any("300999" in b for b in op.evidence["blocked"])
+
+    # 换角色 persona：A 的冷却不影响 B
+    ctx.persona = SimpleNamespace(persona_id="duan_yongping_v1")
+    op = SharedFlagsAndBlacklistScreenFactor().evaluate(ctx, {})
+    assert {s["symbol"] for s in op.evidence["kept"]} == {"300999", "600660"}
+
+
+def test_attribution_lesson_persist_persona_id(tmp_path):
+    """save_attribution/save_lesson 经 positions 关联自动落 persona_id。"""
+    brain = _MockBrain(tmp_path)
+    pid = "duan_yongping_v1"
+    _open(brain, {**_ULTRA_POS, "position_id": "POS-P", "symbol": "600660",
+                  "persona_id": pid, "entry_date": "2026-10-01"})
+    brain.store.close_position("POS-P", 190.0, -500.0, closed_at="2026-10-20T14:00:00")
+
+    brain.store.save_attribution({
+        "attribution_id": "AT-P", "position_id": "POS-P", "symbol": "600660",
+        "outcome": "loss", "primary_cause": "test", "strategy_id": "value_investing",
+    })
+    brain.store.save_lesson({
+        "lesson_id": "LSN-P", "attribution_id": "AT-P", "symbol": "600660",
+        "strategy_id": "value_investing", "outcome": "loss", "lesson_text": "测试教训",
+    })
+
+    conn = brain.store._conn()
+    ta = conn.execute("SELECT persona_id FROM trade_attributions WHERE attribution_id='AT-P'").fetchone()
+    ls = conn.execute("SELECT persona_id FROM lessons WHERE lesson_id='LSN-P'").fetchone()
+    assert ta["persona_id"] == pid and ls["persona_id"] == pid
+
+    # get_recent_lessons 角色隔离：B 角色看不到 A 的教训
+    assert brain.store.get_recent_lessons(persona_id=pid, limit=5)
+    assert brain.store.get_recent_lessons(persona_id="short_term_hot_rotation_v1", limit=5) == []
+
+
+def test_llm_signal_propose_uses_raw_position_pct(tmp_path):
+    """llm.signal_propose 只读 Strategist 原始 position_pct，不混入旧链路 approved_position_pct。"""
+    from types import SimpleNamespace
+
+    from src.wheel.factors.entry_factors import LlmSignalProposeFactor
+
+    ctx = SimpleNamespace(
+        data={
+            "candidate": {"symbol": "300001", "name": "测试"},
+            "quote": {"price": 10.0},
+            "strategist_signal": {
+                "action": "BUY", "symbol": "300001", "position_pct": 0.08,
+                "approved_position_pct": 0.0,   # 旧链路 RiskGovernor 拒单置 0
+            },
+        },
+    )
+    op = LlmSignalProposeFactor().evaluate(ctx, {})
+    assert op.verdict == "propose" and op.action == "BUY"
+    assert op.qty_pct == 0.08   # 若误读 approved_position_pct 会得到 0.05 兜底值
+
+

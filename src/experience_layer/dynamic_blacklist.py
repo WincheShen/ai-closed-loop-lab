@@ -57,6 +57,25 @@ class DynamicBlacklist:
 
         return False, ""
 
+    def get_blacklisted_symbols(self) -> set[str]:
+        """当前应屏蔽的标的集合：个股冷却期 + 本角色已持仓（Phase 3.7 转盘漏斗用）。"""
+        blocked = set(
+            self.stock_memory.cooldown_symbols(persona_id=self.persona_id).keys()
+        )
+        if self.persona_id:
+            try:
+                for pos in self.brain.store.list_open_positions(
+                    persona_id=self.persona_id
+                ):
+                    if pos.get("symbol"):
+                        blocked.add(str(pos["symbol"]))
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "get_blacklisted_symbols: 持仓查询失败 persona=%s: %s",
+                    self.persona_id, e,
+                )
+        return blocked
+
     def get_blocked_strategies(self, regime: str) -> list[dict[str, Any]]:
         """查询在指定 regime 下应暂停的策略列表。
 

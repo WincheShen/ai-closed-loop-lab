@@ -425,8 +425,11 @@ class StrategistEngine:
 
     def _lessons_block(self) -> str:
         regime = self.market_regime.get("regime")
+        pid = getattr(self.persona, "id", None)
         try:
-            lessons = self.brain.store.get_recent_lessons(regime=regime, limit=5)
+            lessons = self.brain.store.get_recent_lessons(
+                regime=regime, limit=5, persona_id=pid,
+            )
         except Exception:
             lessons = []
 
@@ -434,16 +437,16 @@ class StrategistEngine:
             return ""
 
         lines = []
-        for l in lessons:
-            txt = l.get("lesson_text") or l.get("lesson") or ""
-            symbol = l.get("symbol", "")
-            strategy = l.get("strategy_id", "")
-            outcome = l.get("outcome", "")
+        for lesson in lessons:
+            txt = lesson.get("lesson_text") or lesson.get("lesson") or ""
+            symbol = lesson.get("symbol", "")
+            strategy = lesson.get("strategy_id", "")
+            outcome = lesson.get("outcome", "")
             if txt:
                 tag = f"({'盈' if outcome == 'win' else '亏' if outcome == 'loss' else '平'})"
                 lines.append(f"- [{strategy}] {symbol}{tag}: {txt}")
                 try:
-                    self.brain.store.increment_lesson_cited(l["lesson_id"])
+                    self.brain.store.increment_lesson_cited(lesson["lesson_id"])
                 except Exception:
                     pass
 

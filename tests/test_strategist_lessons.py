@@ -2,7 +2,7 @@ from src.agents.strategist.signal_generator import StrategistEngine
 
 
 class DummyStore:
-    def get_recent_lessons(self, regime=None, limit=3):
+    def get_recent_lessons(self, regime=None, limit=3, persona_id=None):
         return [
             {"symbol": "000001", "lesson_text": "avoid chasing highs"},
             {"symbol": "000002", "lesson_text": "respect stop loss"},

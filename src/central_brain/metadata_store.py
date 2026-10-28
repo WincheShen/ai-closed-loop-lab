@@ -1288,6 +1288,13 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
     def save_attribution(self, attr: dict) -> None:
         """保存交易归因记录。"""
         conn = self._conn()
+        persona_id = attr.get("persona_id")
+        if not persona_id:
+            row = conn.execute(
+                "SELECT persona_id FROM positions WHERE position_id = ?",
+                (attr.get("position_id") or "",),
+            ).fetchone()
+            persona_id = row["persona_id"] if row else None
         conn.execute(
             """INSERT OR REPLACE INTO trade_attributions
             (attribution_id, position_id, symbol, name,
@@ -1295,8 +1302,8 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
              outcome, primary_cause, secondary_causes_json,
              entry_regime, close_regime, regime_changed,
              strategy_id, original_thesis, actual_narrative,
-             lesson, should_have, tags_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             lesson, should_have, tags_json, persona_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 attr["attribution_id"],
                 attr["position_id"],
@@ -1319,6 +1326,7 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
                 attr.get("lesson", ""),
                 attr.get("should_have", ""),
                 json.dumps(attr.get("tags", []), ensure_ascii=False),
+                persona_id,
                 attr.get("created_at") or datetime.now().isoformat(),
             ),
         )
@@ -1336,11 +1344,22 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
     def save_lesson(self, lesson: dict) -> None:
         """保存单条 lesson。"""
         conn = self._conn()
+        persona_id = lesson.get("persona_id")
+        if not persona_id:
+            row = conn.execute(
+                """SELECT COALESCE(NULLIF(ta.persona_id, ''), p.persona_id) AS pid
+                FROM trade_attributions ta
+                LEFT JOIN positions p ON p.position_id = ta.position_id
+                WHERE ta.attribution_id = ?""",
+                (lesson.get("attribution_id") or "",),
+            ).fetchone()
+            persona_id = row["pid"] if row else None
         conn.execute(
             """INSERT OR REPLACE INTO lessons
             (lesson_id, attribution_id, symbol, strategy_id, regime,
-             outcome, lesson_text, tags_json, relevance_score, cited_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             outcome, lesson_text, tags_json, relevance_score, cited_count,
+             persona_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lesson["lesson_id"],
                 lesson.get("attribution_id", ""),
@@ -1352,6 +1371,7 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
                 json.dumps(lesson.get("tags", []), ensure_ascii=False),
                 lesson.get("relevance_score", 1.0),
                 lesson.get("cited_count", 0),
+                persona_id,
                 lesson.get("created_at") or datetime.now().isoformat(),
             ),
         )
@@ -1362,8 +1382,9 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         strategy_id: str | None = None,
         regime: str | None = None,
         limit: int = 5,
+        persona_id: str | None = None,
     ) -> list[dict]:
-        """检索最近 lesson，支持按 strategy_id / regime 过滤。
+        """检索最近 lesson，支持按 strategy_id / regime / persona_id 过滤。
 
         排序逻辑: 同 strategy + 同 regime 的优先 (relevance_score DESC, 时间 DESC)。
         """
@@ -1377,6 +1398,9 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         if regime:
             conditions.append("regime = ?")
             params.append(regime)
+        if persona_id:
+            conditions.append("persona_id = ?")
+            params.append(persona_id)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
@@ -1387,14 +1411,18 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             params,
         ).fetchall()
 
-        # 如果带过滤条件查不到足够结果，补充无过滤的最新 lesson
+        # 如果带过滤条件查不到足够结果，补充同角色的最新 lesson（保持角色隔离）
         results = [dict(r) for r in rows]
         if len(results) < limit and conditions:
             seen = {r["lesson_id"] for r in results}
-            fill_rows = conn.execute(
-                "SELECT * FROM lessons ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            fill_sql = "SELECT * FROM lessons"
+            fill_params: list[Any] = []
+            if persona_id:
+                fill_sql += " WHERE persona_id = ?"
+                fill_params.append(persona_id)
+            fill_sql += " ORDER BY created_at DESC LIMIT ?"
+            fill_params.append(limit)
+            fill_rows = conn.execute(fill_sql, fill_params).fetchall()
             for r in fill_rows:
                 if dict(r)["lesson_id"] not in seen:
                     results.append(dict(r))
