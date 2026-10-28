@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import date, datetime
-from typing import Any, Literal
+from datetime import date
+from typing import Literal
 
 from src.agents.reviewer.hard_rules import evaluate_hard_exit, is_value_position
 from src.central_brain import get_central_brain
@@ -672,7 +672,7 @@ class PositionReviewAgent:
             return {
                 **result,
                 "action": "HOLD",
-                "reason": f"论点弱化(thesis=weakened)，不宜加仓，维持现有仓位观察",
+                "reason": "论点弱化(thesis=weakened)，不宜加仓，维持现有仓位观察",
                 "risk_flag": "thesis_weakened",
                 "rule_override": True,
             }
@@ -698,6 +698,13 @@ class PositionReviewAgent:
                         # 盈利中的价值持仓: 180天才考虑减仓
                         if days_held <= 180:
                             return result
+                    # 超期减仓冷却：30 天内已因超期减过一次 → 不再每天减半（防跨日切香肠）
+                    if self._stale_reduce_on_cooldown(position, cooldown_days=30):
+                        logger.info(
+                            "[%s] 超期减仓冷却中（30天内已减过），本次不再触发 REDUCE",
+                            symbol,
+                        )
+                        return result
                     # 90天+ 且浮亏: REDUCE
                     logger.info(
                         "[%s] Rule Override: 价值投资持仓 %d 天浮盈 %.1f%% → REDUCE",
@@ -721,6 +728,9 @@ class PositionReviewAgent:
                     stale_threshold = 3
 
                 if stale_threshold and days_held > stale_threshold:
+                    # 超期减仓冷却：stale_threshold 天内已减过 → 不再重复触发
+                    if self._stale_reduce_on_cooldown(position, cooldown_days=stale_threshold):
+                        return result
                     logger.info(
                         "[%s] Rule Override: 持仓 %d 天浮盈 %.1f%% (阈值%d天) → REDUCE",
                         symbol, days_held, pnl_pct, stale_threshold,
@@ -736,6 +746,28 @@ class PositionReviewAgent:
                 pass
 
         return result
+
+    def _stale_reduce_on_cooldown(self, position: dict, cooldown_days: int) -> bool:
+        """同一持仓在 cooldown_days 个自然日内已实际卖出过 → 超期规则不再重复减仓。
+
+        用 fills 实际成交为准（复审建议可能被网关拦截，未成交不算已释放资金）。
+        """
+        try:
+            from datetime import datetime as dt_cls, timedelta
+            cutoff = (dt_cls.now() - timedelta(days=cooldown_days)).isoformat()
+            conn = self.brain.store._conn()
+            row = conn.execute(
+                "SELECT 1 FROM fills WHERE persona_id = ? AND symbol = ? "
+                "AND lower(side) = 'sell' AND filled_at >= ? LIMIT 1",
+                (
+                    position.get("persona_id") or "",
+                    position.get("symbol") or "",
+                    cutoff,
+                ),
+            ).fetchone()
+            return row is not None
+        except Exception:  # noqa: BLE001
+            return False
 
     def _format_review_history(self, reviews: list[dict]) -> str:
         if not reviews:

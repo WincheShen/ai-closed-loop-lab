@@ -221,14 +221,20 @@ def compute_account_risk_metrics(
     window_days: int = 14,
     max_daily_loss_pct: float | None = None,
     consecutive_loss_limit: int | None = None,
+    cooldown_days: int | None = None,
     emit_events: bool = False,
 ) -> dict[str, Any]:
-    """统一计算账户当日盈亏与连续亏损笔数（Phase 4，ExecutionEngine 与 account_monitor 共用）。"""
+    """统一计算账户当日盈亏与连续亏损笔数（Phase 4，ExecutionEngine 与 account_monitor 共用）。
+
+    连亏语义 = "冷静/降频"：consecutive_losses 达到上限后，仅当最近一笔亏损平仓
+    距今 <= cooldown_days 个交易日时才拦截新开仓；冷静期过后允许恢复交易，
+    避免"连亏锁死 14 天且无法产生盈利单打破连亏"的死锁。
+    """
     now_dt = now or datetime.now()
     today = now_dt.strftime("%Y-%m-%d")
     window_start = (now_dt - timedelta(days=window_days)).isoformat()
 
-    if max_daily_loss_pct is None or consecutive_loss_limit is None:
+    if max_daily_loss_pct is None or consecutive_loss_limit is None or cooldown_days is None:
         try:
             from src.wheel.config import get_config
             pol = persona_policy(get_config(), persona_id, None)
@@ -236,9 +242,12 @@ def compute_account_risk_metrics(
                 max_daily_loss_pct = pol.max_daily_loss_pct
             if consecutive_loss_limit is None:
                 consecutive_loss_limit = pol.consecutive_loss_limit
+            if cooldown_days is None:
+                cooldown_days = int(pol.params.get("consecutive_loss_cooldown_days", 1))
         except Exception:  # noqa: BLE001
             max_daily_loss_pct = max_daily_loss_pct or 0.03
             consecutive_loss_limit = consecutive_loss_limit or 5
+            cooldown_days = cooldown_days or 1
 
     max_daily_loss_pct = abs(float(max_daily_loss_pct))
     consecutive_loss_limit = int(consecutive_loss_limit)
@@ -284,7 +293,21 @@ def compute_account_risk_metrics(
         else:
             break
 
-    consecutive_loss_breached = consecutive_losses >= consecutive_loss_limit
+    # 连亏冷静期：只有"最近一笔亏损仍在 cooldown_days 个交易日内"才拦截；
+    # 冷静期过后连亏计数保留在指标中，但不再拦截新开仓
+    streak_active = False
+    if consecutive_losses >= consecutive_loss_limit and recent:
+        try:
+            from src.infra.trading_calendar import trading_days_between
+            last_closed = str(recent[0].get("closed_at") or "")[:10]
+            days_since = trading_days_between(
+                datetime.fromisoformat(last_closed).date(), now_dt.date(),
+            )
+            streak_active = days_since <= int(cooldown_days)
+        except (ValueError, TypeError):
+            streak_active = True
+
+    consecutive_loss_breached = consecutive_losses >= consecutive_loss_limit and streak_active
 
     if emit_events and brain is not None:
         try:
@@ -329,6 +352,7 @@ def compute_account_risk_metrics(
         "consecutive_losses": consecutive_losses,
         "consecutive_loss_limit": consecutive_loss_limit,
         "consecutive_loss_breached": consecutive_loss_breached,
+        "cooldown_days": int(cooldown_days),
         "window_days": window_days,
     }
 

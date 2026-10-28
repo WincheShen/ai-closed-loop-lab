@@ -1020,3 +1020,101 @@ def test_phase4b_proposals_and_phase5_replay_benchmark(tmp_path):
     assert bench_pass["passed"] is True and bench_pass["edge_pct"] > 2.0
 
 
+def test_consecutive_loss_cooldown_releases_after_cold_period(tmp_path):
+    """连亏达到上限后，最近一笔亏损过 cooldown 个交易日冷静期即恢复，不再锁死 14 天。"""
+    from src.wheel.persona import compute_account_risk_metrics
+
+    brain = _MockBrain(tmp_path)
+    pid = "ultra_short_momentum_v1"
+    for i, closed_at in enumerate(("2026-10-23T14:30:00", "2026-10-26T09:35:00")):
+        pos_id = f"POS-L{i}"
+        _open(brain, {**_ULTRA_POS, "position_id": pos_id, "symbol": f"30011{i}"})
+        brain.store.close_position(pos_id, 194.0, -500.0, closed_at=closed_at)
+
+    # 10-27：最近一笔亏损(10-26)距今 1 个交易日，仍在冷静期 → 拦截
+    m1 = compute_account_risk_metrics(
+        brain, pid, now=datetime(2026, 10, 27, 14, 35),
+        consecutive_loss_limit=2, cooldown_days=1,
+    )
+    assert m1["consecutive_losses"] == 2
+    assert m1["consecutive_loss_breached"] is True
+
+    # 10-28：最近一笔亏损距今 2 个交易日 > cooldown 1 → 恢复交易（连亏计数仍保留）
+    m2 = compute_account_risk_metrics(
+        brain, pid, now=datetime(2026, 10, 28, 14, 35),
+        consecutive_loss_limit=2, cooldown_days=1,
+    )
+    assert m2["consecutive_losses"] == 2
+    assert m2["consecutive_loss_breached"] is False
+
+
+def test_stale_position_reduce_cooldown(tmp_path):
+    """价值持仓超 90 天减仓一次后，30 天内不再因超期规则重复减仓（防跨日切香肠）。"""
+    from src.agents.reviewer.position_reviewer import PositionReviewAgent
+
+    brain = _MockBrain(tmp_path)
+    agent = PositionReviewAgent.__new__(PositionReviewAgent)
+    agent.brain = brain
+
+    pos = {
+        "position_id": "POS-V", "symbol": "600660", "persona_id": "duan_yongping_v1",
+        "entry_price": 55.0, "stop_loss": 44.0, "target_price": 75.0,
+        "entry_date": "2026-07-25", "strategy_id": "value_investing",
+        "current_qty": 400, "name": "福耀玻璃",
+    }
+    hold = {"action": "HOLD", "thesis_status": "intact"}
+
+    # 30 天内无卖出 → 超期规则触发 REDUCE
+    out1 = agent._apply_rule_override(dict(hold), pos, current_price=53.0, pnl_pct=-3.6)
+    assert out1["action"] == "REDUCE" and out1["risk_flag"] == "stale_position"
+
+    # 记录 30 天内的一笔实际卖出 → 超期冷却生效，保持 HOLD
+    brain.store.save_fill({
+        "fill_id": "F-1", "order_id": "O-1", "persona_id": "duan_yongping_v1",
+        "symbol": "600660", "side": "sell", "quantity": 200,
+        "avg_price": 52.9, "filled_at": datetime.now().isoformat(),
+    })
+    out2 = agent._apply_rule_override(dict(hold), pos, current_price=53.0, pnl_pct=-3.6)
+    assert out2["action"] == "HOLD"
+
+
+def test_value_pool_initial_screen_without_pe_in_snapshot(tmp_path):
+    """快照只有市值无 PE 时，初筛只卡市值/非 ST，PE 上下限留待精筛（修 0 只入池 Bug）。"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from src.agents.explorer import value_pool as vp
+
+    def _stock(sym, mcap, pe=None, roe=None, st=False):
+        return SimpleNamespace(
+            symbol=sym, name=f"测试{sym}", market_cap_yi=mcap, pe_ttm=pe,
+            roe=roe, is_st=st, turnover=5.0, pb=None, fcf_yield=None,
+            debt_ratio=None, dividend_yield=None,
+        )
+
+    fake_snapshot = SimpleNamespace(stocks=[
+        _stock("600519", 19000.0),   # 大市值，无 PE → 应过初筛
+        _stock("600001", 50.0),      # 市值不足 → 初筛剔除
+        _stock("600002", 300.0, st=True),  # ST → 剔除
+        _stock("000001", 3000.0),    # 大市值 → 应过初筛
+    ])
+
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        def fetch_snapshot(self): return fake_snapshot
+
+    class _FakeFC:
+        def enrich_quotes(self, candidates):
+            for s in candidates:
+                s.pe_ttm = 20.0
+                s.roe = 15.0
+
+    pool = vp.ValueStockPool.__new__(vp.ValueStockPool)  # 绕过 __init__，避免测试落盘 value_pool.db
+    with patch("src.stock_analyzer.data_source.AkshareClient", _FakeClient), \
+         patch("src.stock_analyzer.data_source.FundamentalClient", lambda *a, **k: _FakeFC()):
+        result = pool._build_pool()
+
+    syms = {s.symbol for s in result}
+    assert syms == {"600519", "000001"}
+
+

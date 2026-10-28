@@ -14,7 +14,6 @@ import logging
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Optional
 
 from src.stock_analyzer.data_source.akshare_client import StockQuote
 
@@ -132,13 +131,22 @@ class ValueStockPool:
             snapshot = client.fetch_snapshot()
 
             # 初筛：市值+估值（数据缺失时放宽，不直接过滤）
-            has_valuation = any(s.market_cap_yi is not None for s in snapshot.stocks)
-            if has_valuation:
+            has_mcap = any(s.market_cap_yi is not None for s in snapshot.stocks)
+            has_pe = any(s.pe_ttm is not None for s in snapshot.stocks)
+            if has_mcap and has_pe:
                 candidates = [
                     s for s in snapshot.stocks
                     if not s.is_st
                     and s.market_cap_yi is not None and s.market_cap_yi >= 100
                     and s.pe_ttm is not None and 0 < s.pe_ttm <= 50
+                ]
+            elif has_mcap:
+                # 快照只有市值（PE 依赖 FundamentalClient 填充）→ 初筛只卡市值，
+                # PE 上下限移到 enrich 后的精筛阶段，否则会全量误杀（0 只入池）
+                candidates = [
+                    s for s in snapshot.stocks
+                    if not s.is_st
+                    and s.market_cap_yi is not None and s.market_cap_yi >= 100
                 ]
             else:
                 # 数据源（如 Sina）不提供市值/PE → 仅排除 ST，后续靠基本面精筛
@@ -146,7 +154,7 @@ class ValueStockPool:
                 candidates = [s for s in snapshot.stocks if not s.is_st]
 
             # 取前 200 只进行基本面数据填充（按市值排序，无市值时按成交额）
-            if has_valuation:
+            if has_mcap:
                 candidates.sort(key=lambda s: s.market_cap_yi or 0, reverse=True)
             else:
                 candidates.sort(key=lambda s: s.turnover or 0, reverse=True)
@@ -161,10 +169,11 @@ class ValueStockPool:
             except Exception:
                 logger.warning("ValueStockPool: 基本面数据填充失败")
 
-            # 精筛：有 ROE 数据的优先，ROE > 10%
+            # 精筛：ROE 与 PE（填充后若有数据则生效），缺失字段放宽不过滤
             pool = [
                 s for s in candidates
-                if s.roe is None or s.roe >= 10  # ROE 数据缺失也保留
+                if (s.roe is None or s.roe >= 10)
+                and (s.pe_ttm is None or 0 < s.pe_ttm <= 50)
             ]
 
             logger.info(

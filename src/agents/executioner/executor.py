@@ -82,10 +82,12 @@ class ExecutionEngine:
 
         if metrics["consecutive_loss_breached"]:
             self.logger.warning(
-                "⚠️ CIRCUIT BREAKER: 最近%d天内连续亏损 %d 笔(限制 %d)，停止买入",
+                "⚠️ CIRCUIT BREAKER: 最近%d天内连续亏损 %d 笔(限制 %d)，"
+                "冷静期 %d 个交易日内停止买入",
                 metrics["window_days"],
                 metrics["consecutive_losses"],
                 metrics["consecutive_loss_limit"],
+                metrics.get("cooldown_days", 1),
             )
             return True
 
