@@ -1989,3 +1989,163 @@ def test_wheel_entry_shadow_node_live_suppresses_old_path_buys(tmp_path, monkeyp
     out = wf.run_wheel_entry_shadow_node(state)
     assert out is not None
     assert [s["action"] for s in out["trade_signals"]] == ["sell"]
+
+
+# ── 七轮 review 回归 ─────────────────────────────────────────
+
+
+def test_pending_signals_scoped_by_persona(tmp_path):
+    """list_pending_signals 按 persona 过滤，避免多角色循环重复扫描全表。"""
+    brain = _MockBrain(tmp_path)
+    now = datetime.now().isoformat()
+    for sig_id, pid in [
+        ("SIG-ST", "short_term_hot_rotation_v1"),
+        ("SIG-UL", "ultra_short_momentum_v1"),
+        ("SIG-OLD", None),
+    ]:
+        brain.store.save_trade_signal("s", {
+            "signal_id": sig_id, "symbol": "300001", "action": "buy",
+            "entry_price": 10.0, "entry_condition": "breakout",
+            "timestamp": now, "persona_id": pid,
+        })
+    ultra = brain.store.list_pending_signals(persona_id="ultra_short_momentum_v1")
+    assert [s["signal_id"] for s in ultra] == ["SIG-UL"]
+    st = brain.store.list_pending_signals(
+        persona_id="short_term_hot_rotation_v1", include_unassigned=True)
+    assert sorted(s["signal_id"] for s in st) == ["SIG-OLD", "SIG-ST"]
+    val = brain.store.list_pending_signals(persona_id="value_buy_and_hold_v1")
+    assert val == []
+    assert len(brain.store.list_pending_signals()) == 3
+
+
+def test_regime_posture_gate_blocks_defend_observe(tmp_path):
+    """screen.regime_posture_gate 对齐 RiskGovernor: defend/observe/bear 强制降级均禁开仓。"""
+    from types import SimpleNamespace
+
+    from src.wheel.factors.entry_factors import RegimePostureScreenFactor
+
+    factor = RegimePostureScreenFactor()
+    cands = [{"symbol": "300001"}]
+
+    def _kept(regime):
+        ctx = SimpleNamespace(
+            data={"candidates": list(cands), "regime_snapshot": regime},
+            now=_T,
+        )
+        return factor.evaluate(ctx, {}).evidence["kept"]
+
+    real = {"regime": "neutral", "data_quality": "real"}
+    assert _kept({**real, "recommended_posture": "defend"}) == []
+    assert _kept({**real, "recommended_posture": "observe"}) == []
+    assert _kept({**real, "recommended_posture": "exit"}) == []
+    # bear/panic 下进攻姿态被强制降级为 defend/exit
+    assert _kept({**real, "regime": "bear",
+                  "recommended_posture": "attack"}) == []
+    assert _kept({**real, "regime": "panic",
+                  "recommended_posture": "selective_attack"}) == []
+    # 正常进攻姿态放行
+    assert _kept({**real, "recommended_posture": "attack"}) == cands
+
+
+@pytest.mark.asyncio
+async def test_hard_scan_live_reports_real_executed_flag(tmp_path, monkeypatch):
+    """转盘 EXIT 决策被网关拦截时，hard_scan 不得虚报 executed=True。"""
+    from src.agents.reviewer import hard_scan
+    from src.wheel.protocol import Decision
+
+    brain = _MockBrain(tmp_path)
+    brain.store.open_position(
+        position_id="POS-X", symbol="300001", entry_price=10.0,
+        qty=100, entry_date="2026-10-08",
+        persona_id="short_term_hot_rotation_v1", stop_loss=9.0,
+    )
+    decision = Decision(
+        wheel="intraday_5m", subject_key="POS-X", action="EXIT",
+        reason="硬止损", decision_id="WD-X",
+    )
+    monkeypatch.setattr(hard_scan, "_price_for", lambda *a, **k: (8.5, False))
+    monkeypatch.setattr(hard_scan, "run_exit_shadow", lambda *a, **k: decision)
+    monkeypatch.setattr(hard_scan, "wheel_exit_mode", lambda *a, **k: "live")
+
+    async def _no_pending(*a, **kw):
+        return []
+    monkeypatch.setattr(
+        "src.agents.reviewer.intraday_loop._check_pending_signals", _no_pending)
+    monkeypatch.setattr(hard_scan, "expire_stale_signals", lambda b: 0)
+
+    def _row(executed):
+        brain.store._conn().execute(
+            "INSERT OR REPLACE INTO wheel_decisions "
+            "(decision_id, event_id, wheel, persona_id, subject_key, action, "
+            " mode, executed, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("WD-X", "ev-x", "intraday_5m", "short_term_hot_rotation_v1",
+             "POS-X", "EXIT", "live", executed, datetime.now().isoformat()),
+        )
+        brain.store._conn().commit()
+
+    _row(0)  # 网关拒单（如 reduce_daily_cap）
+    exits = await hard_scan.run_hard_scan(
+        "short_term_hot_rotation_v1", force=True, brain=brain)
+    assert exits[0]["action"] == "EXIT"
+    assert exits[0]["executed"] is False
+    assert exits[0]["executed_via"] == "wheel"
+
+    _row(1)  # 网关真实成交
+    exits = await hard_scan.run_hard_scan(
+        "short_term_hot_rotation_v1", force=True, brain=brain)
+    assert exits[0]["executed"] is True
+
+
+def test_datastep_agents_accept_injected_brain(tmp_path):
+    """ExplorerScanner/StrategistEngine/PositionReviewAgent 构造期可注入 brain。"""
+    from src.agents.explorer.scanner import ExplorerScanner
+    from src.agents.reviewer.position_reviewer import PositionReviewAgent
+    from src.agents.strategist.signal_generator import StrategistEngine
+
+    brain = _MockBrain(tmp_path)
+    assert ExplorerScanner("s", brain=brain).brain is brain
+    assert StrategistEngine("s", brain=brain).brain is brain
+    assert PositionReviewAgent(brain=brain).brain is brain
+
+
+def test_wheel_entry_shadow_node_live_defend_saves_watchlist(tmp_path, monkeypatch):
+    """clock.1535 live + posture=defend：买单不进执行，但照旧存入自选池观察。"""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    import src.wheel.config as wc
+    import src.wheel.runner as wr
+    import src.graph.workflow as wf
+
+    real_cfg = wc.get_config()
+    binding = real_cfg.binding_for("short_term_hot_rotation_v1", "clock.1535")
+    live_binding = replace(binding, mode="live")
+    monkeypatch.setattr(
+        wc, "get_config",
+        lambda: SimpleNamespace(
+            binding_for=lambda pid, et: live_binding,
+            personas=real_cfg.personas, wheels=real_cfg.wheels,
+        ),
+    )
+    monkeypatch.setattr(wr, "run_binding", lambda *a, **k: [])
+    saved = []
+    monkeypatch.setattr(
+        wf, "_save_signals_to_watchlist",
+        lambda sigs, state: saved.extend(sigs),
+    )
+
+    state = {
+        "persona_id": "short_term_hot_rotation_v1",
+        "trade_signals": [
+            {"symbol": "300001", "action": "buy", "signal_id": "S1"},
+            {"symbol": "300002", "action": "sell", "signal_id": "S2"},
+        ],
+        "target_stocks": [{"symbol": "300001"}],
+        "market_regime": {
+            "regime": "neutral", "data_quality": "real",
+            "recommended_posture": "defend",
+        },
+    }
+    out = wf.run_wheel_entry_shadow_node(state)
+    assert [s["action"] for s in out["trade_signals"]] == ["sell"]
+    assert [s["signal_id"] for s in saved] == ["S1"]

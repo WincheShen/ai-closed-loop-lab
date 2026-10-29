@@ -126,9 +126,10 @@ class LlmReviewStep:
                     params.get("force_review_reason")
                     or (ctx.event.payload or {}).get("reason")
                 )
-                agent = PositionReviewAgent(persona_id=ctx.persona.persona_id or None)
-                if ctx.brain is not None:
-                    agent.brain = ctx.brain
+                agent = PositionReviewAgent(
+                    persona_id=ctx.persona.persona_id or None,
+                    brain=ctx.brain,
+                )
                 review = agent.review_position(pos, force_review_reason=reason)
                 if review:
                     return {"llm_review": review}
@@ -371,6 +372,7 @@ class ExplorerScanStep:
                     ctx.event.event_id,
                     persona_id=ctx.persona.persona_id or None,
                     market_regime=regime,
+                    brain=ctx.brain,
                 )
                 candidates = scanner.scan_market()
             except Exception as e:  # noqa: BLE001
@@ -410,6 +412,7 @@ class StrategistEvalStep:
                     ctx.event.event_id,
                     persona=get_persona(persona_id=ctx.persona.persona_id or None),
                     market_regime=regime,
+                    brain=ctx.brain,
                 )
                 sig = engine.analyze_candidate(cand)  # type: ignore[arg-type]
             except Exception as e:  # noqa: BLE001

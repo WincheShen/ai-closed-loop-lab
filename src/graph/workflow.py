@@ -172,6 +172,18 @@ def run_wheel_entry_shadow_node(state: TradingState) -> dict:
             # 入场转盘接管买入决策（成交/拒绝均留痕于 wheel_decisions）：
             # 从 trade_signals 移除买单，阻止旧路径 RiskGovernor/Executioner
             # 对同一批信号二次执行；卖出信号仍走旧路径处理退出
+            posture = (state.get("market_regime") or {}).get("recommended_posture", "")
+            buy_sigs = [
+                s for s in (state.get("trade_signals") or [])
+                if str(s.get("action") or "") == "buy"
+            ]
+            if posture == POSTURE_DEFEND and buy_sigs:
+                # 与旧路径语义一致：defend 姿态下不建仓，但信号存入自选池待观察
+                _save_signals_to_watchlist(buy_sigs, state)
+                logger.info(
+                    "clock.1535 live + posture=defend，%d 条买单已存入 watchlist",
+                    len(buy_sigs),
+                )
             logger.info("clock.1535 入场转盘为 live，旧路径买单执行已接管")
             return {
                 "trade_signals": [
@@ -302,9 +314,22 @@ async def run_daily_pipeline(
 
     # 兜底：MarketBrain（posture=exit/数据不可用）或 Explorer 提前 END 时
     # wheel_shadow 节点未执行，补跑一次 clock.1535 漏斗评估——
-    # 异常天气下"为什么没买"也要留下可审计的转盘轨迹
+    # 异常天气下"为什么没买"也要留下可审计的转盘轨迹。
+    # 若图内已跑过 wheel_shadow（如后续节点异常导致 result 回退 initial_state），
+    # 不再重复评估，否则同一事件会产生重复漏斗轨迹。
     if not result.get("target_stocks"):
-        run_wheel_entry_shadow_node(result)
+        pid = result.get("persona_id") or "short_term_hot_rotation_v1"
+        try:
+            row = brain.store._conn().execute(
+                "SELECT COUNT(*) AS c FROM events "
+                "WHERE agent = 'wheel' AND session_id LIKE ? AND created_at LIKE ?",
+                (f"wev-clock.1535-%-{pid}", f"{datetime.now():%Y-%m-%d}%"),
+            ).fetchone()
+            wheel_already_ran = bool(row and row["c"])
+        except Exception:  # noqa: BLE001
+            wheel_already_ran = True  # 查不出来时宁可不跑，避免重复评估
+        if not wheel_already_ran:
+            run_wheel_entry_shadow_node(result)
 
     logger.info("=" * 60)
     logger.info("✅ 日常交易流完成 — session=%s", session_id)

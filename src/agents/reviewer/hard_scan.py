@@ -31,6 +31,7 @@ async def run_hard_scan(
     from src.agents.reviewer.intraday_loop import (
         _check_pending_signals,
         _execute_review_action,
+        _wheel_decision_executed,
         is_trading_hours,
     )
 
@@ -88,7 +89,9 @@ async def run_hard_scan(
                         "pnl_pct": round(pnl_pct, 2),
                         "reason": wheel_decision.reason,
                         "risk_flag": wheel_decision.risk_flag,
-                        "executed": True,
+                        "executed": _wheel_decision_executed(
+                            brain, wheel_decision.decision_id,
+                        ),
                         "executed_via": "wheel",
                     })
                 elif (
@@ -179,7 +182,9 @@ async def run_hard_scan(
             symbol, review["action"], price, review.get("reason", ""),
         )
 
-    triggered = await _check_pending_signals(brain, session_id, force=force)
+    triggered = await _check_pending_signals(
+        brain, session_id, force=force, persona_id=persona_id,
+    )
     expired_n = expire_stale_signals(brain)
 
     if hasattr(brain, "log_agent_event"):

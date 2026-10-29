@@ -676,11 +676,20 @@ class RegimePostureScreenFactor:
                 evidence={"kept": [], "eliminated": len(candidates)},
             )
         posture = str(regime.get("recommended_posture") or "")
-        if posture == "exit":
+        regime_label = str(regime.get("regime") or "")
+        # 与 RiskGovernor 对齐: bear/panic 下进攻姿态强制降级为 defend/exit
+        effective_posture = posture
+        if regime_label in ("bear", "panic") and posture in ("attack", "selective_attack"):
+            effective_posture = "defend" if regime_label == "bear" else "exit"
+        if effective_posture in ("exit", "defend", "observe"):
+            label = {"exit": "撤退", "defend": "防守", "observe": "观望"}[effective_posture]
             return Opinion(
                 factor=self.name,
                 verdict="pass",
-                reason=f"MarketBrain posture=exit (regime={regime.get('regime')})，禁止新开仓",
+                reason=(
+                    f"MarketBrain posture={effective_posture} ({label}, regime={regime_label})"
+                    "，禁止新开仓"
+                ),
                 evidence={"kept": [], "eliminated": len(candidates)},
             )
         return Opinion(

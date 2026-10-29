@@ -361,10 +361,11 @@ class StrategistEngine:
         hot_sectors: list[str] | None = None,
         persona: TradingPersona | None = None,
         market_regime: dict[str, Any] | None = None,
+        brain=None,
     ) -> None:
         self.session_id = session_id
         self.logger = get_agent_logger("strategist", session_id)
-        self.brain = get_central_brain()
+        self.brain = brain or get_central_brain()
         self.config = cfg()
         self.hot_sectors = hot_sectors or []
         self.persona = persona or get_persona()
@@ -396,8 +397,10 @@ class StrategistEngine:
 
         # 尝试 Kelly 计算
         try:
-            from src.agents.strategist.kelly_sizer import get_kelly_sizer
-            sizer = get_kelly_sizer()
+            from src.agents.strategist.kelly_sizer import KellySizer
+            if getattr(self, "_kelly_sizer", None) is None:
+                self._kelly_sizer = KellySizer(brain=self.brain)
+            sizer = self._kelly_sizer
             regime = self.market_regime.get("regime")
             kelly_result = sizer.calculate(
                 strategy_id=strategy_name, regime=regime, is_value=is_value,

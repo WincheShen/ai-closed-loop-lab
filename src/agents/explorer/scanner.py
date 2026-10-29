@@ -50,11 +50,11 @@ _RULE_TO_STRATEGY: dict[str, str] = {
 class ExplorerScanner:
     """探索者扫描器 — AKShare 行情 + 规则引擎 + 热点检测（多人格支持）。"""
 
-    def __init__(self, session_id: str, persona_id: str | None = None, market_regime: dict | None = None) -> None:
+    def __init__(self, session_id: str, persona_id: str | None = None, market_regime: dict | None = None, brain=None) -> None:
         self.session_id = session_id
         self.persona_id = persona_id
         self.logger = get_agent_logger("explorer", session_id)
-        self.brain = get_central_brain()
+        self.brain = brain or get_central_brain()
         self.akshare = AkshareClient(allow_mock_fallback=True)
         self.hot_detector = HotSectorDetector()
         self._snapshot = None

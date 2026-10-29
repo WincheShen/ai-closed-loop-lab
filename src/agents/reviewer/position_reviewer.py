@@ -95,8 +95,8 @@ FORCE_REVIEW_TEMPLATE = """\
 class PositionReviewAgent:
     """轻量级 LLM 持仓复审 Agent。"""
 
-    def __init__(self, model_name: str | None = None, persona_id: str | None = None) -> None:
-        self.brain = get_central_brain()
+    def __init__(self, model_name: str | None = None, persona_id: str | None = None, brain=None) -> None:
+        self.brain = brain or get_central_brain()
         self.intraday = IntradayClient(allow_mock_fallback=True)
         self.model_name = model_name
         self.persona_id = persona_id

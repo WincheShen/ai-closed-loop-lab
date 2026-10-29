@@ -804,19 +804,31 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def list_pending_signals(self) -> list[dict]:
-        """获取所有待触发的条件单 (status=pending, 未被风控拒绝且未过期)。"""
+    def list_pending_signals(
+        self, persona_id: str | None = None, *, include_unassigned: bool = False,
+    ) -> list[dict]:
+        """获取待触发的条件单 (status=pending, 未被风控拒绝且未过期)。
+
+        多人格环境下调用方须传 persona_id，否则跨人格条件单会被重复扫描；
+        include_unassigned=True 时一并接收未标注 persona_id 的历史信号。
+        """
         conn = self._conn()
-        rows = conn.execute(
-            """SELECT * FROM trade_signals
+        sql = """SELECT * FROM trade_signals
             WHERE status = 'pending'
               AND COALESCE(risk_decision, '') != 'reject'
               AND signal_id NOT IN (
                   SELECT signal_id FROM risk_decisions WHERE decision = 'reject'
               )
-              AND (timestamp IS NULL OR datetime(timestamp, '+5 days') >= datetime('now'))
-            ORDER BY timestamp""",
-        ).fetchall()
+              AND (timestamp IS NULL OR datetime(timestamp, '+5 days') >= datetime('now'))"""
+        params: list = []
+        if persona_id:
+            if include_unassigned:
+                sql += " AND (persona_id = ? OR COALESCE(persona_id, '') = '')"
+            else:
+                sql += " AND persona_id = ?"
+            params.append(persona_id)
+        sql += " ORDER BY timestamp"
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def update_signal_status(self, signal_id: str, status: str) -> None:

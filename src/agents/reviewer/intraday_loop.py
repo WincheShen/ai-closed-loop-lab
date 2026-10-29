@@ -60,14 +60,18 @@ async def run_intraday_review(
         return []
 
     brain = get_central_brain()
-    reviewer = PositionReviewAgent(model_name=model_name, persona_id=persona_id)
+    reviewer = PositionReviewAgent(
+        model_name=model_name, persona_id=persona_id, brain=brain,
+    )
     session_id = f"intraday-{date.today().isoformat()}-{datetime.now().strftime('%H%M')}-{persona_id or 'all'}"
 
     # 1. Review all open positions (按persona过滤)
     reviews = reviewer.review_all_positions(force_review_map=force_review_map)
     if not reviews:
         logger.info("无持仓或无复审结果 — 仍检查 pending 条件单")
-        triggered = await _check_pending_signals(brain, session_id, force=force)
+        triggered = await _check_pending_signals(
+            brain, session_id, force=force, persona_id=persona_id,
+        )
         return triggered
 
     # 1.5 决策转盘影子模式：LLM 复审结果并行过 llm_position_review 转盘，
@@ -110,8 +114,15 @@ async def run_intraday_review(
         if action in ("EXIT", "REDUCE") and wheel_exit_mode(
             position.get("persona_id") or persona_id, "clock.intraday_30m",
         ) == "live":
-            if wheel_decisions.get(position_id) is not None:
+            wd = wheel_decisions.get(position_id)
+            if wd is not None:
                 review["executed_via"] = "wheel"
+                review["executed"] = _wheel_decision_executed(brain, wd.decision_id)
+                if wd.action not in ("EXIT", "REDUCE"):
+                    # 转盘把 LLM 的卖出提议修饰为 HOLD — 最终动作以转盘为准，
+                    # 否则 actions_taken 会把被拦截的卖出虚报为已执行
+                    review["action"] = "HOLD"
+                    review["wheel_reason"] = wd.reason
                 action_results.append(review)
                 continue
             logger.error(
@@ -165,8 +176,10 @@ async def run_intraday_review(
         },
     )
 
-    # 4. 检查并执行 pending signals（条件单监控）
-    triggered = await _check_pending_signals(brain, session_id, force=force)
+    # 4. 检查并执行 pending signals（条件单监控，按当前人格过滤）
+    triggered = await _check_pending_signals(
+        brain, session_id, force=force, persona_id=persona_id,
+    )
 
     logger.info(
         "盘中复审完成: %d 只持仓, %d 个动作, %d 条件单触发",
@@ -175,8 +188,22 @@ async def run_intraday_review(
     return action_results + triggered
 
 
+def _wheel_decision_executed(brain, decision_id: str | None) -> bool:
+    """查询 wheel_decisions.executed — 只有网关真实成交才算执行。"""
+    if not decision_id:
+        return False
+    try:
+        row = brain.store._conn().execute(
+            "SELECT executed FROM wheel_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(row and row["executed"])
+
+
 async def _check_pending_signals(
-    brain, session_id: str, force: bool = False,
+    brain, session_id: str, force: bool = False, persona_id: str | None = None,
 ) -> list[dict]:
     """检查 pending 状态的条件单，价格满足条件时自动执行。
 
@@ -188,8 +215,12 @@ async def _check_pending_signals(
     - 禁止使用 mock 数据触发条件单（防止随机价格误触发）
     - 当前价偏离入场价 > 30% 视为数据异常，跳过
     - 不覆写原始 entry_price，用它作为下单限价
+    - 多人格循环调用必须传 persona_id，避免全表条件单被重复扫描/评估
     """
-    pending = brain.store.list_pending_signals()
+    pending = brain.store.list_pending_signals(
+        persona_id=persona_id,
+        include_unassigned=(persona_id == "short_term_hot_rotation_v1"),
+    )
     if not pending:
         return []
 
@@ -255,15 +286,7 @@ async def _check_pending_signals(
                                 continue
                             # 只有 EntryGateway 真正成交才算触发
                             # （veto/网关拒绝的 BUY 决策不构成执行）
-                            try:
-                                gw_row = brain.store._conn().execute(
-                                    "SELECT executed FROM wheel_decisions "
-                                    "WHERE decision_id = ?",
-                                    (d.decision_id,),
-                                ).fetchone()
-                            except Exception:  # noqa: BLE001
-                                gw_row = None
-                            if not gw_row or not gw_row["executed"]:
+                            if not _wheel_decision_executed(brain, d.decision_id):
                                 continue
                             triggered_results.append({
                                 "symbol": symbol,
