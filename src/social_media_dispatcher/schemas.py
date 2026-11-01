@@ -38,12 +38,34 @@ class TradeRecordBrief(BaseModel):
     redacted_image_url: Optional[str] = None  # 公网可访问 URL，或 SMA 可读路径
 
 
+class MarketOverviewBrief(BaseModel):
+    """大盘行情客观摘要（供 SMA 自由决定创作角度）。"""
+    regime: Optional[str] = None          # bull / bear / neutral / panic / rotation 等
+    posture: Optional[str] = None         # attack / defend / exit 等
+    index_change_pct: Optional[float] = None  # 主要指数（如上证/沪深300）当日涨跌幅(%)
+    up_count: Optional[int] = None
+    down_count: Optional[int] = None
+    summary: Optional[str] = None
+
+
+class PortfolioBrief(BaseModel):
+    """持仓整体盈亏客观摘要（脱敏，不含金额与具体股票代码）。"""
+    open_count: int = 0
+    closed_today_count: int = 0
+    avg_pnl_pct: Optional[float] = None   # 持仓平均盈亏百分比(%)
+    win_count: int = 0
+    loss_count: int = 0
+    sectors: list[str] = Field(default_factory=list)
+
+
 class TopicContext(BaseModel):
-    """SMA 创作所需的完整背景信息。"""
+    """SMA 创作所需的完整背景信息（纯客观数据，不干涉创作形式）。"""
     pick_date: Optional[date] = None
     hot_sectors: list[str] = Field(default_factory=list)
     recommendations: list[StockBriefForSMA] = Field(default_factory=list)
     trade_record: Optional[TradeRecordBrief] = None
+    market: Optional[MarketOverviewBrief] = None
+    portfolio: Optional[PortfolioBrief] = None
     images: list[str] = Field(
         default_factory=list,
         description="配图路径/URL列表 (K线/盈亏曲线/板块热度等)，SMA 端贴图用",

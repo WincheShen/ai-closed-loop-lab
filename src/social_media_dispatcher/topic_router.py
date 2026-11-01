@@ -75,16 +75,12 @@ class TopicRouter:
             top_rec = recs[0]
             default_desc = (
                 f"今日热门板块：{sectors_text}。"
-                f"重点关注 {top_rec.industry} 方向，"
-                f"代表标的 {top_rec.name_masked}（{top_rec.bucket}）。"
-                f"请基于这些热点和板块逻辑创作小红书笔记，"
-                f"分享行情观察与板块解读，不出现具体股票代码与名称。"
+                f"重点方向：{top_rec.industry}，"
+                f"代表标的 {top_rec.name_masked}（{top_rec.bucket}，涨跌 {top_rec.change_pct:+.2f}%）。"
             )
         else:
             default_desc = (
-                f"今日热门板块：{sectors_text}。"
-                f"市场暂无明显主线机会，请创作一篇行情观察笔记，"
-                f"重点解读板块轮动与情绪变化。"
+                f"今日热门板块：{sectors_text}。市场暂无明显主线机会。"
             )
 
         context = TopicContext(
@@ -113,11 +109,7 @@ class TopicRouter:
         redacted_image_url: Optional[str] = None,
         description_override: Optional[str] = None,
     ) -> TopicPayload:
-        default_desc = (
-            f"今日交易笔记：{safe_text}。"
-            f"请将这段已脱敏的实盘观察改写成小红书风格的复盘笔记，"
-            f"避免出现具体股票代码、名称、仓位与精确价格。"
-        )
+        default_desc = f"今日实盘数据摘要：{safe_text}。"
         trade_brief = TradeRecordBrief(
             record_id=record_id,
             received_at=received_at,

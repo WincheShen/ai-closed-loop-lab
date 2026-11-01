@@ -18,14 +18,21 @@ import json
 import logging
 import math
 import os
+import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Response
+try:
+    import fcntl
+except ImportError:  # Windows 开发机无 fcntl — 退化为进程内互斥
+    fcntl = None
+
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -59,6 +66,22 @@ from .text_compliance import ComplianceResult, sanitize_text
 # Phase 3: Webhook → SMA 自动触发
 _auto_dispatch_enabled = os.environ.get("WEBHOOK_AUTO_SMA_DISPATCH", "false").lower() in ("1", "true", "yes")
 _sma_default_account = os.environ.get("WEBHOOK_SMA_DEFAULT_ACCOUNT", "XHS_01")
+
+# 写接口鉴权：配置 AI_LAB_API_TOKEN 后，POST 接口一律要求
+#   Authorization: Bearer <token>
+# 未配置时跳过校验（与 scripts/miniQMT_bridge.py 的 BRIDGE_TOKEN 同约定，
+# 不改变现有部署行为；配置后即刻生效）。
+_WRITE_API_TOKEN = os.environ.get("AI_LAB_API_TOKEN") or os.environ.get("WEBHOOK_API_TOKEN")
+
+
+async def verify_write_token(authorization: str | None = Header(None)) -> None:
+    """写接口 Bearer Token 校验依赖。"""
+    if not _WRITE_API_TOKEN:
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    if not secrets.compare_digest(authorization[7:], _WRITE_API_TOKEN):
+        raise HTTPException(status_code=403, detail="Invalid token")
 
 # 延迟导入避免循环依赖
 def _get_topic_router():
@@ -171,7 +194,7 @@ def ops_alerts(limit: int = 50) -> dict:
     return {"alerts": recent_alerts(limit=min(max(limit, 1), 200))}
 
 
-@app.post("/webhook/trade", response_model=TradeRecordResponse)
+@app.post("/webhook/trade", response_model=TradeRecordResponse, dependencies=[Depends(verify_write_token)])
 async def receive_trade(
     text: str = Form(""),
     source: str = Form("manual"),
@@ -307,7 +330,7 @@ async def _run_analysis_task(task_id: str, payload: dict) -> None:
         })
 
 
-@app.post("/api/stock/analyze")
+@app.post("/api/stock/analyze", dependencies=[Depends(verify_write_token)])
 async def proxy_analyze(request: dict):
     task_id = str(uuid.uuid4())
     symbol = request.get("symbol", "unknown")
@@ -1234,11 +1257,57 @@ async def workflow_runs(date: str | None = None, limit: int = 100):
         return []
 
 
-@app.post("/api/workflow/trigger")
+# /api/workflow/trigger 触发互斥：进程内线程锁 + fcntl 文件锁双重防线。
+# 线程锁挡同进程并发请求；文件锁挡多进程（uvicorn 多 worker / 重启
+# 交叠 / scheduler 与人工同时触发）。锁持有覆盖整个后台子进程生命周期，
+# 进程崩溃时 OS 自动释放 flock，不会留下死锁。
+_WORKFLOW_LOCK_FILE = Path(__file__).resolve().parents[2] / "data" / "workflow_trigger.lock"
+_workflow_lock_local = threading.Lock()
+
+
+class _WorkflowTriggerLock:
+    def __init__(self) -> None:
+        self._fd: int | None = None
+
+    def acquire(self) -> bool:
+        if not _workflow_lock_local.acquire(blocking=False):
+            return False
+        try:
+            _WORKFLOW_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(str(_WORKFLOW_LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o644)
+            if fcntl is not None:
+                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.write(self._fd, f"pid={os.getpid()} at={datetime.now().isoformat()}\n".encode())
+            return True
+        except Exception:
+            self.release()
+            return False
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            _workflow_lock_local.release()
+        except RuntimeError:
+            pass
+
+
+@app.post("/api/workflow/trigger", dependencies=[Depends(verify_write_token)])
 async def trigger_workflow():
     """手动触发完整工作流执行。"""
+    lock = _WorkflowTriggerLock()
+    if not lock.acquire():
+        raise HTTPException(status_code=409, detail="工作流正在执行中，请勿重复触发")
     try:
-        import asyncio
         import subprocess
         import sys
         from pathlib import Path
@@ -1260,17 +1329,21 @@ async def trigger_workflow():
                 logger.error("Workflow execution timeout")
             except Exception as e:
                 logger.error("Workflow execution failed: %s", e)
+            finally:
+                lock.release()
 
         # 在后台线程中运行
-        import threading
-        thread = threading.Thread(target=run_workflow, daemon=True)
-        thread.start()
+        threading.Thread(target=run_workflow, daemon=True).start()
 
         return {
             "status": "triggered",
             "message": "工作流已在后台启动，请查看日志监控执行进度"
         }
+    except HTTPException:
+        lock.release()
+        raise
     except Exception as e:
+        lock.release()
         logger.error("trigger_workflow error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -371,31 +371,45 @@ async def _check_pending_signals(
             brain.store.update_signal_status(sig["signal_id"], "cancelled_reeval_error")
             continue
 
-        # 触发 → 执行买入
-        # 轻量级仓位上限检查 — 弥补条件单路径不经过 RiskGovernor 的缺口
-        if persona_id and sig.get("action", "buy") == "buy":
+        # 触发 → 统一风控（过渡期收口：条件单走与日度管线同一套
+        # RiskGovernor.evaluate_signals — 策略-regime 兼容、单票/总仓位、
+        # 板块集中度、重复持仓、风险收益比、防守姿态全量校验；reject 会
+        # 写入 risk_decisions 并把信号移出 pending，approved 的
+        # position_pct 可能已被下调）
+        sig_persona = sig.get("persona_id") or persona_id
+        if sig.get("action", "buy") == "buy":
             try:
-                from src.agents.risk.risk_governor import RiskGovernor
                 from src.agents.cio.trading_persona import get_persona
-                persona_obj = get_persona(persona_id=persona_id)
-                latest_regime = brain.store.latest_market_regime() or {}
-                gov = RiskGovernor(session_id, persona=persona_obj, market_regime=latest_regime)
-                used_pct = gov._current_used_pct()
-                if used_pct >= gov.max_total_position_pct:
+                from src.agents.risk.risk_governor import RiskGovernor
+                persona_obj = get_persona(persona_id=sig_persona)
+                gov = RiskGovernor(
+                    session_id,
+                    persona=persona_obj,
+                    market_regime=brain.store.latest_market_regime() or {},
+                    brain=brain,
+                )
+                approved, risk_decisions = gov.evaluate_signals([sig])
+                if not approved:
                     logger.info(
-                        "[CANCEL] %s 条件单触发但人格 %s 仓位已达上限 (%.0f%% >= %.0f%%)，取消执行",
-                        symbol, persona_id, used_pct * 100, gov.max_total_position_pct * 100,
+                        "[CANCEL] %s 条件单触发但被风控拒绝: %s",
+                        symbol,
+                        risk_decisions[0].reason if risk_decisions else "风控拒绝",
                     )
-                    brain.store.update_signal_status(sig["signal_id"], "cancelled_position_limit")
                     continue
-            except Exception as e:
-                logger.debug("仓位检查异常(非致命): %s", e)
+                sig = approved[0]
+            except Exception:
+                logger.warning(
+                    "条件单风控评估异常 %s，安全起见取消执行", symbol, exc_info=True,
+                )
+                brain.store.update_signal_status(sig["signal_id"], "cancelled_risk_error")
+                continue
 
         # 用实时市场价作为成交价（更真实的模拟）
         sig["entry_condition"] = "immediate"
         sig["current_price"] = current_price  # 传递实时价给 executor 的 price guard
         sig["market_price_at_trigger"] = current_price  # 触发时的真实市场价
-        engine = ExecutionEngine(session_id, persona_id=persona_id, brain=brain)
+        # 按信号自身人格执行（persona_id=None 全量扫描时避免错配默认人格）
+        engine = ExecutionEngine(session_id, persona_id=sig_persona, brain=brain)
         try:
             orders, fills = await engine.monitor_and_execute([sig])
             if fills:
@@ -472,20 +486,23 @@ async def _execute_review_action(
     if action == "ADD":
         # 加仓：固定加 50% 当前持仓（最少100股）
         add_qty = max(int(current_qty * 0.5 // 100) * 100, 100)
-        signal = _build_signal(symbol, "buy", current_price, review.get("reason", "复审加仓"))
+        signal = _build_signal(symbol, "buy", current_price, review.get("reason", "复审加仓"), qty=add_qty)
+        # _position_id 让 _mock_execute 在同一事务内叠加持仓（而非新开仓）
+        signal["_position_id"] = position_id
         engine = ExecutionEngine(session_id, persona_id=effective_persona_id, brain=brain)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
-            new_qty = current_qty + add_qty
-            brain.store.update_position_qty(position_id, new_qty)
+            actual_added = fills[0]["quantity"]
+            # 持仓已在 _mock_execute 事务内更新 — 重读取终态
+            new_qty = int((brain.store.get_position(position_id) or {}).get("current_qty") or 0)
             result = {
                 "executed": True,
                 "trade_side": "buy",
-                "trade_qty": add_qty,
+                "trade_qty": actual_added,
                 "trade_price": fills[0]["avg_price"],
                 "new_qty": new_qty,
             }
-            logger.info("[%s] 加仓 %d 股 @ %.2f", symbol, add_qty, fills[0]["avg_price"])
+            logger.info("[%s] 加仓 %d 股 @ %.2f", symbol, actual_added, fills[0]["avg_price"])
 
     elif action == "REDUCE":
         # 减仓：卖出 50% 当前持仓（向下取整到100股整数倍）
@@ -501,25 +518,25 @@ async def _execute_review_action(
             return {**result, "executed": False, "reason": "持仓已为0"}
 
         signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审减仓"), qty=reduce_qty)
+        signal["_position_id"] = position_id
         logger.info("[%s] REDUCE 信号: target_qty=%s", symbol, signal.get("target_qty"))
 
         engine = ExecutionEngine(session_id, persona_id=effective_persona_id, brain=brain)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
             actual_sold = fills[0]["quantity"]
-            new_qty = current_qty - actual_sold
-            brain.store.update_position_qty(position_id, new_qty)
+            # 减仓/清零已在 _mock_execute 事务内与成交一并落库 — 重读取终态
+            settled = brain.store.get_position(position_id) or {}
+            new_qty = int(settled.get("current_qty") or 0)
             logger.info("[%s] REDUCE 完成: 实际卖出=%d, 新持仓=%d", symbol, actual_sold, new_qty)
 
-            if new_qty <= 0:
-                pnl = (current_price - position["entry_price"]) * current_qty
-                brain.store.close_position(position_id, current_price, pnl)
-                logger.info("[%s] 持仓清零，已关闭 position", symbol)
+            if new_qty <= 0 or settled.get("status") != "open":
+                logger.info("[%s] 持仓清零，position 已在事务内关闭", symbol)
 
                 # Trigger trade attribution
                 try:
                     attributor = TradeAttributor(session_id)
-                    attributor.attribute_and_save(position, close_price=current_price)
+                    attributor.attribute_and_save(position, close_price=fills[0]["avg_price"])
                 except Exception as e:
                     logger.warning("交易归因失败 %s: %s", symbol, e)
 
@@ -539,18 +556,20 @@ async def _execute_review_action(
             return {**result, "executed": False, "reason": "持仓已为0"}
 
         signal = _build_signal(symbol, "sell", current_price, review.get("reason", "复审清仓"), qty=current_qty)
+        signal["_position_id"] = position_id
         logger.info("[%s] EXIT 信号: target_qty=%s", symbol, signal.get("target_qty"))
 
         engine = ExecutionEngine(session_id, persona_id=effective_persona_id, brain=brain)
         orders, fills = await engine.monitor_and_execute([signal])
         if fills:
-            pnl = (current_price - position["entry_price"]) * current_qty
-            brain.store.close_position(position_id, current_price, pnl)
+            # 平仓（含 position.closed 事件）已在 _mock_execute 事务内落库 — 重读取盈亏
+            settled = brain.store.get_position(position_id) or {}
+            pnl = float(settled.get("realized_pnl") or 0)
 
             # Trigger trade attribution
             try:
                 attributor = TradeAttributor(session_id)
-                attributor.attribute_and_save(position, close_price=current_price)
+                attributor.attribute_and_save(position, close_price=fills[0]["avg_price"])
             except Exception as e:
                 logger.warning("交易归因失败 %s: %s", symbol, e)
 
@@ -578,6 +597,7 @@ def _build_signal(symbol: str, action: str, price: float, reason: str, qty: int 
         "symbol": symbol,
         "action": action,
         "entry_price": price,
+        "current_price": price,
         "target_price": price * 1.05,
         "stop_loss": price * 0.95,
         "position_pct": 0.05,

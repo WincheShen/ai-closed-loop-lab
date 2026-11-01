@@ -147,7 +147,7 @@ async def run_closing_analysis(
     dispatched = False
     if not dry_run:
         try:
-            dispatched = _dispatch_to_sma(brain, post_data, today)
+            dispatched = _dispatch_to_sma(brain, post_data, today, all_positions=all_positions)
         except Exception as e:
             logger.warning("SMA dispatch 失败: %s", e)
 
@@ -319,11 +319,17 @@ def _generate_closing_charts(brain, positions: list[dict], today: str) -> list[s
     return images
 
 
-def _dispatch_to_sma(brain, post_data: dict, today: str) -> bool:
-    """尝试通过现有 SMA dispatcher 发布。"""
+def _dispatch_to_sma(brain, post_data: dict, today: str, all_positions: list[dict] | None = None) -> bool:
+    """将当日客观行情与持仓表现数据推送给 SMA（具体创作由 SMA 自行决定）。"""
     try:
+        import json as _j
         from src.social_media_dispatcher.client import SmaClient
-        from src.social_media_dispatcher.schemas import TopicContext, TopicPayload
+        from src.social_media_dispatcher.schemas import (
+            MarketOverviewBrief,
+            PortfolioBrief,
+            TopicContext,
+            TopicPayload,
+        )
         from src.infra.config import cfg
 
         # 从 social_accounts 配置中获取第一个启用的小红书账号
@@ -337,24 +343,101 @@ def _dispatch_to_sma(brain, post_data: dict, today: str) -> bool:
             logger.info("无启用的小红书账号，跳过 SMA dispatch")
             return False
 
+        # 提取当日大盘快照
+        conn = brain.store._conn()
+        row = conn.execute(
+            "SELECT regime, recommended_posture, hot_sectors_json, evidence_json "
+            "FROM market_regime_snapshots WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+        hot_sectors: list[str] = []
+        market_brief = None
+        if row:
+            hot_sectors = _j.loads(row["hot_sectors_json"] or "[]")
+            evidence = _j.loads(row["evidence_json"] or "{}")
+            idx_chg = evidence.get("index_change_pct") or evidence.get("sh_change_pct")
+            market_brief = MarketOverviewBrief(
+                regime=row["regime"],
+                posture=row["recommended_posture"],
+                index_change_pct=float(idx_chg) if idx_chg is not None else None,
+                up_count=evidence.get("up_count"),
+                down_count=evidence.get("down_count"),
+            )
+
+        # 提取当日持仓浮盈浮亏百分比（脱敏）
+        positions = all_positions or []
+        open_positions = [p for p in positions if p.get("status") == "open"]
+        closed_positions = [p for p in positions if p.get("status") == "closed"]
+        pnl_pcts: list[float] = []
+        sectors: list[str] = []
+        for p in positions:
+            if p.get("sector"):
+                sectors.append(p["sector"])
+            ep = p.get("entry_price") or 0
+            cp = p.get("close_price") or p.get("current_price") or ep
+            if ep and ep > 0:
+                pnl_pcts.append((cp - ep) / ep * 100)
+        avg_pnl_pct = round(sum(pnl_pcts) / len(pnl_pcts), 2) if pnl_pcts else None
+        portfolio_brief = PortfolioBrief(
+            open_count=len(open_positions),
+            closed_today_count=len(closed_positions),
+            avg_pnl_pct=avg_pnl_pct,
+            win_count=sum(1 for x in pnl_pcts if x > 0),
+            loss_count=sum(1 for x in pnl_pcts if x < 0),
+            sectors=list(dict.fromkeys(sectors)),
+        )
+
+        # 构建纯客观的数据快照说明（不带任何文风/复盘长文，交由 SMA 自行决定如何创作）
+        obj_lines = [f"日期：{today} 收盘客观数据快照"]
+        if market_brief:
+            m_str = f"大盘状态：{market_brief.regime or '未知'}"
+            if market_brief.posture:
+                m_str += f"（姿态: {market_brief.posture}）"
+            if market_brief.index_change_pct is not None:
+                m_str += f"，大盘指数涨跌：{market_brief.index_change_pct:+.2f}%"
+            if market_brief.up_count is not None and market_brief.down_count is not None:
+                m_str += f"，涨跌家数：{market_brief.up_count}涨/{market_brief.down_count}跌"
+            obj_lines.append(m_str)
+        if hot_sectors:
+            obj_lines.append(f"热门板块：{'、'.join(hot_sectors[:5])}")
+        if avg_pnl_pct is not None:
+            obj_lines.append(
+                f"我的持仓表现：共 {len(open_positions)} 只持仓，今日平仓 {len(closed_positions)} 只，"
+                f"持仓平均盈亏：{avg_pnl_pct:+.2f}%（红盘 {portfolio_brief.win_count} 只 / 绿盘 {portfolio_brief.loss_count} 只）"
+            )
+        else:
+            obj_lines.append(
+                f"我的持仓表现：共 {len(open_positions)} 只持仓，今日平仓 {len(closed_positions)} 只"
+            )
+        objective_description = "\n".join(obj_lines)
+
         client = SmaClient()
-        context = TopicContext(images=post_data.get("images", []))
+        context = TopicContext(
+            pick_date=date.fromisoformat(today),
+            hot_sectors=hot_sectors,
+            market=market_brief,
+            portfolio=portfolio_brief,
+            images=post_data.get("images", []),
+        )
         payload = TopicPayload(
             account_id=account_id,
             kind="daily_picks",
-            description=post_data.get("content", ""),
+            description=objective_description,
             context=context,
         )
         result = client.dispatch(payload)
         if result and getattr(result, "success", False):
+            sma_task_id = getattr(result, "sma_task_id", None) or post_data["post_id"]
             brain.store.record_social_post(
-                sma_task_id=getattr(result, "task_id", post_data["post_id"]),
+                sma_task_id=sma_task_id,
                 account_id=account_id,
                 platform="xiaohongshu",
                 source_pick_date=today,
                 topic=post_data.get("title", ""),
             )
             return True
+        else:
+            logger.warning("SMA dispatch returned non-success: %s", result)
     except ImportError:
         logger.debug("SMA dispatcher 未配置，跳过发布")
     except Exception as e:

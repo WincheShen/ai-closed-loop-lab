@@ -53,7 +53,9 @@ class EventBus:
                     "INSERT INTO events (event_id, session_id, agent, event_type, payload, created_at) VALUES (?,?,?,?,?,?)",
                     (event_id, payload.get("session_id", ""), "event_bus", channel, json.dumps(payload, default=str), datetime.now().isoformat()),
                 )
-                self._store._conn().commit()
+                # _auto_commit：处于托管事务中时不得提前提交（否则会把
+                # 调用方未完成的账本写入一并固化，破坏原子性）
+                self._store._auto_commit()
             except Exception as e:
                 logger.warning("Event persistence failed on %s: %s", channel, e)
 
@@ -89,7 +91,6 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or cfg().get("db_path")
         self._local = threading.local()
-        self._in_transaction = False
         self._init_db()
 
     def _conn(self) -> sqlite3.Connection:
@@ -564,44 +565,57 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
                 continue
 
             logger.info("[migration] applying %s (%d statements)", name, len(sql_list))
-            for sql in sql_list:
-                try:
-                    conn.execute(sql)
-                except sqlite3.OperationalError as e:
-                    # ALTER TABLE ADD COLUMN 重复时忽略（幂等）
-                    if "duplicate column" not in str(e).lower():
-                        logger.warning("[migration] %s — skipped: %s", sql[:60], e)
-
-            conn.execute(
-                "INSERT INTO _schema_migrations (name, applied_at) VALUES (?, ?)",
-                (name, datetime.now().isoformat()),
-            )
-            conn.commit()
+            # 单迁移事务化：任一语句失败（非 duplicate column）整体回滚并抛出，
+            # 不得把部分应用的迁移标记为已 apply（否则启动即静默丢列/丢表）。
+            self.begin_transaction()
+            try:
+                for sql in sql_list:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError as e:
+                        # ALTER TABLE ADD COLUMN 重复时忽略（幂等）
+                        if "duplicate column" in str(e).lower():
+                            continue
+                        raise
+                conn.execute(
+                    "INSERT INTO _schema_migrations (name, applied_at) VALUES (?, ?)",
+                    (name, datetime.now().isoformat()),
+                )
+                self.commit_transaction()
+            except Exception:
+                self.rollback_transaction()
+                logger.error(
+                    "[migration] %s 执行失败，已回滚并中止启动", name, exc_info=True,
+                )
+                raise
             logger.info("[migration] %s applied", name)
-        conn.commit()
 
     # ------------------------------------------------------------------
     # Transaction helpers
     # ------------------------------------------------------------------
 
+    # _local.in_transaction 与 _local.conn 同为线程本地状态：
+    # 连接按线程隔离，事务标志也必须按线程隔离 — 共享标志会让
+    # 别的线程的 _auto_commit 误判"在事务中"而跳过提交（写入丢失），
+    # 或让本线程在他人事务期间误提交自己的连接。
     def begin_transaction(self) -> None:
         """Begin an IMMEDIATE transaction (acquires write lock)."""
         self._conn().execute("BEGIN IMMEDIATE")
-        self._in_transaction = True
+        self._local.in_transaction = True
 
     def commit_transaction(self) -> None:
         """Commit the current transaction."""
-        self._in_transaction = False
+        self._local.in_transaction = False
         self._conn().commit()
 
     def rollback_transaction(self) -> None:
         """Rollback the current transaction."""
-        self._in_transaction = False
+        self._local.in_transaction = False
         self._conn().rollback()
 
     def _auto_commit(self) -> None:
         """Commit only when not inside a managed transaction."""
-        if not self._in_transaction:
+        if not getattr(self._local, "in_transaction", False):
             self._conn().commit()
 
     # ------------------------------------------------------------------
@@ -1225,12 +1239,24 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         )
         self._auto_commit()
 
-    def update_position_qty(self, position_id: str, new_qty: int) -> None:
+    def update_position_qty(
+        self,
+        position_id: str,
+        new_qty: int,
+        entry_price: float | None = None,
+    ) -> None:
+        """更新持仓数量；可选同步更新成本价（加仓时传加权成本）。"""
         conn = self._conn()
-        conn.execute(
-            "UPDATE positions SET current_qty = ? WHERE position_id = ?",
-            (new_qty, position_id),
-        )
+        if entry_price is None:
+            conn.execute(
+                "UPDATE positions SET current_qty = ? WHERE position_id = ?",
+                (new_qty, position_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE positions SET current_qty = ?, entry_price = ? WHERE position_id = ?",
+                (new_qty, entry_price, position_id),
+            )
         self._auto_commit()
 
     def close_position(

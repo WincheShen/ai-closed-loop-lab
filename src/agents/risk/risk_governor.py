@@ -56,19 +56,18 @@ class RiskGovernor:
         session_id: str,
         persona: TradingPersona | None = None,
         market_regime: dict[str, Any] | None = None,
+        brain=None,
     ) -> None:
         self.session_id = session_id
         self.logger = get_agent_logger("risk_governor", session_id)
-        self.brain = get_central_brain()
+        self.brain = brain or get_central_brain()
         self.persona = persona or get_persona()
         self.market_regime = market_regime or {}
         self.regime: str = self.market_regime.get("regime", "neutral")
         self.posture: str = self.market_regime.get("recommended_posture", "selective_attack")
         self.max_total_position_pct: float = float(
-            self.market_regime.get(
-                "max_total_position_pct",
-                self.persona.max_total_position_for(self.regime),
-            )
+            self.market_regime.get("max_total_position_pct")
+            or self.persona.max_total_position_for(self.regime)
         )
         # 缓存当前持仓状态（只统计当前人格的持仓，避免跨人格误判）
         self._persona_id = getattr(self.persona, "id", None)
@@ -166,7 +165,7 @@ class RiskGovernor:
         sector_pct: dict[str, float],
     ) -> RiskDecision:
         flags: list[str] = []
-        original_pct = float(signal.get("position_pct", 0.08))
+        original_pct = float(signal.get("position_pct") or 0.08)
         approved_pct = original_pct
 
         # 1. 策略-regime 兼容性 (优先用 strategy_id, 没有则降级 strategy 名称)
@@ -272,7 +271,7 @@ class RiskGovernor:
     def _reject(
         self, signal: TradeSignal, reason: str, flags: list[str],
     ) -> RiskDecision:
-        original = float(signal.get("position_pct", 0.08))
+        original = float(signal.get("position_pct") or 0.08)
         return RiskDecision(
             signal_id=signal["signal_id"],
             symbol=signal["symbol"],

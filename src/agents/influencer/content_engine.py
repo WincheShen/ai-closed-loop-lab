@@ -137,14 +137,52 @@ class InfluencerEngine:
         fills: list[Fill],
         signals: list[dict],
         images: list[str] | None = None,
+        market_regime: dict | None = None,
+        portfolio_status: dict | None = None,
     ) -> str:
-        """汇总多笔成交记录，生成小红书话题描述（脱敏版）。
-
-        SMA 端会基于此描述进行二次创作（copywriter + strategist LLM），
-        因此这里只需提供脱敏的交易事实和板块逻辑即可。
-        """
+        """汇总多笔成交记录与大盘/持仓客观数据（脱敏版），不预设文风与创作形式。"""
         today = date.today().isoformat()
-        parts = [f"今日（{today}）AI闭环实验室信号落地：\n"]
+        parts = [f"日期：{today} 行情与实盘数据快照："]
+
+        if market_regime:
+            regime = market_regime.get("regime") or "未知"
+            posture = market_regime.get("recommended_posture") or ""
+            evidence = market_regime.get("evidence") or {}
+            idx_chg = evidence.get("index_change_pct") or market_regime.get("index_change_pct")
+            hot = "、".join((market_regime.get("hot_sectors") or [])[:5])
+            market_line = f"- 大盘状态：{regime}"
+            if posture:
+                market_line += f"（姿态: {posture}）"
+            if idx_chg is not None:
+                try:
+                    market_line += f"，指数涨跌：{float(idx_chg):+.2f}%"
+                except (TypeError, ValueError):
+                    pass
+            if hot:
+                market_line += f"，热门板块：{hot}"
+            parts.append(market_line)
+
+        if portfolio_status:
+            positions = portfolio_status.get("positions") or []
+            if isinstance(positions, list) and positions:
+                pnl_pcts = []
+                for p in positions:
+                    if not isinstance(p, dict):
+                        continue
+                    ep = p.get("entry_price") or 0
+                    cp = p.get("current_price") or p.get("close_price") or ep
+                    if ep and ep > 0:
+                        pnl_pcts.append((cp - ep) / ep * 100)
+                    elif p.get("pnl_pct") is not None:
+                        pnl_pcts.append(float(p["pnl_pct"]))
+                if pnl_pcts:
+                    avg_pnl = sum(pnl_pcts) / len(pnl_pcts)
+                    win_n = sum(1 for x in pnl_pcts if x > 0)
+                    loss_n = sum(1 for x in pnl_pcts if x < 0)
+                    parts.append(
+                        f"- 持仓表现：共 {len(positions)} 只持仓，平均盈亏 {avg_pnl:+.2f}%"
+                        f"（红盘 {win_n} 只 / 绿盘 {loss_n} 只）"
+                    )
 
         for fill in fills:
             signal = next(
@@ -160,15 +198,10 @@ class InfluencerEngine:
             sector_hint = f"（{sector}方向）" if sector else ""
 
             parts.append(
-                f"- {side} {masked_name}{sector_hint}"
+                f"- 今日操作：{side} {masked_name}{sector_hint}"
                 f"{'，策略: ' + strategy if strategy else ''}"
             )
 
-        parts.append(
-            "\n请基于以上已脱敏的交易记录创作小红书笔记，"
-            "分享AI量化交易的思路与今日操作复盘。"
-            "不出现具体股票代码与名称，重点讲板块逻辑和策略判断。"
-        )
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -204,23 +237,74 @@ class InfluencerEngine:
         description: str,
         account_id: str,
         images: list[str] | None = None,
+        market_regime: dict | None = None,
+        portfolio_status: dict | None = None,
     ) -> Post | None:
-        """通过 SMA dispatcher 发布小红书内容。
+        """通过 SMA dispatcher 推送原始脱敏数据，由 SMA 决定如何创作与发布。
 
         Args:
-            description: 已脱敏的话题描述（SMA 端基于此做二次创作）
+            description: 已脱敏的客观数据摘要
             account_id: 小红书账号 ID（如 XHS_02）
             images: 配图路径列表（K线图等）
+            market_regime: 大盘状态快照
+            portfolio_status: 持仓状态快照
 
         Returns:
             Post 记录，或 None（发布失败时）
         """
         try:
             from src.social_media_dispatcher.client import SmaClient
-            from src.social_media_dispatcher.schemas import TopicContext, TopicPayload
+            from src.social_media_dispatcher.schemas import (
+                MarketOverviewBrief,
+                PortfolioBrief,
+                TopicContext,
+                TopicPayload,
+            )
+
+            market_brief = None
+            if market_regime:
+                evidence = market_regime.get("evidence") or {}
+                idx_chg = evidence.get("index_change_pct") or market_regime.get("index_change_pct")
+                market_brief = MarketOverviewBrief(
+                    regime=market_regime.get("regime"),
+                    posture=market_regime.get("recommended_posture"),
+                    index_change_pct=float(idx_chg) if idx_chg is not None else None,
+                    up_count=evidence.get("up_count"),
+                    down_count=evidence.get("down_count"),
+                    summary=market_regime.get("summary") or market_regime.get("reasoning"),
+                )
+
+            portfolio_brief = None
+            if portfolio_status:
+                positions = portfolio_status.get("positions") or []
+                pnl_pcts = []
+                sectors = []
+                for p in positions:
+                    if not isinstance(p, dict):
+                        continue
+                    if p.get("sector"):
+                        sectors.append(p["sector"])
+                    ep = p.get("entry_price") or 0
+                    cp = p.get("current_price") or p.get("close_price") or ep
+                    if ep and ep > 0:
+                        pnl_pcts.append((cp - ep) / ep * 100)
+                    elif p.get("pnl_pct") is not None:
+                        pnl_pcts.append(float(p["pnl_pct"]))
+                portfolio_brief = PortfolioBrief(
+                    open_count=len(positions),
+                    avg_pnl_pct=round(sum(pnl_pcts) / len(pnl_pcts), 2) if pnl_pcts else None,
+                    win_count=sum(1 for x in pnl_pcts if x > 0),
+                    loss_count=sum(1 for x in pnl_pcts if x < 0),
+                    sectors=list(dict.fromkeys(sectors)),
+                )
 
             client = SmaClient()
-            context = TopicContext(images=images or [])
+            context = TopicContext(
+                hot_sectors=(market_regime or {}).get("hot_sectors") or [],
+                market=market_brief,
+                portfolio=portfolio_brief,
+                images=images or [],
+            )
             payload = TopicPayload(
                 account_id=account_id,
                 kind="trade_record",
@@ -419,8 +503,16 @@ async def run_influencer_node(state: TradingState) -> dict[str, Any]:
             if chart_path:
                 all_images.append(chart_path)
 
-        # 生成脱敏话题描述
-        description = engine.generate_xhs_topic_from_fills(fills, signals, all_images)
+        # 生成脱敏数据摘要（含大盘行情与持仓表现）
+        market_regime = state.get("market_regime")
+        portfolio_status = state.get("portfolio_status")
+        description = engine.generate_xhs_topic_from_fills(
+            fills,
+            signals,
+            all_images,
+            market_regime=market_regime,
+            portfolio_status=portfolio_status,
+        )
 
         # 为每个启用的小红书账号 dispatch
         for account in xhs_accounts:
@@ -429,6 +521,8 @@ async def run_influencer_node(state: TradingState) -> dict[str, Any]:
                 description=description,
                 account_id=account_id,
                 images=all_images,
+                market_regime=market_regime,
+                portfolio_status=portfolio_status,
             )
             if xhs_post:
                 published.append(xhs_post)

@@ -92,7 +92,7 @@ services:
       - PYTHONUNBUFFERED=1
       - TRADING_AGENT_URL=http://trading-agent:8001
       - DB_PATH=/app/data/central_brain.db
-      - SMA_BASE_URL=http://ai-lab-sma:8003
+      - SMA_BASE_URL=http://192.168.3.205:8003
     restart: unless-stopped
     command: ["python", "scripts/scheduler.py"]
     healthcheck:

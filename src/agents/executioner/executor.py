@@ -244,7 +244,8 @@ class ExecutionEngine:
             self.submitted_orders.append(order)
             if fill:
                 self.filled_orders.append(fill)
-                self.brain.store.update_signal_status(sig["signal_id"], "filled")
+                # "filled" 状态已在 _mock_execute 事务内与成交/持仓/资金一并落库，
+                # 这里不再单独 UPDATE（事务外二次写入是账本一致性缺口的来源）
                 # shadow 期：成交确认后再登记次日开盘影子比对事件
                 # （_mock_execute 前置校验拒单时不残留孤儿事件）
                 if next_open_mode == "shadow":
@@ -316,9 +317,42 @@ class ExecutionEngine:
         """
         action = signal.get("action", "")
         symbol = signal["symbol"]
+        # _position_id：复审加仓/减仓/清仓信号携带的目标持仓。
+        # 加仓不是新开仓 — 跳过策略白名单与重复持仓拦截，成交后在同一事务内
+        # 只更新该持仓数量；卖出同理，事务内按最新持仓收口（减仓或平仓）。
+        add_to_position_id = signal.get("_position_id") if action == "buy" else None
 
         # --- P0.1: 买入前重复持仓与策略专属校验（Phase 3.5 改为读 PersonaPolicy.allowed_strategies） ---
-        if action == "buy":
+        if action == "buy" and add_to_position_id:
+            add_pos = self.brain.store.get_position(add_to_position_id)
+            if (
+                not add_pos
+                or add_pos.get("status") != "open"
+                or add_pos.get("symbol") != symbol
+                or (
+                    add_pos.get("persona_id") is not None
+                    and add_pos.get("persona_id") != self.persona_id
+                )
+            ):
+                self.logger.warning(
+                    "[MOCK] ❌ 加仓目标持仓 %s 不存在/已平/标的不符，拒绝信号 %s",
+                    add_to_position_id, signal["signal_id"],
+                )
+                self.brain.store.update_signal_status(signal["signal_id"], "rejected_no_position")
+                return {
+                    "order_id": f"ORD-{uuid.uuid4().hex[:8].upper()}",
+                    "signal_id": signal["signal_id"],
+                    "symbol": symbol,
+                    "side": "buy",
+                    "quantity": 0,
+                    "order_type": "limit",
+                    "limit_price": signal["entry_price"],
+                    "status": "rejected",
+                    "submitted_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                }, None
+
+        if action == "buy" and not add_to_position_id:
             allowed_strats: tuple[str, ...] = ()
             try:
                 from src.wheel.config import get_config
@@ -371,6 +405,7 @@ class ExecutionEngine:
                 return rejected_order, None
 
         # --- P0.1b: 卖出前 T+1 与持仓检查 ---
+        pos: dict | None = None
         if action == "sell":
             existing = self.brain.store.list_open_positions(
                 persona_id=self.persona_id, include_unassigned=True,
@@ -489,7 +524,9 @@ class ExecutionEngine:
             symbol, action, target_qty, action,
         )
 
-        if target_qty and action == "sell":
+        if target_qty and (action == "sell" or add_to_position_id):
+            # sell 减仓/清仓、buy 复审加仓按调用方给定股数执行；
+            # 其余 buy 仍按可用资金 × position_pct 动态计算
             quantity = target_qty
             self.logger.info("[_mock_execute] 使用 target_qty: %d", quantity)
         else:
@@ -555,10 +592,25 @@ class ExecutionEngine:
             # 更新账户资金
             self._update_account_after_trade(fill)
 
-            # BUY 成交 → 自动创建 Position 记录
+            # 持仓与信号状态收口在同一事务（P0 账本一致性）：
+            #   buy  → _position_id 为复审加仓：qty 叠加并按成交价加权成本；
+            #          否则新开仓
+            #   sell → 事务内重读持仓，减仓或清零平仓（原先在
+            #          _execute_review_action 事务外执行，成交与持仓可能脱节）
+            #   信号 → update_signal_status("filled") 一并落库，不再由
+            #          monitor_and_execute 事务外补写
             if action == "buy":
-                self._auto_open_position(signal, fill)
+                if add_to_position_id:
+                    self._apply_add_to_position(add_to_position_id, fill)
+                else:
+                    self._auto_open_position(signal, fill)
+            elif action == "sell":
+                # 复审信号显式指定目标持仓；否则用前置校验扫描到的持仓
+                sell_pid = signal.get("_position_id") or (pos["position_id"] if pos else None)
+                if sell_pid:
+                    self._settle_sell_position(sell_pid, fill)
 
+            self.brain.store.update_signal_status(signal["signal_id"], "filled")
             self.brain.store.commit_transaction()
         except Exception:
             self.brain.store.rollback_transaction()
@@ -638,6 +690,61 @@ class ExecutionEngine:
             position_id, signal["symbol"], fill["avg_price"],
             fill["quantity"], signal.get("strategy", ""),
             signal.get("market_regime", "n/a"),
+        )
+
+    def _apply_add_to_position(self, position_id: str, fill: Fill) -> None:
+        """复审加仓成交后更新持仓（仅在 _mock_execute 事务内调用）。
+
+        事务内重读持仓并叠加成交数量；成本价按 (旧成本×旧量 + 成交价×成交量)
+        加权更新，否则后续平仓会以首次买入价算假盈亏。
+        """
+        fresh = self.brain.store.get_position(position_id)
+        if not fresh or fresh.get("status") != "open":
+            raise RuntimeError(f"加仓目标持仓 {position_id} 事务内已不可加")
+        old_qty = int(fresh.get("current_qty") or 0)
+        old_entry = float(fresh.get("entry_price") or 0)
+        fill_qty = int(fill.get("quantity") or 0)
+        fill_px = float(fill.get("avg_price") or 0)
+        new_qty = old_qty + fill_qty
+        new_entry = (
+            (old_entry * old_qty + fill_px * fill_qty) / new_qty
+            if new_qty > 0 else fill_px
+        )
+        self.brain.store.update_position_qty(position_id, new_qty, entry_price=new_entry)
+        self.logger.info(
+            "[MOCK] %s 加仓 %d @ %.2f → 持仓 %d 加权成本 %.2f（同事务落库）",
+            fresh.get("symbol"), fill_qty, fill_px, new_qty, new_entry,
+        )
+
+    def _settle_sell_position(self, position_id: str, fill: Fill) -> None:
+        """卖出成交后的持仓收口（仅在 _mock_execute 事务内调用）。
+
+        BEGIN IMMEDIATE 已持有写锁，此处重读拿到加锁时刻的最新提交，
+        避免按事务前的旧快照少减/多减：remaining>0 减仓，<=0 清零平仓
+        （close_position 内的 position.closed 事件随同事务提交/回滚）。
+        """
+        fresh = self.brain.store.get_position(position_id)
+        if not fresh or fresh.get("status") != "open":
+            self.logger.warning(
+                "[MOCK] 卖出成交但持仓 %s 已非 open，跳过持仓收口", position_id,
+            )
+            return
+        held = int(fresh.get("current_qty") or 0)
+        sold = int(fill.get("quantity") or 0)
+        remaining = held - sold
+        if remaining > 0:
+            self.brain.store.update_position_qty(position_id, remaining)
+            self.logger.info(
+                "[MOCK] %s 减仓 %d → 剩余 %d（同事务落库）",
+                fresh.get("symbol"), sold, remaining,
+            )
+            return
+        close_px = float(fill.get("avg_price") or 0)
+        pnl = (close_px - float(fresh.get("entry_price") or 0)) * max(held, 0)
+        self.brain.store.close_position(position_id, close_px, pnl)
+        self.logger.info(
+            "[MOCK] %s 清仓 %d 股 @ %.2f → 平仓 PnL=%.2f（同事务落库）",
+            fresh.get("symbol"), held, close_px, pnl,
         )
 
     # ------------------------------------------------------------------

@@ -353,6 +353,7 @@ SMA 端也会再过一道 `safety_check` 节点，双层兜底。
 | `SMA_API_TOKEN` | （空） | 可选 Bearer token |
 | `SMA_API_PORT` | 8003 | SMA 端监听端口 |
 | `SMA_API_HOST` | 127.0.0.1 | SMA 端监听地址 |
+| `AI_LAB_API_TOKEN` | （空） | webhook_listener 写接口（POST `/webhook/trade`、`/api/stock/analyze`、`/api/workflow/trigger`）Bearer token；空则不校验 |
 
 ## 10. venv 备选方案（如果不想用 conda）
 
