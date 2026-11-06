@@ -1006,7 +1006,7 @@ def test_phase4b_proposals_and_phase5_replay_benchmark(tmp_path):
         rationale="足量样本提议",
         sample_size=25,
     )
-    assert p_ok["status"] == "proposed"
+    assert p_ok["status"] in ("proposed", "backtested")
     assert brain.store.review_persona_proposal(p_ok["proposal_id"], "approved", reviewer="neo")
     rows = brain.store.list_persona_proposals(status="approved")
     assert len(rows) == 1 and rows[0]["proposal_id"] == p_ok["proposal_id"]
@@ -2197,4 +2197,81 @@ def test_cancel_wheel_events_exempts_position_closed(tmp_path):
         "SELECT status FROM wheel_events WHERE event_id = 'position.closed|POS-CL'",
     ).fetchone()
     assert row_pc["status"] == "due"
+
+
+def test_phase4b_full_lifecycle_backtest_review_and_apply(tmp_path):
+    """Phase 4b: 提议提交流转、随机买点对照自动回测、人工审批与 wheels.yaml 导出应用闭环。"""
+    import yaml
+    from src.wheel.proposals import (
+        apply_proposal_to_config,
+        backtest_proposal,
+        review_proposal,
+        submit_proposal,
+    )
+
+    brain = _MockBrain(tmp_path)
+    # 模拟历史归因收益
+    for i, pnl in enumerate([2.5, -1.0, 3.2, 1.8, -0.5, 4.0, -1.2, 2.0] * 3):
+        brain.store._conn().execute(
+            """INSERT INTO trade_attributions
+            (attribution_id, position_id, symbol, outcome, primary_cause, pnl_pct, created_at, persona_id)
+            VALUES (?, ?, '300001', 'win', 'test', ?, ?, 'short_term_hot_rotation_v1')""",
+            (f"ATTR-{i}", f"POS-{i}", pnl, datetime.now().isoformat()),
+        )
+    brain.store._conn().commit()
+
+    # 1. 提交参数类提议（自动触发回测）
+    prop = submit_proposal(
+        brain.store,
+        persona_id="short_term_hot_rotation_v1",
+        kind="param_change",
+        change={"consecutive_loss_limit": 2},
+        rationale="近期连亏多，缩紧熔断次数",
+        sample_size=24,
+        auto_backtest=True,
+    )
+    assert prop["status"] == "backtested"
+    assert "backtest_report" in prop
+
+    # 2. 人工审批
+    rev = review_proposal(
+        brain.store, prop["proposal_id"], "approved",
+        reviewer="neo", review_note="回测对照通过，同意缩紧",
+    )
+    assert rev["status"] == "approved"
+
+    # 3. 导出并应用到 wheels.yaml
+    cfg_file = tmp_path / "wheels.yaml"
+    initial_cfg = {
+        "personas": {
+            "short_term_hot_rotation_v1": {
+                "kind": "short",
+                "params": {"consecutive_loss_limit": 3},
+            }
+        }
+    }
+    cfg_file.write_text(yaml.dump(initial_cfg), encoding="utf-8")
+
+    res = apply_proposal_to_config(brain.store, prop["proposal_id"], config_path=cfg_file)
+    assert res["applied"]["updated_params"] == {"consecutive_loss_limit": 2}
+
+    updated_data = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert (
+        updated_data["personas"]["short_term_hot_rotation_v1"]["params"]["consecutive_loss_limit"]
+        == 2
+    )
+
+    # 4. 未批准提议禁止导出应用
+    unapproved = submit_proposal(
+        brain.store,
+        persona_id="short_term_hot_rotation_v1",
+        kind="param_change",
+        change={"consecutive_loss_limit": 1},
+        rationale="未审批提议",
+        sample_size=10,  # 样本不足 -> observe
+        auto_backtest=False,
+    )
+    with pytest.raises(ValueError, match="只有 status='approved'"):
+        apply_proposal_to_config(brain.store, unapproved["proposal_id"], config_path=cfg_file)
+
 

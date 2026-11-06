@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import logging
 import math
@@ -1116,6 +1115,54 @@ async def wheel_proposals(persona_id: str | None = None, status: str | None = No
     except Exception as e:
         logger.error("wheel_proposals error: %s", e)
         return []
+
+
+@app.post("/api/wheel/proposals/{proposal_id}/backtest", dependencies=[Depends(verify_write_token)])
+async def wheel_proposal_backtest(proposal_id: str):
+    """触发提议回测与随机买点对照检验（Phase 4b.4）。"""
+    try:
+        from src.wheel.proposals import backtest_proposal
+        brain = _get_central_brain()
+        report = backtest_proposal(brain.store, proposal_id)
+        return {"success": True, "report": report}
+    except Exception as e:
+        logger.error("wheel_proposal_backtest error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+class ProposalReviewRequest(BaseModel):
+    status: str  # approved | rejected
+    reviewer: str = "human"
+    review_note: str = ""
+
+
+@app.post("/api/wheel/proposals/{proposal_id}/review", dependencies=[Depends(verify_write_token)])
+async def wheel_proposal_review(proposal_id: str, req: ProposalReviewRequest):
+    """人工审批复盘提议（Phase 4b.5）。"""
+    try:
+        from src.wheel.proposals import review_proposal
+        brain = _get_central_brain()
+        res = review_proposal(
+            brain.store, proposal_id, req.status,
+            reviewer=req.reviewer, review_note=req.review_note,
+        )
+        return {"success": True, "result": res}
+    except Exception as e:
+        logger.error("wheel_proposal_review error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post("/api/wheel/proposals/{proposal_id}/apply", dependencies=[Depends(verify_write_token)])
+async def wheel_proposal_apply(proposal_id: str):
+    """导出并应用已批准的提议变更至 wheels.yaml（Phase 4b.5）。"""
+    try:
+        from src.wheel.proposals import apply_proposal_to_config
+        brain = _get_central_brain()
+        res = apply_proposal_to_config(brain.store, proposal_id)
+        return {"success": True, "result": res}
+    except Exception as e:
+        logger.error("wheel_proposal_apply error: %s", e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get("/api/workflow/runs")

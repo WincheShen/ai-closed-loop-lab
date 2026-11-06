@@ -79,6 +79,59 @@ interface Account {
   updated_at: string
 }
 
+interface Proposal {
+  proposal_id: string
+  persona_id: string
+  kind: string
+  change_json?: string
+  change?: any
+  rationale: string
+  evidence_json?: string
+  evidence?: any
+  backtest_report?: string
+  status: 'proposed' | 'observe' | 'backtested' | 'approved' | 'rejected'
+  reviewer?: string
+  review_note?: string
+  created_at: string
+  reviewed_at?: string
+}
+
+function statusBadge(status: string) {
+  switch (status) {
+    case 'approved':
+      return 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+    case 'rejected':
+      return 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+    case 'backtested':
+      return 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+    case 'proposed':
+      return 'bg-blue-500/15 text-blue-400 border border-blue-500/30'
+    default:
+      return 'bg-panel-border text-muted-foreground'
+  }
+}
+
+function statusLabel(status: string) {
+  switch (status) {
+    case 'approved': return '已批准'
+    case 'rejected': return '已驳回'
+    case 'backtested': return '已回测'
+    case 'proposed': return '待审批'
+    case 'observe': return '观察中(样本不足)'
+    default: return status
+  }
+}
+
+function kindLabel(kind: string) {
+  switch (kind) {
+    case 'param_change': return '参数微调'
+    case 'binding_change': return '转盘绑定'
+    case 'strategy_toggle': return '策略启停'
+    case 'setup_preference': return '选股偏好'
+    default: return kind
+  }
+}
+
 function pnlColor(v: number) {
   return v >= 0 ? 'text-bullish' : 'text-bearish'
 }
@@ -86,27 +139,110 @@ function pnlColor(v: number) {
 export default function Personas() {
   const [personas, setPersonas] = useState<Persona[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
+  const [proposals, setProposals] = useState<Proposal[]>([])
+  const [proposalFilter, setProposalFilter] = useState<string>('all')
+  const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [actionMsg, setActionMsg] = useState<{ id: string; text: string; ok: boolean } | null>(null)
   const [loading, setLoading] = useState(true)
+
+  const fetchProposals = async () => {
+    try {
+      const res = await fetch('/api/wheel/proposals?limit=100')
+      const data = await res.json()
+      setProposals(Array.isArray(data) ? data : [])
+    } catch (e) {
+      console.error('Failed to fetch proposals:', e)
+    }
+  }
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [personasRes, accountsRes] = await Promise.all([
+        const [personasRes, accountsRes, proposalsRes] = await Promise.all([
           fetch('/api/personas'),
-          fetch('/api/accounts')
+          fetch('/api/accounts'),
+          fetch('/api/wheel/proposals?limit=100')
         ])
         const personasData = await personasRes.json()
         const accountsData = await accountsRes.json()
+        const proposalsData = await proposalsRes.json()
         setPersonas(personasData.personas || [])
         setAccounts(accountsData.accounts || [])
+        setProposals(Array.isArray(proposalsData) ? proposalsData : [])
       } catch (error) {
-        console.error('Failed to fetch personas/accounts:', error)
+        console.error('Failed to fetch personas/accounts/proposals:', error)
       } finally {
         setLoading(false)
       }
     }
     fetchData()
   }, [])
+
+  const handleBacktest = async (id: string) => {
+    setActionLoading(id)
+    setActionMsg(null)
+    try {
+      const res = await fetch(`/api/wheel/proposals/${id}/backtest`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        setActionMsg({ id, text: '回测与对照检验完成', ok: true })
+        await fetchProposals()
+      } else {
+        setActionMsg({ id, text: data.detail || '回测失败', ok: false })
+      }
+    } catch (e: any) {
+      setActionMsg({ id, text: e.message || '网络异常', ok: false })
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  const handleReview = async (id: string, status: 'approved' | 'rejected') => {
+    setActionLoading(id)
+    setActionMsg(null)
+    try {
+      const res = await fetch(`/api/wheel/proposals/${id}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, reviewer: 'admin', review_note: `Web 管理后台${status === 'approved' ? '批准' : '驳回'}` })
+      })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        setActionMsg({ id, text: status === 'approved' ? '已批准' : '已驳回', ok: true })
+        await fetchProposals()
+      } else {
+        setActionMsg({ id, text: data.detail || '审批操作失败', ok: false })
+      }
+    } catch (e: any) {
+      setActionMsg({ id, text: e.message || '网络异常', ok: false })
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  const handleApply = async (id: string) => {
+    setActionLoading(id)
+    setActionMsg(null)
+    try {
+      const res = await fetch(`/api/wheel/proposals/${id}/apply`, { method: 'POST' })
+      const data = await res.json()
+      if (res.ok && data.success) {
+        setActionMsg({ id, text: '变更已成功导出并写入 wheels.yaml', ok: true })
+        await fetchProposals()
+      } else {
+        setActionMsg({ id, text: data.detail || '应用配置失败', ok: false })
+      }
+    } catch (e: any) {
+      setActionMsg({ id, text: e.message || '网络异常', ok: false })
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  const filteredProposals = proposals.filter(p => {
+    if (proposalFilter === 'all') return true
+    return p.status === proposalFilter
+  })
 
   if (loading) {
     return <div className="p-6 text-muted-foreground">加载中...</div>
@@ -207,6 +343,152 @@ export default function Personas() {
             </div>
           )
         })}
+      </div>
+
+      {/* Phase 4b: 复盘提议与审批通道 */}
+      <div className="mt-10 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-panel-border pb-3">
+          <div>
+            <h2 className="text-xl font-bold text-foreground">配置变更提议与审批流 (Proposals)</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              复盘发现与元规则归纳 · 随机买点对照回测 · 审批生效闭环
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {['all', 'proposed', 'backtested', 'approved', 'observe', 'rejected'].map(st => (
+              <button
+                key={st}
+                onClick={() => setProposalFilter(st)}
+                className={`text-xs px-2.5 py-1 rounded transition-colors ${
+                  proposalFilter === st
+                    ? 'bg-accent text-accent-foreground font-semibold'
+                    : 'bg-panel-border/40 text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {st === 'all' ? '全部' : statusLabel(st)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {filteredProposals.length === 0 ? (
+          <div className="data-card text-center py-8 text-sm text-muted-foreground">
+            暂无符合条件的复盘提议
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {filteredProposals.map(p => {
+              let parsedChange = p.change
+              if (!parsedChange && p.change_json) {
+                try { parsedChange = JSON.parse(p.change_json) } catch {}
+              }
+              let parsedReport: any = null
+              if (p.backtest_report) {
+                try { parsedReport = JSON.parse(p.backtest_report) } catch {}
+              }
+              const isLoading = actionLoading === p.proposal_id
+              const msg = actionMsg?.id === p.proposal_id ? actionMsg : null
+
+              return (
+                <div key={p.proposal_id} className="data-card p-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-xs font-bold text-foreground">{p.proposal_id}</span>
+                      <span className="text-[11px] font-mono text-muted-foreground">[{p.persona_id}]</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-border/70 text-muted-foreground">
+                        {kindLabel(p.kind)}
+                      </span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded font-medium ${statusBadge(p.status)}`}>
+                        {statusLabel(p.status)}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-muted-foreground font-mono">
+                      {p.created_at ? p.created_at.slice(0, 16).replace('T', ' ') : ''}
+                    </div>
+                  </div>
+
+                  <div className="text-sm text-foreground/90">
+                    <span className="font-semibold text-muted-foreground text-xs mr-2">调整理由:</span>
+                    {p.rationale}
+                  </div>
+
+                  {parsedChange && Object.keys(parsedChange).length > 0 && (
+                    <div className="bg-background/50 rounded p-2 text-xs font-mono text-foreground/80 overflow-x-auto">
+                      <span className="text-[10px] uppercase text-muted-foreground block mb-1">提议变更项</span>
+                      <pre className="text-[11px]">{JSON.stringify(parsedChange, null, 2)}</pre>
+                    </div>
+                  )}
+
+                  {parsedReport && (
+                    <div className="bg-panel-border/20 border border-panel-border/50 rounded p-2.5 text-xs space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-muted-foreground text-[11px]">随机买点对照检验 (Benchmark)</span>
+                        <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                          parsedReport.passed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'
+                        }`}>
+                          {parsedReport.passed ? '对照通过 (显著优于随机买点)' : '未显著优于随机分布'}
+                        </span>
+                      </div>
+                      {parsedReport.benchmark && (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono pt-1 text-muted-foreground">
+                          <div>策略均值: <span className="text-foreground font-semibold">{parsedReport.benchmark.strategy_mean_pct}%</span></div>
+                          <div>随机均值: <span className="text-foreground font-semibold">{parsedReport.benchmark.random_mean_pct}%</span></div>
+                          <div>超额收益: <span className="text-bullish font-semibold">+{parsedReport.benchmark.edge_pct}%</span></div>
+                          <div>超额分位: <span className="text-foreground font-semibold">{(parsedReport.benchmark.percentile * 100).toFixed(0)}%</span></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {msg && (
+                    <div className={`text-xs px-2 py-1 rounded ${msg.ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                      {msg.text}
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 pt-1 flex-wrap">
+                    {p.status === 'proposed' && (
+                      <button
+                        disabled={isLoading}
+                        onClick={() => handleBacktest(p.proposal_id)}
+                        className="text-xs px-2.5 py-1 rounded bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
+                      >
+                        {isLoading ? '回测中...' : '运行随机买点回测'}
+                      </button>
+                    )}
+                    {(p.status === 'proposed' || p.status === 'backtested') && (
+                      <>
+                        <button
+                          disabled={isLoading}
+                          onClick={() => handleReview(p.proposal_id, 'approved')}
+                          className="text-xs px-2.5 py-1 rounded bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors disabled:opacity-50 font-medium"
+                        >
+                          批准提议
+                        </button>
+                        <button
+                          disabled={isLoading}
+                          onClick={() => handleReview(p.proposal_id, 'rejected')}
+                          className="text-xs px-2.5 py-1 rounded bg-rose-500/15 text-rose-400 hover:bg-rose-500/25 transition-colors disabled:opacity-50"
+                        >
+                          驳回提议
+                        </button>
+                      </>
+                    )}
+                    {p.status === 'approved' && (
+                      <button
+                        disabled={isLoading}
+                        onClick={() => handleApply(p.proposal_id)}
+                        className="text-xs px-2.5 py-1 rounded bg-accent text-accent-foreground hover:bg-accent/80 transition-colors disabled:opacity-50 font-semibold"
+                      >
+                        {isLoading ? '应用中...' : '导出并应用到 wheels.yaml'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )
