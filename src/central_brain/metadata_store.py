@@ -1782,11 +1782,13 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         self._auto_commit()
 
     def cancel_wheel_events_for_position(self, position_id: str) -> int:
-        """持仓平掉后，作废其所有在途后续事件。"""
+        """持仓平掉后，作废其所有在途后续观察事件（记账类事件 position.*/account.* 不作废）。"""
         conn = self._conn()
         cur = conn.execute(
             """UPDATE wheel_events SET status = 'cancelled', finished_at = ?
             WHERE status = 'due'
+              AND type NOT LIKE 'position.%'
+              AND type NOT LIKE 'account.%'
               AND json_extract(subject_json, '$.position_id') = ?""",
             (datetime.now().isoformat(), position_id),
         )

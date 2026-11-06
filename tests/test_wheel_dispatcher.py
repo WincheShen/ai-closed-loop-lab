@@ -2149,3 +2149,34 @@ def test_wheel_entry_shadow_node_live_defend_saves_watchlist(tmp_path, monkeypat
     out = wf.run_wheel_entry_shadow_node(state)
     assert [s["action"] for s in out["trade_signals"]] == ["sell"]
     assert [s["signal_id"] for s in saved] == ["S1"]
+
+
+def test_cancel_wheel_events_exempts_position_closed(tmp_path):
+    """cancel_wheel_events_for_position 只能作废后续观察事件，不得误杀 position.closed 等记账事件。"""
+    brain = _MockBrain(tmp_path)
+    now = datetime.now()
+    # 模拟在途后续事件
+    brain.store.insert_wheel_event({
+        "event_id": "wev-fu-1", "type": "followup.morning_watch",
+        "due_at": now.isoformat(), "subject": {"position_id": "POS-CL"},
+        "source": "test",
+    })
+    # 模拟平仓产生的记账事件
+    brain.store.insert_wheel_event({
+        "event_id": "position.closed|POS-CL", "type": "position.closed",
+        "due_at": now.isoformat(), "subject": {"position_id": "POS-CL"},
+        "source": "test",
+    })
+    n = brain.store.cancel_wheel_events_for_position("POS-CL")
+    assert n == 1  # 仅作废了 1 个 followup 事件
+
+    row_fu = brain.store._conn().execute(
+        "SELECT status FROM wheel_events WHERE event_id = 'wev-fu-1'",
+    ).fetchone()
+    assert row_fu["status"] == "cancelled"
+
+    row_pc = brain.store._conn().execute(
+        "SELECT status FROM wheel_events WHERE event_id = 'position.closed|POS-CL'",
+    ).fetchone()
+    assert row_pc["status"] == "due"
+
