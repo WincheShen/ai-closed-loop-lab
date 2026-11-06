@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 from typing import Optional
 
 from stock_analyzer.pipelines.daily_scan import DailyPicks, RecommendedStock

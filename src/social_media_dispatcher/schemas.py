@@ -6,7 +6,6 @@ TopicPayload 是与 Social-media-automation 之间的唯一接口契约。
 from __future__ import annotations
 
 from datetime import date, datetime
-from pathlib import Path
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
