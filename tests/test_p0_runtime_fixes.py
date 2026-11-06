@@ -144,12 +144,12 @@ async def test_reduce_capped_once_per_day(tmp_path):
 _VALUE_POS = {
     "position_id": "POS-V", "symbol": "600809", "persona_id": "warren_buffett_v1",
     "entry_price": 123.75, "stop_loss": 92.8, "target_price": 200.0,
-    "entry_date": "2026-08-03", "strategy_id": "value_investing",
+    "entry_date": (date.today() - timedelta(days=20)).isoformat(), "strategy_id": "value_investing",
 }
 _SHORT_POS = {
     "position_id": "POS-S", "symbol": "301626", "persona_id": "short_term_hot_rotation_v1",
     "entry_price": 100.0, "stop_loss": 85.0, "target_price": 120.0,
-    "entry_date": "2026-08-18", "strategy_id": "hot_sector_pullback",
+    "entry_date": (date.today() - timedelta(days=10)).isoformat(), "strategy_id": "hot_sector_pullback",
 }
 
 

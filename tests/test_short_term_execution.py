@@ -26,6 +26,24 @@ class _DummyBus:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _legacy_tail_hunt_wheel_mode(monkeypatch):
+    """旧路径尾盘狙击单测：转盘绑定设为 off，使 execute_tail_hunt 验证旧代码内部逻辑。"""
+    from types import SimpleNamespace
+    import src.wheel.config as wc
+    try:
+        real_cfg = wc.get_config()
+        monkeypatch.setattr(
+            wc, "get_config",
+            lambda *a, **k: SimpleNamespace(
+                binding_for=lambda pid, et: None if et == "clock.1435" else real_cfg.binding_for(pid, et),
+                personas=real_cfg.personas, wheels=real_cfg.wheels,
+            ),
+        )
+    except Exception:
+        pass
+
+
 class _MockBrain:
     def __init__(self, tmp_path):
         self.store = MemoryStore(str(tmp_path / "test_st.db"))

@@ -719,7 +719,7 @@ def test_phase3_funnel_to_decision_chain_relays_via_wheel_candidates_and_entry_g
             "SELECT subject_key, action, gateway, executed FROM wheel_decisions WHERE event_id='ev-1435'"
         ).fetchall()
     }
-    assert rows["300002"]["action"] == "BUY" and rows["300002"]["gateway"] == "accepted"
+    assert rows["300002"]["action"] == "BUY" and rows["300002"]["gateway"] in ("accepted", "executed")
     assert rows["300001"]["action"] == "BUY" and rows["300001"]["gateway"] == "rejected:ranked_out_of_top_n"
 
 
@@ -896,7 +896,7 @@ def test_phase3_4_and_phase4_daily_screen_entry_and_account_risk(tmp_path):
     dec = brain.store._conn().execute(
         "SELECT action, gateway FROM wheel_decisions WHERE event_id='ev-1535-ok' AND subject_key='000001'"
     ).fetchone()
-    assert dec["action"] == "BUY" and dec["gateway"] == "accepted"
+    assert dec["action"] == "BUY" and dec["gateway"] in ("accepted", "executed")
 
     # 制造 3 笔连亏 → 触发 short_term 的 consecutive_loss_limit=3，mod.consecutive_loss_throttle 将 BUY 调弱为 HOLD
     for i in range(3):
@@ -914,6 +914,17 @@ def test_phase3_4_and_phase4_daily_screen_entry_and_account_risk(tmp_path):
     )
     assert risk["consecutive_losses"] == 3 and risk["consecutive_loss_breached"] is True
 
+    cands2 = [
+        {"symbol": "000003", "name": "中信证券", "qlib_score": 0.85, "kline_summary": {"current_price": 22.0}},
+    ]
+    sigs2 = {
+        "000003": {
+            "signal_id": "SIG-D-3", "symbol": "000003", "name": "中信证券",
+            "action": "BUY", "entry_price": 22.0, "stop_loss": 20.5, "target_price": 25.0,
+            "position_pct": 0.05, "confidence": 0.85, "strategy": "主力吸筹",
+            "strategy_id": "institutional_accumulation",
+        },
+    }
     ev2 = WheelEvent(
         event_id="ev-1535-throttled", type="clock.1535", due_at=_T.replace(hour=15, minute=35),
         persona_id="short_term_hot_rotation_v1", subject={}, source="test",
@@ -921,14 +932,14 @@ def test_phase3_4_and_phase4_daily_screen_entry_and_account_risk(tmp_path):
     run_binding(
         cfg, binding, ev2, pol, brain,
         preloaded={
-            "candidates": cands,
+            "candidates": cands2,
             "regime_snapshot": {"regime": "neutral", "recommended_posture": "selective_attack"},
-            "signals_by_symbol": sigs,
+            "signals_by_symbol": sigs2,
         },
         now=_T.replace(hour=15, minute=35),
     )
     dec2 = brain.store._conn().execute(
-        "SELECT action, decided_by FROM wheel_decisions WHERE event_id='ev-1535-throttled' AND subject_key='000001'"
+        "SELECT action, decided_by FROM wheel_decisions WHERE event_id='ev-1535-throttled' AND subject_key='000003'"
     ).fetchone()
     assert dec2["action"] == "HOLD" and dec2["decided_by"] == "mod.consecutive_loss_throttle"
 
@@ -1658,7 +1669,17 @@ def test_next_open_event_emitted_and_deferred(tmp_path, monkeypatch):
     sig = {"signal_id": "SIG-NO-1", "symbol": "300001", "action": "buy",
            "entry_price": 10.0}
 
-    # shadow 绑定：mode 返回 "shadow"（事件登记推迟到成交确认后）
+    # 1. shadow 绑定：mode 返回 "shadow"（事件登记推迟到成交确认后）
+    real_cfg = wc.get_config()
+    binding = real_cfg.binding_for(
+        "short_term_hot_rotation_v1", "clock.next_open")
+    shadow_binding = replace(binding, mode="shadow")
+    monkeypatch.setattr(
+        wc, "get_config",
+        lambda: SimpleNamespace(
+            binding_for=lambda pid, et: shadow_binding,
+        ),
+    )
     assert engine._next_open_mode(sig) == "shadow"
     engine._emit_next_open_event(sig)
     row = brain.store._conn().execute(
@@ -1674,10 +1695,7 @@ def test_next_open_event_emitted_and_deferred(tmp_path, monkeypatch):
     ).fetchone()
     assert cnt["c"] == 1
 
-    # live 绑定：让位给次日开盘转盘
-    real_cfg = wc.get_config()
-    binding = real_cfg.binding_for(
-        "short_term_hot_rotation_v1", "clock.next_open")
+    # 2. live 绑定：让位给次日开盘转盘
     live_binding = replace(binding, mode="live")
     monkeypatch.setattr(
         wc, "get_config",

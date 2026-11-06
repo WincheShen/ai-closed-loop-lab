@@ -162,12 +162,12 @@ personas:
       clock.intraday_5m:  { wheel: exit_confirm, mode: live }
       clock.intraday_30m: { wheel: llm_position_review, mode: live }
       market.regime_drift: { wheel: urgent_review, mode: shadow }
-      clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
-      clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
-      clock.1535:         { chain: [market_screen, entry_confirm], mode: shadow }
-      position.closed:    { wheel: attribution, mode: shadow }
-      clock.1530:         { wheel: watchlist_maintain, mode: shadow }
-      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
+      clock.next_open:    { wheel: order_fill_at_open, mode: live }
+      clock.pending_5m:   { wheel: pending_trigger, mode: live }
+      clock.1535:         { chain: [market_screen, entry_confirm], mode: live }
+      position.closed:    { wheel: attribution, mode: live }
+      clock.1530:         { wheel: watchlist_maintain, mode: live }
+      clock.weekly:       { wheel: weekly_reflection, mode: live }
 
   ultra_short_momentum_v1:
     kind: ultra
@@ -176,10 +176,10 @@ personas:
       clock.0935:         { wheel: morning_watch, mode: shadow }
       followup.morning_watch: { wheel: morning_watch, mode: shadow }
       clock.1430:         { wheel: overnight_force_close, mode: live }
-      clock.1435:         { chain: [market_screen_ultra, entry_confirm_ultra], mode: shadow }
-      position.closed:    { wheel: attribution, mode: shadow }
-      clock.1530:         { wheel: watchlist_maintain, mode: shadow }
-      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
+      clock.1435:         { chain: [market_screen_ultra, entry_confirm_ultra], mode: live }
+      position.closed:    { wheel: attribution, mode: live }
+      clock.1530:         { wheel: watchlist_maintain, mode: live }
+      clock.weekly:       { wheel: weekly_reflection, mode: live }
       # 无 clock.intraday_30m 与 market.regime_drift 绑定 — LLM 复审对隔夜客在结构上不存在
 
   duan_yongping_v1:
@@ -188,11 +188,11 @@ personas:
       clock.intraday_5m:  { wheel: exit_confirm, mode: live }
       clock.intraday_30m: { wheel: llm_position_review, mode: live }
       market.regime_drift: { wheel: urgent_review, mode: shadow }
-      clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
-      clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
-      clock.1535:         { chain: [market_screen, entry_confirm], mode: shadow }
-      position.closed:    { wheel: attribution, mode: shadow }
-      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
+      clock.next_open:    { wheel: order_fill_at_open, mode: live }
+      clock.pending_5m:   { wheel: pending_trigger, mode: live }
+      clock.1535:         { chain: [market_screen, entry_confirm], mode: live }
+      position.closed:    { wheel: attribution, mode: live }
+      clock.weekly:       { wheel: weekly_reflection, mode: live }
 
   warren_buffett_v1:
     kind: value
@@ -200,8 +200,8 @@ personas:
       clock.intraday_5m:  { wheel: exit_confirm, mode: live }
       clock.intraday_30m: { wheel: llm_position_review, mode: live }
       market.regime_drift: { wheel: urgent_review, mode: shadow }
-      clock.next_open:    { wheel: order_fill_at_open, mode: shadow }
-      clock.pending_5m:   { wheel: pending_trigger, mode: shadow }
-      clock.1535:         { chain: [market_screen, entry_confirm], mode: shadow }
-      position.closed:    { wheel: attribution, mode: shadow }
-      clock.weekly:       { wheel: weekly_reflection, mode: shadow }
+      clock.next_open:    { wheel: order_fill_at_open, mode: live }
+      clock.pending_5m:   { wheel: pending_trigger, mode: live }
+      clock.1535:         { chain: [market_screen, entry_confirm], mode: live }
+      position.closed:    { wheel: attribution, mode: live }
+      clock.weekly:       { wheel: weekly_reflection, mode: live }
