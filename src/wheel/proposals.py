@@ -119,22 +119,12 @@ def backtest_proposal(
     persona_id = prop.get("persona_id") or ""
     # 读取历史平仓收益率分布
     try:
-        rows = store._conn().execute(
-            """SELECT pnl_pct FROM trade_attributions
-            WHERE (persona_id = ? OR COALESCE(persona_id, '') = '')
-              AND pnl_pct IS NOT NULL
-            ORDER BY created_at DESC LIMIT 200""",
-            (persona_id,),
-        ).fetchall()
-        strat_returns = [float(r["pnl_pct"]) for r in rows if r["pnl_pct"] is not None]
+        strat_returns = store.get_attribution_returns(persona_id=persona_id, limit=200)
     except Exception:  # noqa: BLE001
         strat_returns = []
 
     try:
-        u_rows = store._conn().execute(
-            "SELECT pnl_pct FROM trade_attributions WHERE pnl_pct IS NOT NULL LIMIT 500",
-        ).fetchall()
-        universe_returns = [float(r["pnl_pct"]) for r in u_rows if r["pnl_pct"] is not None]
+        universe_returns = store.get_attribution_returns(limit=500)
     except Exception:  # noqa: BLE001
         universe_returns = []
 

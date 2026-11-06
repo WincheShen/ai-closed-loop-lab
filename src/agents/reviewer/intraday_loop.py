@@ -190,16 +190,9 @@ async def run_intraday_review(
 
 def _wheel_decision_executed(brain, decision_id: str | None) -> bool:
     """查询 wheel_decisions.executed — 只有网关真实成交才算执行。"""
-    if not decision_id:
+    if not decision_id or not brain or not hasattr(brain, "store"):
         return False
-    try:
-        row = brain.store._conn().execute(
-            "SELECT executed FROM wheel_decisions WHERE decision_id = ?",
-            (decision_id,),
-        ).fetchone()
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(row and row["executed"])
+    return brain.store.is_wheel_decision_executed(decision_id)
 
 
 async def _check_pending_signals(

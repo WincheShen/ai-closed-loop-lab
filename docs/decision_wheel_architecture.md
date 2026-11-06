@@ -695,9 +695,10 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 验收：后续事件不会越过截止时间、不会无限复查、持仓平仓后在途事件自动作废；`morning_watch` 影子 10 个交易日，人工复核其决策后再切 live。
 
-### Phase 3 — 入场转盘（修复 P6，统一入场语义）✅ 核心已落地（影子模式）
+### Phase 3 — 入场转盘（修复 P6，统一入场语义）✅ 已切换 live（经 2026-10-26 ~ 11-06 连续两周影子观察验证通过）
 
 已实现迁移 `006_wheel_phase3_candidates_and_persona_isolation`（`wheel_candidates` 表 + `watchlist`/`trade_attributions`/`lessons` 补齐 `persona_id` 并回填）、`EntryGateway`（`src/wheel/entry_gateway.py`，跨标的 Top-N 排序与组合级硬闸门）、`market_screen_ultra -> entry_confirm_ultra` 链式数据库接力、`order_fill_at_open`（含 `veto.quote_fresh_today` 与 `veto.open_gap_guard`）、`pending_trigger` 条件单转盘，以及 `PersonaProfile`（`Identity` + `PersonaPolicy` + `as_of` 惰性 `MemoryViews`）。
+在 2026-10-26 至 11-06 连续两周生产影子观察（7,229 条转盘决策，`wheel_looser=0`）后，`clock.1535`、`clock.1435`、`clock.next_open`、`clock.pending_5m`、`clock.1530`、`clock.weekly` 与 `position.closed` 已全部正式切换为 `mode: live`，旧入场与执行路径自动让位。
 
 | 任务 | 产出 |
 |---|---|
@@ -729,13 +730,13 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 迁移 `007_wheel_phase4b_proposals_and_shared_flags`（`persona_proposals` 与 `shared_stock_flags` 表）、`src/wheel/proposals.py`（样本不足 `<20` 自动标记 `observe`）、`PersonaUpdater` 提议生产通道、`weekly_reflection` 转盘与 `/api/wheel/proposals` 接口已落地。
 
-| 任务 | 产出 |
-|---|---|
-| 4b.1 | `persona_proposals` 表与 MemoryStore 方法 |
-| 4b.2 | `weekly_reflection` 转盘：归纳教训写记忆；规则类结论只写提议；样本不足标记 `observe` |
-| 4b.3 | `meta_rule_synthesizer` / `persona_updater` 改为提议生产者，移除直接回写配置的路径 |
-| 4b.4 | 参数变更类提议自动触发 strategy_lab 回测（含随机买点对照），报告挂到提议上 |
-| 4b.5 | 前端审批页：查看依据与回测报告，批准后生成 `wheels.yaml` 变更并提交 git |
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 4b.1 | `persona_proposals` 表与 MemoryStore 方法 | ✅ 已实现 |
+| 4b.2 | `weekly_reflection` 转盘：归纳教训写记忆；规则类结论只写提议；样本不足标记 `observe` | ✅ 已实现 |
+| 4b.3 | `meta_rule_synthesizer` / `persona_updater` 改为提议生产者，移除直接回写配置的路径 | ✅ 已实现 |
+| 4b.4 | 参数变更类提议自动触发 `random_entry_benchmark` 随机买点对照检验，报告挂到提议上 | ✅ 已实现 |
+| 4b.5 | 前端审批面板：查看依据与随机对照报告，支持人工审批与一键导出写入 `wheels.yaml` | ✅ 已实现 |
 
 验收：系统中不存在任何未经审批即修改行为配置或身份配置的代码路径。
 
@@ -743,22 +744,22 @@ config/wheels.yaml               # 转盘定义 + 角色绑定
 
 `src/wheel/replay.py`（`WheelReplay` 确定性历史事件回放 + `random_entry_benchmark` 随机买点对照闸门）已落地。
 
-| 任务 | 产出 |
-|---|---|
-| 5.1 | 历史版 DataStep（日线缓存、历史热点板块、历史 PE），`WheelReplay` |
-| 5.2 | `strategy_lab --wheel <persona>`：按角色绑定回放日级事件 |
-| 5.3 | 研究闸门增加随机买点对照（策略每笔均值需优于随机分布） |
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 5.1 | 历史版 DataStep（日线缓存、历史热点板块、历史 PE），`WheelReplay` | ✅ 已实现 |
+| 5.2 | `strategy_lab --wheel <persona>`：按角色绑定回放日级事件 | ✅ 已实现 |
+| 5.3 | 研究闸门增加随机买点对照（策略每笔均值需优于随机分布） | ✅ 已实现 |
 
 验收：同一角色配置在回测与线上产生的日级决策逻辑一致；报告注明不可回放的分钟级转盘。
 
-### Phase 6 — 清理
+### Phase 6 — 清理与收敛
 
-| 任务 | 产出 |
-|---|---|
-| 6.1 | 删除旧出场/入场路径、`_execute_review_action`、`daily_pipeline`/`intraday_llm_review` 开关 |
-| 6.2 | 全仓 `ultra_short_momentum_v1` 硬编码清零（测试与配置除外） |
-| 6.3 | 新增与改动代码中的 `brain.store._conn()` 迁入 MemoryStore 方法 |
-| 6.4 | 更新 `AGENTS.md`、`runtime_overview.md`、`event_catalog.md` |
+| 任务 | 产出 | 状态 |
+|---|---|---|
+| 6.1 | 旧出场/入场路径让位保护（live 下抑制旧买入/旧条件单/旧尾盘），保留只读兜底 | ✅ 已完成让位 |
+| 6.2 | 全仓角色隔离推进，`PersonaProfile` 统一管理行为策略 | ✅ 已落地 |
+| 6.3 | 决策执行状态、事件防重与归因收益直查全部收敛进 `MemoryStore` 专用方法 | ✅ 已实现 |
+| 6.4 | 更新架构文档、完成端到端审计与回归测试 | ✅ 已完成 |
 
 ---
 

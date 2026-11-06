@@ -320,12 +320,7 @@ async def run_daily_pipeline(
     if not result.get("target_stocks"):
         pid = result.get("persona_id") or "short_term_hot_rotation_v1"
         try:
-            row = brain.store._conn().execute(
-                "SELECT COUNT(*) AS c FROM events "
-                "WHERE agent = 'wheel' AND session_id LIKE ? AND created_at LIKE ?",
-                (f"wev-clock.1535-%-{pid}", f"{datetime.now():%Y-%m-%d}%"),
-            ).fetchone()
-            wheel_already_ran = bool(row and row["c"])
+            wheel_already_ran = brain.store.has_wheel_event_run_today("clock.1535", pid)
         except Exception:  # noqa: BLE001
             wheel_already_ran = True  # 查不出来时宁可不跑，避免重复评估
         if not wheel_already_ran:

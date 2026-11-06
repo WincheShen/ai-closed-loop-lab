@@ -445,12 +445,10 @@ class StockCooldownAndSuspendVetoFactor:
                 return Opinion(factor=self.name, verdict="veto", reason=f"{symbol} 处于个股冷却期")
             if strategy_id and ctx.brain is not None:
                 # 回放时钟：只读 ctx.now 当日及之前的 regime 快照
-                row = ctx.brain.store._conn().execute(
-                    "SELECT regime FROM market_regime_snapshots WHERE trade_date <= ? "
-                    "ORDER BY trade_date DESC, created_at DESC LIMIT 1",
-                    (ctx.now.date().isoformat(),),
-                ).fetchone()
-                cur_regime = (row["regime"] if row else "") or ""
+                snap = ctx.brain.store.latest_market_regime(
+                    as_of=ctx.now.date().isoformat(),
+                )
+                cur_regime = (snap.get("regime") if snap else "") or ""
                 if cur_regime:
                     stats = exp.get_strategy_stats(
                         strategy_id, regime=cur_regime, persona_id=persona_id,

@@ -748,12 +748,18 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
         )
         self._auto_commit()
 
-    def latest_market_regime(self) -> dict | None:
-        """获取最近一次的 market regime 快照。"""
+    def latest_market_regime(self, as_of: str | None = None) -> dict | None:
+        """获取最近一次的 market regime 快照（支持 as_of 日期截断）。"""
         conn = self._conn()
-        row = conn.execute(
-            "SELECT * FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
+        if as_of:
+            row = conn.execute(
+                "SELECT * FROM market_regime_snapshots WHERE trade_date <= ? ORDER BY trade_date DESC, created_at DESC LIMIT 1",
+                (as_of,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
         return dict(row) if row else None
 
     def save_risk_decision(self, session_id: str, decision: dict) -> None:
@@ -1974,6 +1980,50 @@ class MemoryStore(SignalRepoMixin, PositionRepoMixin):
             (decision_id,),
         )
         self._auto_commit()
+
+    def is_wheel_decision_executed(self, decision_id: str | None) -> bool:
+        """查询决策是否真正经网关执行成交。"""
+        if not decision_id:
+            return False
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT executed FROM wheel_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        return bool(row and row["executed"])
+
+    def has_wheel_event_run_today(
+        self, event_prefix: str, persona_id: str, today: str | None = None,
+    ) -> bool:
+        """检查指定角色今日是否已运行过指定转盘事件（防异常回退时重跑）。"""
+        conn = self._conn()
+        day_str = today or datetime.now().strftime("%Y-%m-%d")
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM events "
+            "WHERE agent = 'wheel' AND session_id LIKE ? AND created_at LIKE ?",
+            (f"wev-{event_prefix}-%-{persona_id}", f"{day_str}%"),
+        ).fetchone()
+        return bool(row and row["c"])
+
+    def get_attribution_returns(
+        self, persona_id: str | None = None, limit: int = 200,
+    ) -> list[float]:
+        """读取历史归因平仓盈亏百分比分布。"""
+        conn = self._conn()
+        if persona_id:
+            rows = conn.execute(
+                """SELECT pnl_pct FROM trade_attributions
+                WHERE (persona_id = ? OR COALESCE(persona_id, '') = '')
+                  AND pnl_pct IS NOT NULL
+                ORDER BY created_at DESC LIMIT ?""",
+                (persona_id, int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT pnl_pct FROM trade_attributions WHERE pnl_pct IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [float(r["pnl_pct"]) for r in rows if r["pnl_pct"] is not None]
 
     def list_wheel_decisions(
         self,
